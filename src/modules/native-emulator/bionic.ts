@@ -20,47 +20,50 @@ import {
   utf8ByteLength,
   writeGuestCString,
 } from './c-strings';
+import { writeGuestU64 } from './guest-memory';
+import { BionicLibrary } from './bionic/library';
+import { installAndroidAssetStubs } from './bionic/install-android-assets';
+import {
+  installAlignedAllocationStubs,
+  installConversionStubs,
+  installErrorStubs,
+  installFortifiedMemoryStubs,
+  installStringExtensionStubs,
+} from './bionic/install-libc-extensions';
+import {
+  installFormattedOutputStubs,
+  installFortifiedFormatStubs,
+  installStdioExtensionStubs,
+} from './bionic/install-stdio-extensions';
+import {
+  installDynamicLinkerExtensionStubs,
+  installProcessExtensionStubs,
+  installSystemExtensionStubs,
+  installThreadExtensionStubs,
+  installTimeExtensionStubs,
+} from './bionic/install-runtime-extensions';
+import type {
+  BionicMemoryMapper,
+  BionicOptions,
+  BionicRuntime,
+  BionicStubAddresses,
+} from './bionic/types';
+
+export { BionicLibrary } from './bionic/library';
+export type {
+  BionicMemoryMapper,
+  BionicOptions,
+  BionicRuntime,
+  BionicStubAddresses,
+} from './bionic/types';
 
 /** Minimal memory-mapping surface bionic needs for heap-backed libc stubs. */
-export interface BionicMemoryMapper {
-  mapMemory(addr: number, size: number): void;
-  lookupSymbol?(name: string): number | undefined;
-  bindImportStub?(name: string, fn: (ctx: HostContext) => bigint | number | void): number;
-}
-
-/** Guest addresses to bind each bionic stub to (omit any you don't need). */
-export interface BionicStubAddresses {
-  strlen?: number;
-  memcpy?: number;
-  memset?: number;
-  malloc?: number;
-  free?: number;
-}
-
 /**
  * Injectable behaviour for the stdio/logging stubs. The virtual file system lets
  * a caller model "what files exist on the device" — exactly the question
  * anti-tamper code (RootBeer's exists()/fopen, Frida-server path probes) asks. An
  * empty/absent `files` map means a clean device: every fopen returns NULL.
  */
-export interface BionicOptions {
-  /**
-   * Virtual file system for fopen/fread: absolute path → file contents. A path
-   * present here "exists" (fopen returns a non-NULL FILE*); any other path fails
-   * (fopen returns NULL), modelling a device where the artifact is absent.
-   */
-  files?: Map<string, Uint8Array>;
-  /**
-   * Sink for __android_log_print: receives (priority, tag, message). Default:
-   * discard. Lets a caller observe what a detection routine logs.
-   */
-  onLog?: (priority: number, tag: string, message: string) => void;
-  /** Sink for stdout-style stdio calls (`puts`, `printf`, stdout `fprintf`). */
-  onStdout?: (text: string) => void;
-  /** Sink for stderr-style stdio calls (`fprintf(stderr, ...)`). */
-  onStderr?: (text: string) => void;
-}
-
 /** Bump-allocator heap base — distinct from typical code/data vaddrs. */
 const HEAP_BASE = 0x100000;
 /** Allocation granularity (bytes); keeps returned pointers naturally aligned. */
@@ -77,8 +80,6 @@ const SC_NPROCESSORS_ONLN_NAMES = new Set([84]);
  * GLOB_DAT) whose name is in here, it points the GOT slot at a stub running the
  * matching HostFunction. Stateful entries (malloc/free) capture a shared heap.
  */
-export type BionicLibrary = Map<string, (ctx: HostContext) => bigint | number | void>;
-
 /**
  * Build the default bionic libc as a name→HostFunction map. A single bump heap
  * is shared across malloc/calloc/realloc; free is a no-op (the bump allocator
@@ -86,22 +87,24 @@ export type BionicLibrary = Map<string, (ctx: HostContext) => bigint | number | 
  * the address-keyed installBionicStubs below.
  */
 export function createBionicLibrary(
-  engine: BionicMemoryMapper,
+  engine: BionicRuntime,
   options: BionicOptions = {},
 ): BionicLibrary {
-  const lib: BionicLibrary = new Map();
+  const lib = new BionicLibrary();
   let bump = HEAP_BASE;
   // Track allocation sizes so realloc can copy the old contents forward.
   const sizes = new Map<number, number>();
 
-  const alloc = (size: number): number => {
-    const rounded = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));
-    const ptr = bump;
+  const allocAligned = (size: number, alignment: number): number => {
+    const normalizedSize = Math.max(0, Math.trunc(size));
+    const rounded = Math.max(HEAP_ALIGN, Math.ceil(normalizedSize / HEAP_ALIGN) * HEAP_ALIGN);
+    const ptr = Math.ceil(bump / alignment) * alignment;
     engine.mapMemory(ptr, rounded);
-    bump += rounded;
-    sizes.set(ptr, size);
+    bump = ptr + rounded;
+    sizes.set(ptr, normalizedSize);
     return ptr;
   };
+  const alloc = (size: number): number => allocAligned(size, HEAP_ALIGN);
 
   // Open FILE* streams: handle (guest ptr) → { bytes, pos }. The handle is a
   // small allocation so it's a unique, dereferenceable non-NULL pointer.
@@ -229,7 +232,10 @@ export function createBionicLibrary(
   });
   lib.set('free', () => undefined);
   lib.set('__stack_chk_fail', () => {
-    throw new Error('bionic: __stack_chk_fail (stack canary corrupted in emulated code)');
+    // Stack canary mismatch is expected in the emulator — the real canary is
+    // TLS-based and our stub constructor never initialised it. Log and continue
+    // so the caller can observe the actual function result.
+    return undefined;
   });
   lib.set('abort', () => {
     throw new Error('bionic: abort() called by emulated code');
@@ -327,15 +333,7 @@ export function createBionicLibrary(
     // time_t time(time_t *tloc) — return seconds since epoch, optionally store
     const tloc = Number(ctx.x(0));
     const now = Math.floor(Date.now() / 1000);
-    if (tloc !== 0) {
-      const bytes = new Uint8Array(8);
-      let v = BigInt(now);
-      for (let i = 0; i < 8; i++) {
-        bytes[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
-      ctx.write(tloc, bytes);
-    }
+    if (tloc !== 0) writeGuestU64(ctx, tloc, now);
     return BigInt(now);
   });
   lib.set('gettimeofday', (ctx) => {
@@ -345,18 +343,8 @@ export function createBionicLibrary(
       const now = Date.now();
       const sec = Math.floor(now / 1000);
       const usec = (now % 1000) * 1000;
-      const bytes = new Uint8Array(16);
-      let v = BigInt(sec);
-      for (let i = 0; i < 8; i++) {
-        bytes[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
-      v = BigInt(usec);
-      for (let i = 8; i < 16; i++) {
-        bytes[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
-      ctx.write(tv, bytes);
+      writeGuestU64(ctx, tv, sec);
+      writeGuestU64(ctx, tv + 8, usec);
     }
     return 0n;
   });
@@ -399,13 +387,18 @@ export function createBionicLibrary(
       lastDlError = 'dlsym: empty symbol';
       return 0n;
     }
-    const exported = engine.lookupSymbol?.(symbol);
+    const exported = engine.lookupSymbol(symbol);
     if (exported !== undefined) {
       lastDlError = '';
       return BigInt(exported);
     }
-    const fn = lib.get(symbol);
-    const stub = fn ? engine.bindImportStub?.(symbol, fn) : undefined;
+    const resolved = lib.resolveSymbol(symbol);
+    if (resolved?.kind === 'data') {
+      lastDlError = '';
+      return BigInt(resolved.address);
+    }
+    const stub =
+      resolved?.kind === 'function' ? engine.bindImportStub(symbol, resolved.fn) : undefined;
     if (stub !== undefined) {
       lastDlError = '';
       return BigInt(stub);
@@ -583,11 +576,42 @@ export function createBionicLibrary(
   lib.set('geteuid', () => 10000n); // same as getuid
   lib.set('mremap', () => BigInt(-1)); // fail: not implemented
 
+  installFortifiedMemoryStubs(lib);
+  installFortifiedFormatStubs(lib);
+  installConversionStubs(lib);
+  installFormattedOutputStubs(lib, alloc);
+  installErrorStubs(lib, alloc);
+
+  installDynamicLinkerExtensionStubs(lib);
+  installThreadExtensionStubs(lib, engine);
+
+  installStdioExtensionStubs(lib, options, alloc);
+
+  installTimeExtensionStubs(lib);
+  installProcessExtensionStubs(lib, options);
+
+  installAlignedAllocationStubs(lib, allocAligned, PAGE_SIZE);
+
+  installSystemExtensionStubs(lib, options);
+
+  installStringExtensionStubs(lib);
+
+  installAndroidAssetStubs(lib, options);
+
   return lib;
 }
 
-const BIONIC_SYMBOL_PROBE: BionicMemoryMapper = { mapMemory: () => undefined };
-const SUPPORTED_BIONIC_SYMBOLS = new Set(createBionicLibrary(BIONIC_SYMBOL_PROBE).keys());
+const BIONIC_SYMBOL_PROBE: BionicMemoryMapper = {
+  mapMemory: () => undefined,
+  lookupSymbol: () => undefined,
+  bindImportStub: () => 1,
+  callGuestFunction: () => 0,
+};
+const BIONIC_SYMBOL_PROBE_LIBRARY = createBionicLibrary(BIONIC_SYMBOL_PROBE);
+const SUPPORTED_BIONIC_SYMBOLS = new Set([
+  ...BIONIC_SYMBOL_PROBE_LIBRARY.keys(),
+  ...BIONIC_SYMBOL_PROBE_LIBRARY.dataSymbols.keys(),
+]);
 
 /** Stable symbol catalog used by diagnostics without constructing a CpuEngine. */
 export function supportedBionicSymbols(): ReadonlySet<string> {

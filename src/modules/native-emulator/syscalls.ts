@@ -15,6 +15,7 @@
  * getpid 172, mmap 222, exit 93, exit_group 94.
  */
 import type { CpuEngine, SyscallContext } from './CpuEngine';
+import { writeGuestU64 } from './guest-memory';
 import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
 import { readGuestCString } from './c-strings';
 
@@ -216,13 +217,7 @@ function clockSecondsOf(opts: AndroidSyscallOptions): number {
 
 /** Write a 64-bit little-endian value to guest memory via the context. */
 function writeU64(ctx: SyscallContext, addr: number, value: number): void {
-  const bytes = new Uint8Array(8);
-  let v = BigInt(value);
-  for (let i = 0; i < 8; i++) {
-    bytes[i] = Number(v & 0xffn);
-    v >>= 8n;
-  }
-  ctx.write(addr, bytes);
+  writeGuestU64(ctx, addr, value);
 }
 
 /** struct timespec { long tv_sec; long tv_nsec; } — nsec left zero. */

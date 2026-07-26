@@ -313,3 +313,12 @@ describe('NEON three-same instructions (CpuEngine) — decode + execution', () =
     expect(new DataView(e.readVReg(0).buffer).getBigUint64(0, true)).toBe(5n);
   });
 });
+
+describe('NEON copy instructions', () => {
+  it('SMOV Wd sign-extends to 32 bits and clears the upper X bits', () => {
+    // SMOV W0, V1.B[0]: Q=0 selects the W-register destination form.
+    const smovW0V1B0 = (0x0e000000 | (1 << 16) | (0b0101 << 11) | (1 << 10) | (1 << 5)) >>> 0;
+    const engine = runOne((instance) => instance.writeVReg(1, v(0x80)), smovW0V1B0);
+    expect(engine.readGprValue(0)).toBe(0x00000000ffffff80n);
+  });
+});

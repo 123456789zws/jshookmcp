@@ -16,6 +16,7 @@
  */
 
 import type { ExecutionContext } from '../cpu/ExecutionContext';
+import type { HostContext } from '../host-context';
 
 /**
  * NullIndirectCallError — jump/call through a register holding 0.
@@ -73,21 +74,8 @@ export function execBranchSystem(
   ctx: ExecutionContext,
   insn: number,
   ensureTls: () => number,
-  hostContext: () => {
-    x: (i: number) => bigint;
-    setX: (i: number, v: bigint) => void;
-    read: (addr: number, len: number) => Uint8Array;
-    write: (addr: number, bytes: Uint8Array) => void;
-  },
-  syscalls: Map<
-    number,
-    (hctx: {
-      x: (i: number) => bigint;
-      setX: (i: number, v: bigint) => void;
-      read: (addr: number, len: number) => Uint8Array;
-      write: (addr: number, bytes: Uint8Array) => void;
-    }) => number | undefined
-  >,
+  hostContext: () => HostContext,
+  syscalls: Map<number, (hctx: HostContext) => number | undefined>,
 ): boolean {
   // B (unconditional branch): 000101 | imm26   → PC += SignExtend(imm26 << 2)
   if (insn >>> 26 === 0b000101) {

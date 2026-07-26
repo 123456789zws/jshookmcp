@@ -1728,7 +1728,33 @@ function execNeonCopy(ctx: SimdContext, f: SimdFields): boolean {
     ctx.vSetBytes(f.rd, dst);
     return true;
   }
-  return false; // INS (element), SMOV/UMOV not yet modelled
+  // op=0, imm4=0111 → UMOV: unsigned SIMD→GPR (zero-extend).
+  if (f.op29 === 0 && f.imm4 === 0b0111) {
+    const src = ctx.vGetBytes(f.rn);
+    const elemBytes = 1 << size;
+    const offset = index * elemBytes;
+    let value = 0n;
+    for (let b = elemBytes - 1; b >= 0; b--) {
+      value = (value << 8n) | BigInt(src[offset + b] ?? 0);
+    }
+    ctx.gprWrite(f.rd, value);
+    return true;
+  }
+  // op=0, imm4=0101 → SMOV: signed SIMD→GPR (sign-extend).
+  if (f.op29 === 0 && f.imm4 === 0b0101) {
+    const src = ctx.vGetBytes(f.rn);
+    const elemBytes = 1 << size;
+    const offset = index * elemBytes;
+    let value = 0n;
+    for (let b = elemBytes - 1; b >= 0; b--) {
+      value = (value << 8n) | BigInt(src[offset + b] ?? 0);
+    }
+    const signed = BigInt.asIntN(elemBytes * 8, value);
+    const destinationBits = f.q === 0 ? 32 : 64;
+    ctx.gprWrite(f.rd, BigInt.asUintN(destinationBits, signed));
+    return true;
+  }
+  return false; // INS (element) — op=1 variants
 }
 
 // ── NEON modified immediate: MOVI/MVNI/ORR/BIC (vector, immediate) ─────────

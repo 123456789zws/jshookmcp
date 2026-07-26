@@ -19,6 +19,7 @@ function makeCtx(mem: Uint8Array, regs: Array<bigint | number | void> = []): Hos
     setX: (i, v) => {
       x[i] = v;
     },
+    setD: () => undefined,
     read: (addr, len) => mem.subarray(addr, addr + len),
     write: (addr, bytes) => mem.set(bytes, addr),
   };
@@ -266,6 +267,7 @@ describe('bionic Android runtime/import stubs', () => {
       mapMemory: vi.fn(),
       lookupSymbol: (name: string) => (name === 'target_export' ? 0x123456 : undefined),
       bindImportStub: vi.fn(),
+      callGuestFunction: vi.fn(),
     };
     const lib = createBionicLibrary(mapper);
     const mem = new Uint8Array(256);

@@ -17,7 +17,9 @@
  * which is the honest signal that we need to add one).
  */
 import type { CpuEngine, HostContext } from './CpuEngine';
+import { Aarch64VaListReader } from './aarch64-va-list';
 import { readGuestCString } from './c-strings';
+import { encodeGuestU64, readGuestPointer, readGuestU64 } from './guest-memory';
 
 export const JNI_VERSION_1_6 = 0x00010006;
 
@@ -29,10 +31,20 @@ export const JNI_INDEX = {
   IsInstanceOf: 32,
   GetMethodID: 33,
   CallObjectMethod: 34,
+  CallObjectMethodV: 35,
+  CallObjectMethodA: 36,
   CallBooleanMethod: 37,
+  CallBooleanMethodV: 38,
+  CallBooleanMethodA: 39,
   CallIntMethod: 49,
-  CallLongMethod: 51,
+  CallIntMethodV: 50,
+  CallIntMethodA: 51,
+  CallLongMethod: 52,
+  CallLongMethodV: 53,
+  CallLongMethodA: 54,
   CallVoidMethod: 61,
+  CallVoidMethodV: 62,
+  CallVoidMethodA: 63,
   // Field access (instance).
   GetFieldID: 94,
   GetObjectField: 95,
@@ -45,10 +57,20 @@ export const JNI_INDEX = {
   SetLongField: 110,
   GetStaticMethodID: 113,
   CallStaticObjectMethod: 114,
+  CallStaticObjectMethodV: 115,
+  CallStaticObjectMethodA: 116,
   CallStaticBooleanMethod: 117,
-  CallStaticIntMethod: 119,
-  CallStaticLongMethod: 121,
-  CallStaticVoidMethod: 143,
+  CallStaticBooleanMethodV: 118,
+  CallStaticBooleanMethodA: 119,
+  CallStaticIntMethod: 129,
+  CallStaticIntMethodV: 130,
+  CallStaticIntMethodA: 131,
+  CallStaticLongMethod: 132,
+  CallStaticLongMethodV: 133,
+  CallStaticLongMethodA: 134,
+  CallStaticVoidMethod: 141,
+  CallStaticVoidMethodV: 142,
+  CallStaticVoidMethodA: 143,
   // Static field access.
   GetStaticFieldID: 144,
   GetStaticObjectField: 145,
@@ -74,6 +96,8 @@ export const JNI_INDEX = {
   SetByteArrayRegion: 209,
   RegisterNatives: 215,
   GetJavaVM: 219,
+  NewWeakGlobalRef: 226,
+  DeleteWeakGlobalRef: 227,
   // Exceptions.
   Throw: 13,
   ThrowNew: 14,
@@ -87,6 +111,12 @@ export const JNI_INDEX = {
   NewLocalRef: 25,
   IsSameObject: 24,
 } as const;
+
+/** Reverse lookup: JNI slot index → human-readable name (for diagnostics). */
+const JNI_INDEX_NAMES: Record<number, string> = {};
+for (const [name, idx] of Object.entries(JNI_INDEX)) {
+  JNI_INDEX_NAMES[idx as number] = name;
+}
 
 /** JNIInvokeInterface (JavaVM) slot indices: 3 reserved, then the calls. */
 export const JNI_INVOKE_INDEX = {
@@ -282,90 +312,145 @@ export class JniEnvironment {
 
   // ── JNINativeInterface table construction ──
 
+  /** Per-session diagnostic log of JNI calls to unimplemented slots. */
+  private readonly jniDiagLog: string[] = [];
+
+  /** Return a snapshot of diagnostic messages (cleared after read). */
+  jniDiagnostics(): string[] {
+    const copy = [...this.jniDiagLog];
+    this.jniDiagLog.length = 0;
+    return copy;
+  }
+
   private installEnvTable(): void {
     this.engine.mapMemory(ENV_PTR_ADDR, POINTER_SIZE);
     this.engine.mapMemory(ENV_TABLE_ADDR, TABLE_SLOTS * POINTER_SIZE);
     this.writePointer(ENV_PTR_ADDR, ENV_TABLE_ADDR); // *JNIEnv = table base
 
-    this.bind(JNI_INDEX.GetVersion, () => BigInt(JNI_VERSION_1_6));
-    this.bind(JNI_INDEX.FindClass, (ctx) => this.jniFindClass(ctx));
-    this.bind(JNI_INDEX.GetMethodID, (ctx) => this.jniGetMethodID(ctx));
-    this.bind(JNI_INDEX.RegisterNatives, (ctx) => this.jniRegisterNatives(ctx));
-    this.bind(JNI_INDEX.NewStringUTF, (ctx) => this.jniNewStringUTF(ctx));
-    this.bind(JNI_INDEX.GetStringUTFChars, (ctx) => this.jniGetStringUTFChars(ctx));
-    this.bind(JNI_INDEX.ReleaseStringUTFChars, () => undefined);
-    this.bind(JNI_INDEX.NewByteArray, (ctx) => this.jniNewByteArray(ctx));
-    this.bind(JNI_INDEX.GetArrayLength, (ctx) => this.jniGetArrayLength(ctx));
-    this.bind(JNI_INDEX.GetByteArrayElements, (ctx) => this.jniGetByteArrayElements(ctx));
-    this.bind(JNI_INDEX.ReleaseByteArrayElements, (ctx) => this.jniReleaseByteArrayElements(ctx));
-    this.bind(JNI_INDEX.SetByteArrayRegion, (ctx) => this.jniSetByteArrayRegion(ctx));
-    this.bind(JNI_INDEX.GetByteArrayRegion, (ctx) => this.jniGetByteArrayRegion(ctx));
-    this.bind(JNI_INDEX.GetJavaVM, (ctx) => this.jniGetJavaVM(ctx));
+    // Track which slots we explicitly implement, then auto-fill the rest with
+    // diagnostic stubs that log the call and return 0 — no pre-baked behaviour,
+    // just honest visibility into what the native code actually needs.
+    const filled = new Set<number>();
+
+    const b = (index: number, fn: (ctx: HostContext) => bigint | number | void) => {
+      filled.add(index);
+      this.bind(index, fn);
+    };
+
+    b(JNI_INDEX.GetVersion, () => BigInt(JNI_VERSION_1_6));
+    b(JNI_INDEX.FindClass, (ctx) => this.jniFindClass(ctx));
+    b(JNI_INDEX.GetMethodID, (ctx) => this.jniGetMethodID(ctx));
+    b(JNI_INDEX.RegisterNatives, (ctx) => this.jniRegisterNatives(ctx));
+    b(JNI_INDEX.NewStringUTF, (ctx) => this.jniNewStringUTF(ctx));
+    b(JNI_INDEX.GetStringUTFChars, (ctx) => this.jniGetStringUTFChars(ctx));
+    b(JNI_INDEX.ReleaseStringUTFChars, () => undefined);
+    b(JNI_INDEX.NewByteArray, (ctx) => this.jniNewByteArray(ctx));
+    b(JNI_INDEX.GetArrayLength, (ctx) => this.jniGetArrayLength(ctx));
+    b(JNI_INDEX.GetByteArrayElements, (ctx) => this.jniGetByteArrayElements(ctx));
+    b(JNI_INDEX.ReleaseByteArrayElements, (ctx) => this.jniReleaseByteArrayElements(ctx));
+    b(JNI_INDEX.SetByteArrayRegion, (ctx) => this.jniSetByteArrayRegion(ctx));
+    b(JNI_INDEX.GetByteArrayRegion, (ctx) => this.jniGetByteArrayRegion(ctx));
+    b(JNI_INDEX.GetJavaVM, (ctx) => this.jniGetJavaVM(ctx));
     // Call*Method family + static method lookup — the reflection callback path.
-    this.bind(JNI_INDEX.GetStaticMethodID, (ctx) => this.jniGetMethodID(ctx));
-    this.bind(JNI_INDEX.CallObjectMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallBooleanMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallIntMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallVoidMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallStaticObjectMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallStaticIntMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallLongMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallStaticBooleanMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallStaticLongMethod, (ctx) => this.jniCallMethod(ctx));
-    this.bind(JNI_INDEX.CallStaticVoidMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.GetStaticMethodID, (ctx) => this.jniGetMethodID(ctx));
+    b(JNI_INDEX.CallObjectMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallBooleanMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallIntMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallLongMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallVoidMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallObjectMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallObjectMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallBooleanMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallBooleanMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallIntMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallIntMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallLongMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallLongMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallVoidMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallVoidMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallStaticObjectMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallStaticIntMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallStaticBooleanMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallStaticLongMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallStaticVoidMethod, (ctx) => this.jniCallMethod(ctx));
+    b(JNI_INDEX.CallStaticObjectMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallStaticObjectMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallStaticBooleanMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallStaticBooleanMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallStaticIntMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallStaticIntMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallStaticLongMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallStaticLongMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
+    b(JNI_INDEX.CallStaticVoidMethodV, (ctx) => this.jniCallMethod(ctx, 'vaList'));
+    b(JNI_INDEX.CallStaticVoidMethodA, (ctx) => this.jniCallMethod(ctx, 'jvalueArray'));
 
-    // Field access — GetFieldID/GetStaticFieldID return a jfieldID; the typed
-    // getters return the declared mock value. Setters are accepted as no-ops
-    // (the mock "Java world" is read-only from native code's perspective).
-    this.bind(JNI_INDEX.GetFieldID, (ctx) => this.jniGetFieldID(ctx));
-    this.bind(JNI_INDEX.GetStaticFieldID, (ctx) => this.jniGetFieldID(ctx));
-    this.bind(JNI_INDEX.GetObjectField, (ctx) => this.jniGetField(ctx));
-    this.bind(JNI_INDEX.GetBooleanField, (ctx) => this.jniGetField(ctx));
-    this.bind(JNI_INDEX.GetIntField, (ctx) => this.jniGetField(ctx));
-    this.bind(JNI_INDEX.GetLongField, (ctx) => this.jniGetField(ctx));
-    this.bind(JNI_INDEX.GetStaticObjectField, (ctx) => this.jniGetStaticField(ctx));
-    this.bind(JNI_INDEX.GetStaticBooleanField, (ctx) => this.jniGetStaticField(ctx));
-    this.bind(JNI_INDEX.GetStaticIntField, (ctx) => this.jniGetStaticField(ctx));
-    this.bind(JNI_INDEX.GetStaticLongField, (ctx) => this.jniGetStaticField(ctx));
-    this.bind(JNI_INDEX.SetObjectField, () => undefined);
-    this.bind(JNI_INDEX.SetBooleanField, () => undefined);
-    this.bind(JNI_INDEX.SetIntField, () => undefined);
-    this.bind(JNI_INDEX.SetLongField, () => undefined);
-    this.bind(JNI_INDEX.SetStaticObjectField, () => undefined);
-    this.bind(JNI_INDEX.SetStaticIntField, () => undefined);
+    // Field access
+    b(JNI_INDEX.GetFieldID, (ctx) => this.jniGetFieldID(ctx));
+    b(JNI_INDEX.GetStaticFieldID, (ctx) => this.jniGetFieldID(ctx));
+    b(JNI_INDEX.GetObjectField, (ctx) => this.jniGetField(ctx));
+    b(JNI_INDEX.GetBooleanField, (ctx) => this.jniGetField(ctx));
+    b(JNI_INDEX.GetIntField, (ctx) => this.jniGetField(ctx));
+    b(JNI_INDEX.GetLongField, (ctx) => this.jniGetField(ctx));
+    b(JNI_INDEX.GetStaticObjectField, (ctx) => this.jniGetStaticField(ctx));
+    b(JNI_INDEX.GetStaticBooleanField, (ctx) => this.jniGetStaticField(ctx));
+    b(JNI_INDEX.GetStaticIntField, (ctx) => this.jniGetStaticField(ctx));
+    b(JNI_INDEX.GetStaticLongField, (ctx) => this.jniGetStaticField(ctx));
+    b(JNI_INDEX.SetObjectField, () => undefined);
+    b(JNI_INDEX.SetBooleanField, () => undefined);
+    b(JNI_INDEX.SetIntField, () => undefined);
+    b(JNI_INDEX.SetLongField, () => undefined);
+    b(JNI_INDEX.SetStaticObjectField, () => undefined);
+    b(JNI_INDEX.SetStaticIntField, () => undefined);
 
-    // Strings & arrays beyond the byte-array core.
-    this.bind(JNI_INDEX.GetStringUTFLength, (ctx) => this.jniGetStringUTFLength(ctx));
-    this.bind(JNI_INDEX.GetObjectClass, (ctx) => this.jniGetObjectClass(ctx));
-    this.bind(JNI_INDEX.NewObjectArray, (ctx) => this.jniNewObjectArray(ctx));
-    this.bind(JNI_INDEX.GetObjectArrayElement, (ctx) => this.jniGetObjectArrayElement(ctx));
-    this.bind(JNI_INDEX.SetObjectArrayElement, (ctx) => this.jniSetObjectArrayElement(ctx));
+    // Strings & arrays
+    b(JNI_INDEX.GetStringUTFLength, (ctx) => this.jniGetStringUTFLength(ctx));
+    b(JNI_INDEX.GetObjectClass, (ctx) => this.jniGetObjectClass(ctx));
+    b(JNI_INDEX.NewObjectArray, (ctx) => this.jniNewObjectArray(ctx));
+    b(JNI_INDEX.GetObjectArrayElement, (ctx) => this.jniGetObjectArrayElement(ctx));
+    b(JNI_INDEX.SetObjectArrayElement, (ctx) => this.jniSetObjectArrayElement(ctx));
 
-    // Exceptions — a minimal model: Throw/ThrowNew record a pending handle that
-    // ExceptionCheck/ExceptionOccurred report and ExceptionClear resets.
-    this.bind(JNI_INDEX.Throw, (ctx) => {
+    // Exceptions
+    b(JNI_INDEX.Throw, (ctx) => {
       this.pendingException = Number(ctx.x(1));
       return 0n;
     });
-    this.bind(JNI_INDEX.ThrowNew, (ctx) => {
+    b(JNI_INDEX.ThrowNew, (ctx) => {
       this.pendingException = this.allocHandle({ kind: 'throwable', cls: Number(ctx.x(1)) });
       return 0n;
     });
-    this.bind(JNI_INDEX.ExceptionOccurred, () => BigInt(this.pendingException));
-    this.bind(JNI_INDEX.ExceptionCheck, () => (this.pendingException !== 0 ? 1n : 0n));
-    this.bind(JNI_INDEX.ExceptionClear, () => {
+    b(JNI_INDEX.ExceptionOccurred, () => BigInt(this.pendingException));
+    b(JNI_INDEX.ExceptionCheck, () => (this.pendingException !== 0 ? 1n : 0n));
+    b(JNI_INDEX.ExceptionClear, () => {
       this.pendingException = 0;
       return undefined;
     });
 
-    // References — handles are process-global in this model, so global/local ref
-    // management is identity (return the same handle) and deletion is a no-op.
-    this.bind(JNI_INDEX.NewGlobalRef, (ctx) => ctx.x(1));
-    this.bind(JNI_INDEX.NewLocalRef, (ctx) => ctx.x(1));
-    this.bind(JNI_INDEX.DeleteGlobalRef, () => undefined);
-    this.bind(JNI_INDEX.DeleteLocalRef, () => undefined);
-    this.bind(JNI_INDEX.IsSameObject, (ctx) => (ctx.x(1) === ctx.x(2) ? 1n : 0n));
-    this.bind(JNI_INDEX.IsInstanceOf, () => 1n); // optimistic: assume instance-of holds
+    // References
+    b(JNI_INDEX.NewGlobalRef, (ctx) => ctx.x(1));
+    b(JNI_INDEX.NewLocalRef, (ctx) => ctx.x(1));
+    b(JNI_INDEX.DeleteGlobalRef, () => undefined);
+    b(JNI_INDEX.DeleteLocalRef, () => undefined);
+    b(JNI_INDEX.NewWeakGlobalRef, (ctx) => ctx.x(1));
+    b(JNI_INDEX.DeleteWeakGlobalRef, () => undefined);
+    b(JNI_INDEX.IsSameObject, (ctx) => (ctx.x(1) === ctx.x(2) ? 1n : 0n));
+    b(JNI_INDEX.IsInstanceOf, () => 1n);
+
+    // ── Auto-fill every remaining NULL slot with a diagnostic stub ──────────
+    // Instead of pre-baking every JNI function, we fill unfilled table entries
+    // with honest logging stubs. When native code calls one, we get its index
+    // in jniDiagLog without crashing. The agent can then implement the real
+    // behaviour later. Memory is zeroed by mapMemory, so unfilled slots are
+    // already NULL; we only fill the ones we discover at runtime.
+    for (let idx = 0; idx < TABLE_SLOTS; idx++) {
+      if (filled.has(idx)) continue;
+      const slotIdx = idx; // capture for closure
+      this.bind(idx, (ctx) => {
+        const name = JNI_INDEX_NAMES[slotIdx] ?? `unknown_${slotIdx}`;
+        const msg = `JNI stub: ${name} (slot ${slotIdx}) x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)}`;
+        this.jniDiagLog.push(msg);
+        return 0n;
+      });
+    }
   }
 
   private installVmTable(): void {
@@ -528,20 +613,43 @@ export class JniEnvironment {
     return 0n;
   }
 
-  /**
-   * Call*Method dispatch: x1 = receiver (jobject/jclass), x2 = jmethodID,
-   * x3..x7 = up to five Java arguments. Routes to the registered mock impl and
-   * returns whatever it produces in x0. Unregistered methods return 0 (a benign
-   * null/zero), which keeps a partially-modelled Java world from hard-faulting.
-   */
-  private jniCallMethod(ctx: HostContext): bigint {
+  /** Dispatch a Call*Method, decoding its direct, V, or A argument representation. */
+  private jniCallMethod(ctx: HostContext, mode: JniCallArgumentMode = 'registers'): bigint {
     const self = Number(ctx.x(1));
     const methodId = Number(ctx.x(2));
     const entry = this.javaMethods.get(methodId);
     if (!entry) return 0n;
-    const args = [ctx.x(3), ctx.x(4), ctx.x(5), ctx.x(6), ctx.x(7)];
+    const parameterTypes = parseJniParameterTypes(entry.sig);
+    let args: bigint[];
+    if (mode === 'jvalueArray') {
+      args = parameterTypes.map((type, index) => {
+        const raw = readGuestU64(ctx, Number(ctx.x(3)) + index * 8);
+        return normalizeJniArgument(type, raw, false);
+      });
+    } else if (mode === 'vaList') {
+      args = this.readVaListArguments(ctx, Number(ctx.x(3)), parameterTypes);
+    } else {
+      args = parameterTypes.map((type, index) => {
+        const raw = index < 5 ? ctx.x(3 + index) : 0n;
+        return normalizeJniArgument(type, raw, false);
+      });
+    }
     const result = entry.impl({ args, self, jni: this });
     return result === undefined ? 0n : BigInt.asUintN(64, BigInt(result));
+  }
+
+  /** Decode Android arm64's `va_list` (stack/gr_top/vr_top/gr_offs/vr_offs). */
+  private readVaListArguments(
+    ctx: HostContext,
+    vaListAddress: number,
+    parameterTypes: readonly JniParameterType[],
+  ): bigint[] {
+    const args = new Aarch64VaListReader(ctx, vaListAddress);
+    return parameterTypes.map((type) => {
+      const floating = type === 'F' || type === 'D';
+      const raw = floating ? args.nextFloating() : args.nextGeneral();
+      return normalizeJniArgument(type, raw, floating);
+    });
   }
 
   /**
@@ -627,20 +735,11 @@ export class JniEnvironment {
   }
 
   private writePointer(addr: number, value: number): void {
-    const bytes = new Uint8Array(POINTER_SIZE);
-    let v = BigInt(value);
-    for (let i = 0; i < POINTER_SIZE; i++) {
-      bytes[i] = Number(v & 0xffn);
-      v >>= 8n;
-    }
-    this.engine.writeCode(addr, bytes);
+    this.engine.writeCode(addr, encodeGuestU64(value));
   }
 
   private readPointer(ctx: HostContext, addr: number): number {
-    const bytes = ctx.read(addr, POINTER_SIZE);
-    let value = 0;
-    for (let i = 0; i < POINTER_SIZE; i++) value += bytes[i]! * 2 ** (i * 8);
-    return value;
+    return readGuestPointer(ctx, addr);
   }
 
   private readCString(ctx: HostContext, addr: number): string {
@@ -679,6 +778,72 @@ interface JavaMethodEntry {
   name: string;
   sig: string;
   impl: JavaMethodImpl;
+}
+
+type JniCallArgumentMode = 'registers' | 'vaList' | 'jvalueArray';
+type JniParameterType = 'Z' | 'B' | 'C' | 'S' | 'I' | 'J' | 'F' | 'D' | 'L';
+
+function parseJniParameterTypes(signature: string): JniParameterType[] {
+  const open = signature.indexOf('(');
+  const close = signature.indexOf(')', open + 1);
+  if (open < 0 || close < 0) return [];
+  const types: JniParameterType[] = [];
+  for (let i = open + 1; i < close; i++) {
+    const type = signature[i];
+    if (type === '[') {
+      while (signature[i] === '[') i++;
+      if (signature[i] === 'L') {
+        const end = signature.indexOf(';', i);
+        if (end < 0 || end > close) break;
+        i = end;
+      }
+      types.push('L');
+      continue;
+    }
+    if (type === 'L') {
+      const end = signature.indexOf(';', i);
+      if (end < 0 || end > close) break;
+      types.push('L');
+      i = end;
+      continue;
+    }
+    if (type && 'ZBCSIJFD'.includes(type)) types.push(type as JniParameterType);
+  }
+  return types;
+}
+
+function normalizeJniArgument(
+  type: JniParameterType,
+  raw: bigint,
+  promotedFloating: boolean,
+): bigint {
+  switch (type) {
+    case 'Z':
+      return raw & 0xffn;
+    case 'B':
+      return BigInt.asIntN(8, raw);
+    case 'C':
+      return raw & 0xffffn;
+    case 'S':
+      return BigInt.asIntN(16, raw);
+    case 'I':
+      return BigInt.asIntN(32, raw);
+    case 'J':
+      return BigInt.asIntN(64, raw);
+    case 'F': {
+      if (!promotedFloating) return raw & 0xffff_ffffn;
+      const source = new ArrayBuffer(8);
+      const sourceView = new DataView(source);
+      sourceView.setBigUint64(0, raw, true);
+      const target = new ArrayBuffer(4);
+      const targetView = new DataView(target);
+      targetView.setFloat32(0, sourceView.getFloat64(0, true), true);
+      return BigInt(targetView.getUint32(0, true));
+    }
+    case 'D':
+    case 'L':
+      return raw;
+  }
 }
 
 function isStringValue(v: unknown): v is StringValue {

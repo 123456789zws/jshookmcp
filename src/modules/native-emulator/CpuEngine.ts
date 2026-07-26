@@ -29,7 +29,6 @@ import {
   R_AARCH64_RELATIVE,
   R_AARCH64_COPY,
 } from './ElfLoader';
-import type { BionicLibrary } from './bionic';
 import type { SimdContext } from './simd';
 import { executeSimdFp } from './simd';
 import { signExtend, decodeBitMask } from './utils/BitOperations';
@@ -38,6 +37,10 @@ import { RegisterFile } from './cpu/RegisterFile';
 import { MemoryManager } from './cpu/MemoryManager';
 import type { ExecutionContext } from './cpu/ExecutionContext';
 import { FpContext } from './fp/FpOperations';
+import type { GuestSymbolResolver } from './symbol-resolver';
+import type { HostContext, HostFunction, SyscallContext } from './host-context';
+
+export type { HostContext, HostFunction, SyscallContext } from './host-context';
 
 const MASK64 = (1n << 64n) - 1n;
 import {
@@ -101,27 +104,12 @@ const IMPORT_STUB_BASE = 0x6800_0000;
 const TLS_BASE = 0x7000_0000;
 const TLS_SIZE = 0x1000;
 
-/** Register/memory access handed to a host-function stub. */
-export interface HostContext {
-  /** Read argument/return register xN (0..30) as BigInt. */
-  x(index: number): bigint;
-  /** Write register xN. */
-  setX(index: number, value: bigint): void;
-  /** Read `length` bytes from guest memory at `address`. */
-  read(address: number, length: number): Uint8Array;
-  /** Write bytes into guest memory at `address`. */
-  write(address: number, bytes: Uint8Array): void;
+type HostSymbolResolver = GuestSymbolResolver<HostFunction>;
+
+interface GuestInvocationPolicy {
+  preserveControlState: boolean;
+  resetStack: boolean;
 }
-
-/** A host stub: receives the CPU context, optionally returns x0. */
-export type HostFunction = (ctx: HostContext) => bigint | number | void;
-
-/**
- * Register/memory view handed to a syscall handler. Same shape as HostContext
- * (read args, write result via return, touch guest memory) but named distinctly
- * because syscalls read their number from x8 and args from x0..x5.
- */
-export type SyscallContext = HostContext;
 
 /** A syscall handler: receives the CPU context, optionally returns x0. */
 export type SyscallHandler = (ctx: SyscallContext) => bigint | number | void;
@@ -310,7 +298,7 @@ export class CpuEngine implements ExecutionContext {
    */
   loadElf(
     bytes: Uint8Array,
-    bionic?: BionicLibrary,
+    imports?: HostSymbolResolver,
     bias = 0,
     mergeSymbols = bias === 0,
   ): { entry: number } {
@@ -329,7 +317,7 @@ export class CpuEngine implements ExecutionContext {
     if (mergeSymbols) {
       for (const [name, vaddr] of exported) this.memory.addSymbol(name, bias + vaddr);
     }
-    this.applyRelocations(elf, bionic, bias, exported);
+    this.applyRelocations(elf, imports, bias, exported);
     if (bias === 0) this.runInitializers(elf, bias);
     return { entry: bias + elf.entry };
   }
@@ -360,7 +348,7 @@ export class CpuEngine implements ExecutionContext {
   loadLibraryChain(
     dependencies: Uint8Array[],
     primary: Uint8Array,
-    bionic?: BionicLibrary,
+    imports?: HostSymbolResolver,
   ): {
     entry: number;
     unresolvedImports: readonly NativeRuntimeImportDiagnostic[];
@@ -373,13 +361,13 @@ export class CpuEngine implements ExecutionContext {
       const dep = dependencies[i];
       if (!dep) continue;
       const depBias = BIAS_START + i * BIAS_STEP;
-      this.loadElf(dep, bionic, depBias, true);
+      this.loadElf(dep, imports, depBias, true);
     }
     // Load the primary at bias 0 (traditional single-library behaviour): it
     // inherits the merged dependency exports and runs its own constructors.
     this.constructorFaults.length = 0;
     this.unresolvedImportDiagnostics.length = 0;
-    const { entry } = this.loadElf(primary, bionic, 0, true);
+    const { entry } = this.loadElf(primary, imports, 0, true);
     return {
       entry,
       unresolvedImports: [...this.unresolvedImportDiagnostics],
@@ -421,13 +409,11 @@ export class CpuEngine implements ExecutionContext {
    * that ctor. Other faults still propagate.
    */
   private runConstructor(addr: number): void {
-    this.registerFile.writeGpr(0, 0n);
-    this.registerFile.writeGpr(1, 0n);
-    this.registerFile.writeGpr(2, 0n);
-    this.registerFile.writeGpr(30, BigInt(RETURN_SENTINEL)); // LR → halt marker
-    this.registerFile.sp = BigInt(this.ensureStack());
     try {
-      this.run(addr, RETURN_SENTINEL);
+      this.invokeGuest(addr, [0n, 0n, 0n], {
+        preserveControlState: false,
+        resetStack: true,
+      });
     } catch (e) {
       if (e instanceof NullIndirectCallError) {
         this.constructorFaults.push(`ctor@0x${addr.toString(16)}: ${e.message}`);
@@ -446,7 +432,7 @@ export class CpuEngine implements ExecutionContext {
    */
   private applyRelocations(
     elf: ElfLoader,
-    bionic?: BionicLibrary,
+    imports?: HostSymbolResolver,
     bias = 0,
     exported?: Map<string, number>,
   ): void {
@@ -461,7 +447,7 @@ export class CpuEngine implements ExecutionContext {
         case R_AARCH64_ABS64:
         case R_AARCH64_GLOB_DAT:
         case R_AARCH64_JUMP_SLOT: {
-          if (this.isUnresolvedImport(rel.symbolName, rel.symbolValue, bionic)) {
+          if (this.isUnresolvedImport(rel.symbolName, rel.symbolValue, imports)) {
             this.unresolvedImportDiagnostics.push({
               symbol: rel.symbolName,
               gotOffset: patchedOffset,
@@ -477,7 +463,7 @@ export class CpuEngine implements ExecutionContext {
           const resolved =
             ownVaddr !== undefined
               ? bias + ownVaddr
-              : this.resolveRelocSymbol(rel.symbolName, rel.symbolValue, bionic);
+              : this.resolveRelocSymbol(rel.symbolName, rel.symbolValue, imports);
           this.memory.storeValue(patchedOffset, 8, BigInt(resolved + rel.addend));
           break;
         }
@@ -518,16 +504,29 @@ export class CpuEngine implements ExecutionContext {
    * name is seen). Falls back to the symbol's own value (0 for undefined imports
    * with no bionic entry), so calling an unresolved import faults loudly.
    */
-  private resolveRelocSymbol(name: string, symbolValue: number, bionic?: BionicLibrary): number {
+  private resolveRelocSymbol(
+    name: string,
+    symbolValue: number,
+    imports?: HostSymbolResolver,
+  ): number {
     if (name && this.memory.hasSymbol(name)) return this.memory.findSymbol(name)!;
-    if (name && bionic?.has(name)) {
-      return this.bindImportStub(name, bionic.get(name)!);
-    }
+    const imported = name ? imports?.resolveSymbol(name) : undefined;
+    if (imported?.kind === 'data') return imported.address;
+    if (imported?.kind === 'function') return this.bindImportStub(name, imported.fn);
     return symbolValue;
   }
 
-  private isUnresolvedImport(name: string, symbolValue: number, bionic?: BionicLibrary): boolean {
-    return name !== '' && symbolValue === 0 && !this.memory.hasSymbol(name) && !bionic?.has(name);
+  private isUnresolvedImport(
+    name: string,
+    symbolValue: number,
+    imports?: HostSymbolResolver,
+  ): boolean {
+    return (
+      name !== '' &&
+      symbolValue === 0 &&
+      !this.memory.hasSymbol(name) &&
+      imports?.resolveSymbol(name) === undefined
+    );
   }
 
   /**
@@ -546,13 +545,12 @@ export class CpuEngine implements ExecutionContext {
     if (args.length > 8) {
       throw new Error(`callSymbol supports up to 8 register arguments, got ${args.length}`);
     }
-    for (let i = 0; i < args.length; i++) {
-      this.registerFile.writeGpr(i, BigInt.asUintN(64, BigInt(args[i]!)));
-    }
-    this.registerFile.writeGpr(30, BigInt(RETURN_SENTINEL)); // LR → halt marker
-    this.registerFile.sp = BigInt(this.ensureStack());
     try {
-      this.run(addr, RETURN_SENTINEL);
+      return this.invokeGuest(
+        addr,
+        args.map((arg) => BigInt(arg)),
+        { preserveControlState: false, resetStack: true },
+      );
     } catch (e) {
       if (e instanceof NullIndirectCallError && this.unresolvedImportDiagnostics.length > 0) {
         throw new NullIndirectCallError(
@@ -561,7 +559,6 @@ export class CpuEngine implements ExecutionContext {
       }
       throw e;
     }
-    return Number(this.registerFile.readGpr(0));
   }
 
   /** List the exported dynamic symbol names callSymbol can resolve (from loadElf). */
@@ -709,11 +706,50 @@ export class CpuEngine implements ExecutionContext {
     this.invokeHost(fn);
   }
 
+  /** Invoke a guest function by address and return after its RET reaches LR=0. */
+  callGuestFunction(address: number, args: readonly bigint[] = []): number {
+    if (args.length > 8) {
+      throw new Error(`callGuestFunction supports up to 8 register arguments, got ${args.length}`);
+    }
+    return this.invokeGuest(address, args, {
+      preserveControlState: true,
+      resetStack: false,
+    });
+  }
+
+  private invokeGuest(
+    address: number,
+    args: readonly bigint[],
+    policy: GuestInvocationPolicy,
+  ): number {
+    const savedLr = policy.preserveControlState ? this.registerFile.readGpr(30) : undefined;
+    const savedPc = policy.preserveControlState ? this.registerFile.pc : undefined;
+    for (let i = 0; i < args.length; i++) {
+      this.registerFile.writeGpr(i, BigInt.asUintN(64, args[i]!));
+    }
+    this.registerFile.writeGpr(30, BigInt(RETURN_SENTINEL));
+    if (policy.resetStack || this.registerFile.sp === 0n) {
+      this.registerFile.sp = BigInt(this.ensureStack());
+    }
+    try {
+      this.run(address, RETURN_SENTINEL);
+      return Number(this.registerFile.readGpr(0));
+    } finally {
+      if (savedLr !== undefined) this.registerFile.writeGpr(30, savedLr);
+      if (savedPc !== undefined) this.registerFile.pc = savedPc;
+    }
+  }
+
   /** Build the HostContext view over this engine's registers and memory. */
   private hostContext(): HostContext {
     return {
       x: (i) => this.registerFile.readGpr(i),
       setX: (i, v) => this.registerFile.writeGpr(i, BigInt.asUintN(64, v)),
+      setD: (i, value) => {
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, value, true);
+        this.writeVReg(i, bytes);
+      },
       read: (addr, len) => this.memory.readMemory(addr, len),
       write: (addr, bytes) => this.memory.writeCode(addr, bytes),
     };

@@ -1,5 +1,6 @@
 import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
 import type { HostContext } from './CpuEngine';
+import { Aarch64VaListReader } from './aarch64-va-list';
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -76,9 +77,27 @@ export function formatGuestCString(
   formatAddress: number,
   firstVarargRegister: number,
 ): string {
+  let argRegister = firstVarargRegister;
+  return formatGuestCStringFromReader(ctx, formatAddress, () => ctx.x(argRegister++));
+}
+
+/** Format using an AArch64 glibc/bionic `va_list` structure in guest memory. */
+export function formatGuestVaList(
+  ctx: Pick<HostContext, 'read'>,
+  formatAddress: number,
+  vaListAddress: number,
+): string {
+  const args = new Aarch64VaListReader(ctx, vaListAddress);
+  return formatGuestCStringFromReader(ctx, formatAddress, () => args.nextGeneral());
+}
+
+function formatGuestCStringFromReader(
+  ctx: Pick<HostContext, 'read'>,
+  formatAddress: number,
+  nextArgument: () => bigint,
+): string {
   const format = readGuestCString(ctx, formatAddress);
   let out = '';
-  let argRegister = firstVarargRegister;
 
   for (let i = 0; i < format.length; i++) {
     const ch = format[i] ?? '';
@@ -97,8 +116,8 @@ export function formatGuestCString(
       out += '%';
       continue;
     }
-    argRegister += parsed.consumedWidthArgs;
-    out += formatValue(ctx, parsed, ctx.x(argRegister++));
+    for (let arg = 0; arg < parsed.consumedWidthArgs; arg++) nextArgument();
+    out += formatValue(ctx, parsed, nextArgument());
   }
 
   return out;

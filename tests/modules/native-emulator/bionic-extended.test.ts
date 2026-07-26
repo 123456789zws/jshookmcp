@@ -23,6 +23,7 @@ function makeCtx(mem: Uint8Array, regs: bigint[] = []): HostContext {
     setX: (i, v) => {
       x[i] = v;
     },
+    setD: () => undefined,
     read: (addr, len) => mem.subarray(addr, addr + len),
     write: (addr, bytes) => mem.set(bytes, addr),
   };
@@ -93,6 +94,7 @@ describe('bionic extended — strdup', () => {
       lib.get('strdup')!({
         x: (i) => x[i] ?? 0n,
         setX: () => {},
+        setD: () => undefined,
         read: ctxRead,
         write: ctxWrite,
       }),
@@ -150,6 +152,7 @@ function makeCtxEngine(engine: CpuEngine, regs: bigint[]): HostContext {
     setX: (i, v) => {
       x[i] = v;
     },
+    setD: () => undefined,
     read: (addr, len) => engine.readMemory(addr, len),
     write: (addr, bytes) => engine.writeCode(addr, bytes),
   };

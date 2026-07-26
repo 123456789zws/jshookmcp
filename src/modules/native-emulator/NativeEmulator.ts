@@ -138,9 +138,26 @@ export class NativeEmulator {
     installBionicStubs(this.engine, addrs);
   }
 
-  /** Invoke an exported function by name (AAPCS: args in x0..x7, result in x0). */
-  call(symbol: string, args: number[] = []): number {
+  /** Regex to detect JNI-style function signatures (mangled or Java_ prefix). */
+  private static readonly JNI_SIGNATURE_RE = /^(Java_|_Z.*P7_JNIEnv)/;
+
+  /**
+   * Invoke an exported function by name (AAPCS: args in x0..x7, result in x0).
+   *
+   * **Auto-detection**: if the symbol looks like a JNI function (Java_ prefix
+   * or mangled name with `P7_JNIEnv` as first param), the guest JNIEnv* and a
+   * synthetic thiz=0 are injected as x0/x1, and the provided args start at x2.
+   * This covers both the standard `Java_*` convention AND `RegisterNatives`-
+   * registered symbols like `_Z13native_attachP7_JNIEnvP7_jclass...`.
+   *
+   * Pass `injectJni: false` to skip auto-detection and pass raw args.
+   */
+  call(symbol: string, args: number[] = [], opts?: { injectJni?: boolean }): number {
     this.checkNotDisposed();
+    const injectJni = opts?.injectJni ?? NativeEmulator.JNI_SIGNATURE_RE.test(symbol);
+    if (injectJni) {
+      return this.engine.callSymbol(symbol, [this.jni.envPointer(), 0, ...args]);
+    }
     return this.engine.callSymbol(symbol, args);
   }
 
@@ -160,6 +177,11 @@ export class NativeEmulator {
    * GetMethodID/GetStaticMethodID + Call*Method (the "Java world" for routines
    * that fetch a value/key from Java before folding it into their result).
    */
+  /** Diagnostic JNI stub calls since last query (cleared after read). */
+  jniDiagnostics(): string[] | undefined {
+    return this.jni?.jniDiagnostics?.();
+  }
+
   setupJava(className: string, name: string, signature: string, impl: JavaMethodImpl): void {
     this.jni.registerJavaMethod(className, name, signature, impl);
   }
