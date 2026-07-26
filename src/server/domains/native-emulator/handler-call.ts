@@ -4,10 +4,13 @@ import { R } from '@server/domains/shared/ResponseBuilder';
 import type { ToolResponse } from '@server/types';
 
 export function nativeDiagnostics(session: EmulatorSession): Record<string, unknown> {
-  return {
+  const diag: Record<string, unknown> = {
     unresolvedImports: [...session.emulator.engine.unresolvedImports()],
     constructorFaults: [...session.emulator.engine.constructorFaultLog()],
   };
+  const jni = session.emulator.jniDiagnostics?.();
+  if (jni && jni.length > 0) diag.jniStubCalls = jni;
+  return diag;
 }
 
 export function nativeCallFailure(

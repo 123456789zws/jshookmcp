@@ -57,6 +57,17 @@ describe('native-emulator manifest', () => {
     }
   });
 
+  it('declares session files as an open path-to-base64 map', () => {
+    const createSession = nativeEmulatorTools.find((entry) => entry.name === 'nemu_create_session');
+    const files = createSession?.inputSchema.properties?.files as
+      | { type?: string; additionalProperties?: { type?: string }; properties?: unknown }
+      | undefined;
+    expect(files).toEqual(
+      expect.objectContaining({ type: 'object', additionalProperties: { type: 'string' } }),
+    );
+    expect(files?.properties).toBeUndefined();
+  });
+
   it('ensure() returns a NativeEmulatorHandlers and caches it as a singleton', async () => {
     const ctx = makeCtx();
     const first = await manifest.ensure(ctx);

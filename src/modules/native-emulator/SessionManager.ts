@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 
 import { NEMU_SESSION_IDLE_TTL_MS, NEMU_SESSION_SWEEP_MS, NEMU_MAX_SESSIONS } from '@src/constants';
 import { NativeEmulator, type NativeEmulatorOptions } from './NativeEmulator';
+import type { BionicOptions } from './bionic';
 import type { AndroidSyscallOptions } from './syscalls';
 
 /** A live emulator session: its id, the isolated emulator, and usage timestamps. */
@@ -51,6 +52,7 @@ export interface SessionManagerOptions {
 /** Per-session emulator options (e.g. opt out of the Android syscall table). */
 export interface CreateSessionOptions {
   syscalls?: AndroidSyscallOptions | false;
+  bionic?: BionicOptions;
 }
 
 export class SessionManager {
@@ -80,10 +82,11 @@ export class SessionManager {
         `Emulator session limit reached (${this.maxSessions}); destroy an existing session first`,
       );
     }
-    const emulatorOptions: NativeEmulatorOptions =
-      options.syscalls === undefined
-        ? this.emulatorOptions
-        : { ...this.emulatorOptions, syscalls: options.syscalls };
+    const emulatorOptions: NativeEmulatorOptions = {
+      ...this.emulatorOptions,
+      ...(options.syscalls !== undefined ? { syscalls: options.syscalls } : {}),
+      ...(options.bionic !== undefined ? { bionic: options.bionic } : {}),
+    };
     const now = Date.now();
     const session: EmulatorSession = {
       id: randomUUID(),

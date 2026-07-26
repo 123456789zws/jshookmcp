@@ -15560,7 +15560,7 @@ export const GENERATED_TOOL_CATALOG = [
   {
     "tool": {
       "name": "nemu_call_symbol",
-      "description": "Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). For plain native exports; use call_jni_export for `Java_*` JNI entry points.",
+      "description": "Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). Auto-detects JNI signatures (symbols mangled with `P7_JNIEnv` first param, or `Java_` prefix) and injects the guest JNIEnv* as x0 + synthetic thiz=0 as x1 — no need to manually choose between call_symbol and call_jni_export for RegisterNatives-style or standard JNI entry points. Set injectJni=false to force raw arguments.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -15570,14 +15570,18 @@ export const GENERATED_TOOL_CATALOG = [
           },
           "symbol": {
             "type": "string",
-            "description": "Exported symbol name to call"
+            "description": "Exported symbol name to call (C++ mangled or plain)"
           },
           "args": {
             "type": "array",
             "items": {
               "type": "number"
             },
-            "description": "Integer arguments passed in x0..x7 (default: none)"
+            "description": "Integer arguments (x0..x7 for raw mode, x2.. for JNI-auto mode)"
+          },
+          "injectJni": {
+            "type": "boolean",
+            "description": "Auto-detect JNI signature (default: auto). Set false to force raw args"
           }
         },
         "required": [
@@ -15614,7 +15618,7 @@ export const GENERATED_TOOL_CATALOG = [
   {
     "tool": {
       "name": "nemu_create_session",
-      "description": "Create an isolated ARM64 emulator session and return its sessionId. Each session owns its own CPU registers, guest stack, and JNI object table, so concurrent analyses never interfere. Destroy it with nemu_destroy_session when done; idle sessions auto-expire.",
+      "description": "Create an isolated ARM64 emulator session and return its sessionId. Each session owns its own CPU registers, guest stack, and JNI object table, so concurrent analyses never interfere. Destroy it with nemu_destroy_session when done; idle sessions auto-expire. Pass `files` to populate the virtual device filesystem (path→base64 content) so native code can fopen/fread assets like jiagu_config directly from the emulated FS.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -15622,6 +15626,13 @@ export const GENERATED_TOOL_CATALOG = [
             "type": "boolean",
             "description": "Install the default Android syscall table (default: true)",
             "default": true
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Virtual filesystem: path→base64 content for fopen/fread"
           }
         }
       },

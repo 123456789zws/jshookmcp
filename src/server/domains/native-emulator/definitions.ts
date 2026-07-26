@@ -25,10 +25,15 @@ export const nativeEmulatorTools: Tool[] = [
   tool('nemu_create_session', (t) =>
     t
       .desc(
-        'Create an isolated ARM64 emulator session and return its sessionId. Each session owns its own CPU registers, guest stack, and JNI object table, so concurrent analyses never interfere. Destroy it with nemu_destroy_session when done; idle sessions auto-expire.',
+        'Create an isolated ARM64 emulator session and return its sessionId. Each session owns its own CPU registers, guest stack, and JNI object table, so concurrent analyses never interfere. Destroy it with nemu_destroy_session when done; idle sessions auto-expire. Pass `files` to populate the virtual device filesystem (path→base64 content) so native code can fopen/fread assets like jiagu_config directly from the emulated FS.',
       )
       .boolean('installSyscalls', 'Install the default Android syscall table (default: true)', {
         default: true,
+      })
+      .prop('files', {
+        type: 'object',
+        additionalProperties: { type: 'string' },
+        description: 'Virtual filesystem: path→base64 content for fopen/fread',
       }),
   ),
   tool('nemu_destroy_session', (t) =>
@@ -113,11 +118,19 @@ export const nativeEmulatorTools: Tool[] = [
   tool('nemu_call_symbol', (t) =>
     t
       .desc(
-        'Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). For plain native exports; use call_jni_export for `Java_*` JNI entry points.',
+        'Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). Auto-detects JNI signatures (symbols mangled with `P7_JNIEnv` first param, or `Java_` prefix) and injects the guest JNIEnv* as x0 + synthetic thiz=0 as x1 — no need to manually choose between call_symbol and call_jni_export for RegisterNatives-style or standard JNI entry points. Set injectJni=false to force raw arguments.',
       )
       .string('sessionId', 'Session id with a library already loaded')
-      .string('symbol', 'Exported symbol name to call')
-      .array('args', { type: 'number' }, 'Integer arguments passed in x0..x7 (default: none)')
+      .string('symbol', 'Exported symbol name to call (C++ mangled or plain)')
+      .array(
+        'args',
+        { type: 'number' },
+        'Integer arguments (x0..x7 for raw mode, x2.. for JNI-auto mode)',
+      )
+      .boolean(
+        'injectJni',
+        'Auto-detect JNI signature (default: auto). Set false to force raw args',
+      )
       .required('sessionId', 'symbol'),
   ),
   tool('nemu_call_jni_export', (t) =>

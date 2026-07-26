@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises';
 
 import { SessionManager, type EmulatorSession } from '@modules/native-emulator/SessionManager';
+import type { BionicOptions } from '@modules/native-emulator/bionic';
 import { extractArm64Libs } from '@modules/native-emulator/apk';
 import { inspectElfImports } from '@modules/native-emulator/import-inspector';
 import { handleSafe, R } from '@server/domains/shared/ResponseBuilder';
@@ -124,11 +125,16 @@ export class NativeEmulatorHandlers {
   handleCreateSession(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => {
       const installSyscalls = argBool(args, 'installSyscalls', true);
-      const session = this.sessions.createSession(installSyscalls ? {} : { syscalls: false });
+      const bionic = decodeBionicOptions(args['files']);
+      const session = this.sessions.createSession({
+        ...(installSyscalls ? {} : { syscalls: false }),
+        ...(bionic ? { bionic } : {}),
+      });
       return {
         sessionId: session.id,
         createdAt: session.createdAt,
         activeSessions: this.sessions.count(),
+        ...(bionic?.files ? { filesLoaded: bionic.files.size } : {}),
       };
     });
   }
@@ -280,7 +286,8 @@ export class NativeEmulatorHandlers {
   handleCallSymbol(args: ToolArgs): Promise<ToolResponse> {
     return this.handleNativeCall(args, 'call_symbol', (session, symbol) => {
       const callArgs = argNumberArray(args, 'args');
-      return session.emulator.call(symbol, callArgs);
+      const injectJni = argBool(args, 'injectJni'); // undefined → auto-detect
+      return session.emulator.call(symbol, callArgs, { injectJni });
     });
   }
 
@@ -522,4 +529,13 @@ export class NativeEmulatorHandlers {
   private requireSession(args: ToolArgs): EmulatorSession {
     return this.sessions.requireSession(argStringRequired(args, 'sessionId'));
   }
+}
+
+function decodeBionicOptions(value: unknown): BionicOptions | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const files = new Map<string, Uint8Array>();
+  for (const [path, encoded] of Object.entries(value)) {
+    if (typeof encoded === 'string') files.set(path, toUint8(Buffer.from(encoded, 'base64')));
+  }
+  return files.size > 0 ? { files } : undefined;
 }
