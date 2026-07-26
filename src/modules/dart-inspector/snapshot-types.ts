@@ -18,6 +18,12 @@
  */
 export const DART_SNAPSHOT_MAGIC = 0xf5f5dcdc;
 
+/** ELF symbols used by Flutter to expose the isolate snapshot payload. */
+export const DART_ISOLATE_SNAPSHOT_SYMBOLS = [
+  '_kDartIsolateSnapshotData',
+  'kDartIsolateSnapshotData',
+] as const;
+
 /** Decoded `kind` field of the snapshot header. */
 export type SnapshotKind = 'full' | 'full-aot' | 'full-jit' | 'full-core' | 'unknown';
 

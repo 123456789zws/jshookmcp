@@ -61,6 +61,48 @@ describe('Dart AOT Layer', () => {
       expect(header.dataStartOffset).toBe(0x20000n);
     });
 
+    it('reads modern common-header fields without scanning payload words', () => {
+      const buffer = new Uint8Array(0x200);
+      const view = new DataView(buffer.buffer);
+      view.setUint32(0, DART_SNAPSHOT_MAGIC, true);
+      view.setUint32(4, 5, true); // modern version word, not a legacy kind
+      buffer.set(new TextEncoder().encode('0123456789abcdef0123456789abcdef'), 0x14);
+      const features = new TextEncoder().encode('compressed-pointers\0');
+      buffer.set(features, 0x34);
+      const common = (0x34 + features.length + 7) & ~7;
+      view.setUint32(common, 12, true);
+      view.setUint32(common + 4, 120, true);
+      view.setUint32(common + 8, 1, true);
+      view.setUint32(common + 12, 9, true);
+      view.setBigUint64(common + 16, 0x180n, true);
+      view.setBigUint64(common + 24, 0x100n, true);
+
+      // Plausible-looking pairs in inline/payload data must not become clusters.
+      view.setUint32(0xc0, 100, true);
+      view.setUint32(0xc4, 500, true);
+      view.setUint32(0x120, 101, true);
+      view.setUint32(0x124, 600, true);
+
+      const header = parseSnapshotHeader(buffer);
+      expect(header.baseObjects).toBe(12);
+      expect(header.numObjects).toBe(120);
+      expect(header.numClusters).toBe(1);
+      expect(header.fieldTableLen).toBe(9);
+      expect(header.dataStartOffset).toBe(0x100n);
+    });
+
+    it('rejects modern headers whose declared cluster boundaries exceed the buffer', () => {
+      const buffer = new Uint8Array(0x100);
+      const view = new DataView(buffer.buffer);
+      view.setUint32(0, DART_SNAPSHOT_MAGIC, true);
+      view.setUint32(4, 5, true);
+      buffer[0x34] = 0;
+      const common = 0x38;
+      view.setUint32(common + 8, 2, true);
+      view.setBigUint64(common + 24, 0xf8n, true);
+      expect(() => parseSnapshotHeader(buffer)).toThrow('cluster boundaries are invalid');
+    });
+
     it('should throw on invalid magic', () => {
       const buffer = new Uint8Array(0x100);
       const view = new DataView(buffer.buffer);
@@ -226,6 +268,7 @@ describe('Dart AOT Layer', () => {
       const mockCtx = {
         x: () => 0n,
         setX: () => {},
+        setD: () => {},
         read: () => new Uint8Array(0),
         write: () => {},
       };
@@ -238,6 +281,7 @@ describe('Dart AOT Layer', () => {
       const mockCtx = {
         x: () => 0n,
         setX: () => {},
+        setD: () => {},
         read: () => new Uint8Array(0),
         write: () => {},
       };
@@ -253,6 +297,7 @@ describe('Dart AOT Layer', () => {
       const mockCtx = {
         x: () => 0n,
         setX: () => {},
+        setD: () => {},
         read: () => new Uint8Array(0),
         write: () => {},
       };

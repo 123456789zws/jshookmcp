@@ -105,43 +105,118 @@ export function parseSnapshotHeader(buffer: Uint8Array): SnapshotHeader {
 
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
-  // +0x00: magic (4 bytes, little-endian)
-  const magic = view.getUint32(0, true);
+  // Try magic in both endianness — newer Flutter SDKs may store the snapshot
+  // with the raw bytes in a different order inside the ELF .rodata section.
+  let magic = view.getUint32(0, true);
+  let isNewFormat = false;
   if (magic !== DART_SNAPSHOT_MAGIC) {
-    throw new ToolError('VALIDATION', `Invalid Dart snapshot magic: 0x${magic.toString(16)}`, {
-      details: {
-        expected: `0x${DART_SNAPSHOT_MAGIC.toString(16)}`,
-        actual: `0x${magic.toString(16)}`,
-      },
-    });
+    // Try byte-swapped: reverse the 4 bytes and re-read
+    const swapped = new Uint8Array(4);
+    swapped[0] = buffer[3]!;
+    swapped[1] = buffer[2]!;
+    swapped[2] = buffer[1]!;
+    swapped[3] = buffer[0]!;
+    const swappedView = new DataView(swapped.buffer);
+    magic = swappedView.getUint32(0, true);
+    if (magic === DART_SNAPSHOT_MAGIC) {
+      isNewFormat = true;
+    } else {
+      throw new ToolError('VALIDATION', `Invalid Dart snapshot magic: 0x${magic.toString(16)}`, {
+        details: {
+          expected: `0x${DART_SNAPSHOT_MAGIC.toString(16)}`,
+          actual: `0x${magic.toString(16)}`,
+        },
+      });
+    }
   }
 
-  // +0x04: kind (4 bytes)
-  const kind = view.getUint32(4, true);
+  // +0x04: kind (legacy) or version word (newer format). Valid kinds are 0-4;
+  // values > 4 indicate a newer SDK header layout.
+  const word04 = view.getUint32(4, true);
+  const isNewHeader = isNewFormat || word04 > 4;
 
-  // +0x08: hash (32 bytes)
-  const hash = buffer.slice(0x08, 0x28);
+  let kind: number;
+  let hash: Uint8Array;
+  let features: bigint;
+  let baseObjects: number;
+  let numObjects: number;
+  let numClusters: number;
+  let fieldTableLen: number;
+  let codeStartOffset: bigint;
+  let dataStartOffset: bigint;
 
-  // +0x28: features (8 bytes as bigint)
-  const features = view.getBigUint64(0x28, true);
+  if (!isNewHeader) {
+    // Legacy format (Flutter ≤3.x, Dart ≤2.19): fixed-offset binary layout.
+    kind = word04;
+    hash = buffer.slice(0x08, 0x28);
+    features = view.getBigUint64(0x28, true);
+    baseObjects = view.getUint32(0x30, true);
+    numObjects = view.getUint32(0x34, true);
+    numClusters = view.getUint32(0x38, true);
+    fieldTableLen = view.getUint32(0x3c, true);
+    codeStartOffset = view.getBigUint64(0x40, true);
+    dataStartOffset = view.getBigUint64(0x48, true);
+  } else {
+    // Newer format (Flutter ≥3.19, Dart ≥3.3):
+    // +0x00: magic (4 bytes, may be byte-swapped in ELF .rodata)
+    // +0x04: version (4 bytes, >4 → newer format)
+    // +0x08: flags (4 bytes)
+    // +0x0c: target_arch (4 bytes, 3=arm64)
+    // +0x10: reserved (4 bytes)
+    // +0x14: snapshot hash as ASCII hex (32 bytes → 16-byte hash)
+    // +0x34: features string (null-terminated ASCII)
+    // After features string: baseObjects/numObjects/numClusters... at aligned offset
+    const hashStr = new TextDecoder().decode(buffer.slice(0x14, 0x34));
+    const binaryHash = new Uint8Array(16);
+    for (let i = 0; i < 16 && i * 2 < hashStr.length; i++) {
+      binaryHash[i] = parseInt(hashStr.substring(i * 2, i * 2 + 2), 16) || 0;
+    }
+    hash = binaryHash;
 
-  // +0x30: baseObjects (4 bytes)
-  const baseObjects = view.getUint32(0x30, true);
+    // Find the null-terminated features string starting at +0x34
+    let featEnd = 0x34;
+    while (featEnd < buffer.length && buffer[featEnd] !== 0) featEnd++;
+    if (featEnd === buffer.length) {
+      throw new ToolError('VALIDATION', 'Modern snapshot features string is not terminated');
+    }
+    const featuresStr = new TextDecoder().decode(buffer.slice(0x34, featEnd));
+    let featHash = 0n;
+    for (let i = 0; i < featuresStr.length && i < 8; i++) {
+      featHash = (featHash << 8n) | BigInt(featuresStr.charCodeAt(i) ?? 0);
+    }
+    features = featHash;
 
-  // +0x34: numObjects (4 bytes)
-  const numObjects = view.getUint32(0x34, true);
+    const commonHeaderOffset = (featEnd + 1 + 7) & ~7;
+    const commonHeaderEnd = commonHeaderOffset + 32;
+    if (commonHeaderEnd > buffer.length) {
+      throw new ToolError('VALIDATION', 'Modern snapshot common header is truncated');
+    }
 
-  // +0x38: numClusters (4 bytes)
-  const numClusters = view.getUint32(0x38, true);
+    kind = 2; // full-aot
+    baseObjects = view.getUint32(commonHeaderOffset, true);
+    numObjects = view.getUint32(commonHeaderOffset + 4, true);
+    numClusters = view.getUint32(commonHeaderOffset + 8, true);
+    fieldTableLen = view.getUint32(commonHeaderOffset + 12, true);
+    codeStartOffset = view.getBigUint64(commonHeaderOffset + 16, true);
+    dataStartOffset = view.getBigUint64(commonHeaderOffset + 24, true);
 
-  // +0x3c: fieldTableLen (4 bytes)
-  const fieldTableLen = view.getUint32(0x3c, true);
-
-  // +0x40: codeStartOffset (8 bytes)
-  const codeStartOffset = view.getBigUint64(0x40, true);
-
-  // +0x48: dataStartOffset (8 bytes)
-  const dataStartOffset = view.getBigUint64(0x48, true);
+    const dataStart = Number(dataStartOffset);
+    const minimumClusterBytes = numClusters * 16;
+    if (
+      !Number.isSafeInteger(dataStart) ||
+      dataStart < commonHeaderEnd ||
+      dataStart > buffer.length ||
+      minimumClusterBytes > buffer.length - dataStart
+    ) {
+      throw new ToolError('VALIDATION', 'Modern snapshot cluster boundaries are invalid', {
+        details: {
+          dataStartOffset: dataStartOffset.toString(),
+          numClusters,
+          bufferSize: buffer.length,
+        },
+      });
+    }
+  }
 
   return {
     magic,

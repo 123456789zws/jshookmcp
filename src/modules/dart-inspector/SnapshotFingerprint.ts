@@ -32,6 +32,7 @@ import { DART_SNAPSHOT_HEADER_SCAN_MAX_BYTES, DART_SNAPSHOT_MAX_FILE_BYTES } fro
 import { ToolError } from '@errors/ToolError';
 
 import {
+  DART_ISOLATE_SNAPSHOT_SYMBOLS,
   DART_SNAPSHOT_MAGIC,
   type FingerprintOptions,
   type ParseOptions,
@@ -49,8 +50,7 @@ const HEADER_HASH_LENGTH = 32;
 const HEADER_FEATURES_OFFSET = 0x28;
 const HEADER_PROBE_BYTES = 4096; // enough for magic + hash + features
 
-const SNAPSHOT_SYMBOL = '_kDartIsolateSnapshotData';
-const ALT_SNAPSHOT_SYMBOL = 'kDartIsolateSnapshotData';
+const [SNAPSHOT_SYMBOL, ALT_SNAPSHOT_SYMBOL] = DART_ISOLATE_SNAPSHOT_SYMBOLS;
 
 const ARCH_TOKENS: Record<string, SnapshotArch> = {
   arm64: 'arm64',

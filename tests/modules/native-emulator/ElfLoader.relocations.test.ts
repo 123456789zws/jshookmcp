@@ -42,6 +42,7 @@ const DT_PLTRELSZ = 2;
 
 // AArch64 reloc types.
 const R_RELATIVE = 1027;
+const R_GLOB_DAT = 1025;
 const R_JUMP_SLOT = 1026;
 
 const STT_FUNC = 2;
@@ -63,7 +64,7 @@ interface BuiltSo {
  *   - a .rela.plt with one R_AARCH64_JUMP_SLOT against malloc
  *   - PT_DYNAMIC pointing at all of the above; NO section headers.
  */
-function buildPicSo(): BuiltSo {
+function buildPicSo(importName = 'malloc', importRelocationType = R_JUMP_SLOT): BuiltSo {
   // Choose a flat layout: everything in one PT_LOAD at vaddr 0, file offset = vaddr.
   const EHDR = 64;
   const PHNUM = 2;
@@ -81,12 +82,12 @@ function buildPicSo(): BuiltSo {
   const codeOff = place(4, 4);
   const signVaddr = codeOff;
 
-  // .dynstr: "\0sign\0malloc\0"
+  // .dynstr: one defined export plus one configurable import.
   const dynstr = Uint8Array.from([
     0,
     ...[...'sign'].map((c) => c.charCodeAt(0)),
     0,
-    ...[...'malloc'].map((c) => c.charCodeAt(0)),
+    ...[...importName].map((c) => c.charCodeAt(0)),
     0,
   ]);
   const nameSign = 1;
@@ -185,7 +186,7 @@ function buildPicSo(): BuiltSo {
 
   // .rela.plt[0] = JUMP_SLOT → patches gotMalloc, sym index 2 (malloc).
   dv.setBigUint64(relaPltOff + 0x00, BigInt(gotMalloc), true);
-  dv.setBigUint64(relaPltOff + 0x08, (2n << 32n) | BigInt(R_JUMP_SLOT), true);
+  dv.setBigUint64(relaPltOff + 0x08, (2n << 32n) | BigInt(importRelocationType), true);
   dv.setBigUint64(relaPltOff + 0x10, 0n, true);
 
   // PT_DYNAMIC entries.
@@ -203,6 +204,8 @@ describe('ElfLoader — PT_DYNAMIC symbol resolution (stripped .so)', () => {
     const elf = new ElfLoader(bytes);
     const symbols = elf.exportedSymbols();
     expect(symbols.get('sign')).toBe(signVaddr);
+    expect(elf.symbolFileOffset('sign')).toBe(signVaddr);
+    expect(elf.symbolFileOffset('missing')).toBeUndefined();
     // malloc is an undefined import (st_shndx=0) → not an export.
     expect(symbols.has('malloc')).toBe(false);
   });
@@ -243,5 +246,21 @@ describe('CpuEngine.loadElf — relocation application + bionic auto-wiring', ()
     engine.writeRegister('x0', 32);
     engine.callHost(stubAddr);
     expect(engine.readRegister('x0')).toBeGreaterThan(0);
+  });
+
+  it('binds imported __sF GLOB_DAT relocations directly to persistent data', () => {
+    const { bytes, gotMalloc } = buildPicSo('__sF', R_GLOB_DAT);
+    const engine = new CpuEngine();
+    const bionic = createBionicLibrary(engine);
+    const dataAddress = bionic.dataSymbols.get('__sF');
+    engine.loadElf(bytes, bionic);
+
+    const slot = engine.readMemory(gotMalloc, 8);
+    const resolved = Number(
+      slot.reduce((value, byte, index) => value | (BigInt(byte) << BigInt(index * 8)), 0n),
+    );
+    expect(resolved).toBe(dataAddress);
+    expect(engine.readMemory(resolved, 3 * 256)).toEqual(new Uint8Array(3 * 256));
+    expect(() => engine.callHost(resolved)).toThrow('No host function registered');
   });
 });

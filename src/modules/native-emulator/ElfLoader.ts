@@ -23,6 +23,7 @@ const PF_X = 0b001;
 const PF_W = 0b010;
 const PF_R = 0b100;
 const EHDR_SIZE = 64;
+const SHT_SYMTAB = 2;
 const SHT_DYNSYM = 11;
 const SYM_SIZE = 24; // sizeof(Elf64_Sym)
 const RELA_SIZE = 24; // sizeof(Elf64_Rela): r_offset(8) r_info(8) r_addend(8)
@@ -200,6 +201,45 @@ export class ElfLoader {
     }
 
     return result;
+  }
+
+  /** Resolve a named ELF symbol to its on-disk byte offset. */
+  symbolFileOffset(name: string): number | undefined {
+    const dynamicValue = this.exportedSymbols().get(name);
+    if (dynamicValue !== undefined) {
+      const offset = this.vaddrToOffset(dynamicValue);
+      if (offset >= 0) return offset;
+    }
+
+    const le = this.isLittleEndian;
+    for (let index = 0; index < this.shnum; index++) {
+      const section = this.sectionHeader(index);
+      if (!section || (section.type !== SHT_SYMTAB && section.type !== SHT_DYNSYM)) continue;
+      const strings = this.sectionHeader(section.link);
+      if (!strings) continue;
+      const entrySize = section.entrySize || SYM_SIZE;
+      const count = Math.floor(section.size / entrySize);
+      for (let symbolIndex = 1; symbolIndex < count; symbolIndex++) {
+        const symbolOffset = section.offset + symbolIndex * entrySize;
+        if (symbolOffset + SYM_SIZE > this.bytes.length) break;
+        const nameOffset = this.view.getUint32(symbolOffset, le);
+        const symbolName = this.readCString(strings.offset, strings.size, nameOffset);
+        if (symbolName !== name) continue;
+        const value = Number(this.view.getBigUint64(symbolOffset + 0x08, le));
+        const offset = this.vaddrToOffset(value);
+        if (offset >= 0) return offset;
+
+        const sectionIndex = this.view.getUint16(symbolOffset + 0x06, le);
+        const target = this.sectionHeader(sectionIndex);
+        if (!target) return undefined;
+        const relative = value - target.address;
+        const fileOffset = target.offset + relative;
+        return fileOffset >= target.offset && fileOffset < target.offset + target.size
+          ? fileOffset
+          : undefined;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -405,6 +445,28 @@ export class ElfLoader {
       if (vaddr >= va && vaddr < va + filesz) return off + (vaddr - va);
     }
     return -1;
+  }
+
+  private sectionHeader(index: number): {
+    type: number;
+    offset: number;
+    address: number;
+    size: number;
+    link: number;
+    entrySize: number;
+  } | null {
+    if (index < 0 || index >= this.shnum) return null;
+    const offset = this.shoff + index * this.shentsize;
+    if (offset < 0 || offset + this.shentsize > this.bytes.length) return null;
+    const le = this.isLittleEndian;
+    return {
+      type: this.view.getUint32(offset + 0x04, le),
+      address: Number(this.view.getBigUint64(offset + 0x10, le)),
+      offset: Number(this.view.getBigUint64(offset + 0x18, le)),
+      size: Number(this.view.getBigUint64(offset + 0x20, le)),
+      link: this.view.getUint32(offset + 0x28, le),
+      entrySize: Number(this.view.getBigUint64(offset + 0x38, le)),
+    };
   }
 
   /** Read a NUL-terminated string from a string table at the given index. */

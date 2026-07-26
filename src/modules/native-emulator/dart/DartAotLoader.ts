@@ -13,7 +13,9 @@
  */
 
 import { extractArm64Libs } from '../apk';
+import { ElfLoader } from '../ElfLoader';
 import { ToolError } from '@errors/ToolError';
+import { DART_ISOLATE_SNAPSHOT_SYMBOLS } from '@modules/dart-inspector/snapshot-types';
 import {
   parseSnapshotHeader,
   extractCodeObjects,
@@ -70,18 +72,20 @@ export class DartAotLoader {
       libappBytes = new Uint8Array(buffer);
     }
 
+    const snapshotBytes = extractSnapshotPayload(libappBytes);
+
     // Parse snapshot header
-    const header = parseSnapshotHeader(libappBytes);
+    const header = parseSnapshotHeader(snapshotBytes);
 
     // Extract all clusters
     const clusters: Cluster[] = [];
     let currentOffset = header.dataStartOffset;
 
     for (let i = 0; i < header.numClusters; i++) {
-      if (Number(currentOffset) >= libappBytes.length) break;
+      if (Number(currentOffset) >= snapshotBytes.length) break;
 
       try {
-        const { cluster, nextOffset } = parseCluster(libappBytes, currentOffset);
+        const { cluster, nextOffset } = parseCluster(snapshotBytes, currentOffset);
         clusters.push(cluster);
         currentOffset = nextOffset;
       } catch (error) {
@@ -92,7 +96,7 @@ export class DartAotLoader {
     }
 
     // Extract Code objects
-    const codeObjects = extractCodeObjects(libappBytes);
+    const codeObjects = extractCodeObjects(snapshotBytes);
 
     // Build ObjectPool registry
     const objectPools: Array<{ address: bigint; pool: ObjectPool }> = [];
@@ -120,7 +124,7 @@ export class DartAotLoader {
       clusters,
       codeObjects,
       objectPools,
-      rawBytes: libappBytes,
+      rawBytes: snapshotBytes,
     };
   }
 
@@ -148,4 +152,18 @@ export class DartAotLoader {
     const entry = snapshot.objectPools.find((p) => p.address === address);
     return entry?.pool;
   }
+}
+
+function extractSnapshotPayload(bytes: Uint8Array): Uint8Array {
+  const isElf = bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46;
+  if (!isElf) return bytes;
+
+  const elf = new ElfLoader(bytes);
+  for (const symbol of DART_ISOLATE_SNAPSHOT_SYMBOLS) {
+    const offset = elf.symbolFileOffset(symbol);
+    if (offset !== undefined) return bytes.subarray(offset);
+  }
+  throw new Error(
+    `ELF does not expose ${DART_ISOLATE_SNAPSHOT_SYMBOLS.join(' or ')}; snapshot location is ambiguous`,
+  );
 }
