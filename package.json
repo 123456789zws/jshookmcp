@@ -60,6 +60,10 @@
     "./plugin-api": {
       "import": "./dist/server/plugin-api.mjs",
       "types": "./dist/server/plugin-api.d.mts"
+    },
+    "./fleet-api": {
+      "import": "./dist/server/fleet-api.mjs",
+      "types": "./dist/server/fleet-api.d.mts"
     }
   },
   "publishConfig": {
