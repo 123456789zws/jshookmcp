@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Browser, Page } from 'rebrowser-puppeteer-core';
 import type { PuppeteerConfig, CodeFile } from '@internal-types/index';
@@ -149,13 +152,23 @@ describe('CodeCollector', () => {
     const browser = createBrowserMock();
     connectMock.mockResolvedValue(browser);
 
-    const collector = new CodeCollector(defaultConfig);
-    await Promise.all(
-      Array.from({ length: 10 }, async () => await collector.connect({ channel: 'stable' })),
-    );
+    const userDataDir = await mkdtemp(join(tmpdir(), 'jshookmcp-code-collector-'));
+    try {
+      await writeFile(
+        join(userDataDir, 'DevToolsActivePort'),
+        '9222\n/devtools/browser/test-browser\n',
+      );
 
-    expect(connectMock).toHaveBeenCalledTimes(1);
-    expect(browser.disconnect).not.toHaveBeenCalled();
+      const collector = new CodeCollector(defaultConfig);
+      await Promise.all(
+        Array.from({ length: 10 }, async () => await collector.connect({ userDataDir })),
+      );
+
+      expect(connectMock).toHaveBeenCalledTimes(1);
+      expect(browser.disconnect).not.toHaveBeenCalled();
+    } finally {
+      await rm(userDataDir, { recursive: true, force: true });
+    }
   });
 
   it('isolates collected file indexes across ten MCP sessions', () => {
