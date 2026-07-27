@@ -129,6 +129,42 @@ Clone 仓库后，在项目根目录创建 `.env` 文件（参考 `.env.example`
 同时共享 embedding、缓存与浏览器运行时。仅在 localhost 使用时可以不设 token；绑定到其他
 地址前必须配置 `MCP_AUTH_TOKEN`。
 
+#### 浏览器 session 与 worker
+
+以下配置控制单个 server 进程中的浏览器请求上限：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `MCP_BROWSER_SESSION_QUEUE_MAX_PENDING` | 当前进程最多排队的浏览器请求数。 | `256` |
+| `MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION` | 单个 session 最多排队的请求数。 | `16` |
+| `MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS` | 请求最长排队时间，单位毫秒。 | `180000` |
+| `MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS` | 调度时间片，单位毫秒。 | `250` |
+| `MCP_BROWSER_SESSION_SCHEDULER_AGING_MS` | 排队 session 提升优先级前的等待时间。 | `15000` |
+| `MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY` | 预期同时活跃的 session 数。 | `10` |
+| `MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION` | 为每个预期 session 保留的排队槽位。 | `1` |
+| `MCP_BROWSER_SESSION_COST_EWMA_ALPHA` | 耗时估算更新系数，取值大于 `0` 且不超过 `1`。 | `0.2` |
+
+运行多个 browser worker 时使用以下配置：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `MCP_BROWSER_FLEET_WORKER_ID` | 当前 worker 的 ID。 | `local` |
+| `MCP_BROWSER_FLEET_WORKERS_JSON` | 包含全部 worker 的 JSON 数组。 | `[{"id":"local"}]` |
+| `MCP_BROWSER_FLEET_VIRTUAL_NODES` | 每单位 worker 权重使用的路由条目数。 | `128` |
+| `MCP_BROWSER_FLEET_LEASE_TTL_MS` | session 分配有效期，必须大于请求最长排队时间。 | `600000` |
+| `MCP_BROWSER_FLEET_MAX_LOCAL_LEASES` | 当前 worker 最多保留的 session 与 session 资源数。 | `4096` |
+
+每个进程使用相同的 worker 数组，并分别设置自己的 worker ID：
+
+```dotenv
+# worker-a
+MCP_BROWSER_FLEET_WORKER_ID=worker-a
+MCP_BROWSER_FLEET_WORKERS_JSON=[{"id":"worker-a","endpoint":"http://10.0.0.11:3000"},{"id":"worker-b","endpoint":"http://10.0.0.12:3000"}]
+```
+
+需要停止向某个 worker 分配新 session 时，将它的 `accepting` 设为 `false`。多 worker 模式还需要
+在 server 启动前通过 `@jshookmcp/jshook/fleet-api` 注册共享 store；单 worker 模式不需要额外配置。
+
 ### 5. 扩展目录、签名与 registry
 
 | 变量                            | 作用                                                                       | 默认值 / 典型值                                                                |

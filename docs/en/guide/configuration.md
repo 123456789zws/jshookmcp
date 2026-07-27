@@ -130,6 +130,43 @@ response routing by `Mcp-Session-Id` while sharing embeddings, caches, and brows
 Authentication is optional on the loopback default; configure `MCP_AUTH_TOKEN` before binding to
 any non-local interface.
 
+#### Browser sessions and workers
+
+The following settings control browser request limits for one server process:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `MCP_BROWSER_SESSION_QUEUE_MAX_PENDING` | Maximum queued browser requests in the process. | `256` |
+| `MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION` | Maximum queued requests for one session. | `16` |
+| `MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS` | Maximum queue wait in milliseconds. | `180000` |
+| `MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS` | Scheduling time slice in milliseconds. | `250` |
+| `MCP_BROWSER_SESSION_SCHEDULER_AGING_MS` | Wait before a queued session is prioritized. | `15000` |
+| `MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY` | Expected number of concurrently active sessions. | `10` |
+| `MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION` | Queue slots reserved for each expected session. | `1` |
+| `MCP_BROWSER_SESSION_COST_EWMA_ALPHA` | Cost estimate update factor, greater than `0` and at most `1`. | `0.2` |
+
+Use these settings when running more than one browser worker:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `MCP_BROWSER_FLEET_WORKER_ID` | ID of the current worker. | `local` |
+| `MCP_BROWSER_FLEET_WORKERS_JSON` | JSON array containing every worker. | `[{"id":"local"}]` |
+| `MCP_BROWSER_FLEET_VIRTUAL_NODES` | Routing entries created per worker weight. | `128` |
+| `MCP_BROWSER_FLEET_LEASE_TTL_MS` | Session assignment lifetime; must exceed the queue wait timeout. | `600000` |
+| `MCP_BROWSER_FLEET_MAX_LOCAL_LEASES` | Maximum sessions and session resources on this worker. | `4096` |
+
+Configure the same worker array on every process and set a different local ID for each process:
+
+```dotenv
+# worker-a
+MCP_BROWSER_FLEET_WORKER_ID=worker-a
+MCP_BROWSER_FLEET_WORKERS_JSON=[{"id":"worker-a","endpoint":"http://10.0.0.11:3000"},{"id":"worker-b","endpoint":"http://10.0.0.12:3000"}]
+```
+
+Set `accepting` to `false` for a worker that should stop receiving new sessions. Multi-worker mode
+also requires a shared store registered from `@jshookmcp/jshook/fleet-api` before server startup;
+single-worker mode needs no additional setup.
+
 ### 5. Extension roots, signatures, and registry
 
 | Variable                        | Purpose                                                           | Default / Typical value                                                        |
