@@ -26,6 +26,19 @@ describe('config utilities', () => {
     dotenvMock.config.mockClear();
     delete process.env.MCP_SERVER_NAME;
     delete process.env.MCP_SERVER_VERSION;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS;
+    delete process.env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS;
+    delete process.env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS;
+    delete process.env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY;
+    delete process.env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION;
+    delete process.env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA;
+    delete process.env.MCP_BROWSER_FLEET_WORKER_ID;
+    delete process.env.MCP_BROWSER_FLEET_WORKERS_JSON;
+    delete process.env.MCP_BROWSER_FLEET_VIRTUAL_NODES;
+    delete process.env.MCP_BROWSER_FLEET_LEASE_TTL_MS;
+    delete process.env.MCP_BROWSER_FLEET_MAX_LOCAL_LEASES;
     delete process.env.PUPPETEER_HEADLESS;
     delete process.env.PUPPETEER_EXECUTABLE_PATH;
     delete process.env.BROWSER_EXECUTABLE_PATH;
@@ -87,6 +100,19 @@ describe('config utilities', () => {
     const config = getConfig();
     expect(config.mcp.name).toBe('jshookmcp');
     expect(config.mcp.version.length).toBeGreaterThan(0);
+    expect(config.mcp.browserSessionQueueMaxPending).toBe(256);
+    expect(config.mcp.browserSessionQueueMaxPendingPerSession).toBe(16);
+    expect(config.mcp.browserSessionQueueWaitTimeoutMs).toBe(180_000);
+    expect(config.mcp.browserSessionSchedulerQuantumMs).toBe(250);
+    expect(config.mcp.browserSessionSchedulerAgingMs).toBe(15_000);
+    expect(config.mcp.browserSessionExpectedConcurrency).toBe(10);
+    expect(config.mcp.browserSessionReservedPendingPerSession).toBe(1);
+    expect(config.mcp.browserSessionCostEwmaAlpha).toBe(0.2);
+    expect(config.mcp.browserFleetWorkerId).toBe('local');
+    expect(config.mcp.browserFleetWorkers).toEqual([{ id: 'local' }]);
+    expect(config.mcp.browserFleetVirtualNodes).toBe(128);
+    expect(config.mcp.browserFleetLeaseTtlMs).toBe(600_000);
+    expect(config.mcp.browserFleetMaxLocalLeases).toBe(4096);
     expect(config.puppeteer.timeout).toBe(30000);
     expect(config.cache.ttl).toBe(3600);
     expect(config.performance.maxConcurrentAnalysis).toBe(3);
@@ -131,6 +157,52 @@ describe('config utilities', () => {
     const config = getConfig();
     expect(config.mcp.name).toBe('custom-server');
     expect(config.mcp.version).toBe('9.9.9');
+  });
+
+  it('reads browser session scheduler limits from environment', async () => {
+    process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING = '80';
+    process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION = '8';
+    process.env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS = '12000';
+    process.env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS = '125';
+    process.env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS = '4000';
+    process.env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY = '10';
+    process.env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION = '2';
+    process.env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA = '0.35';
+
+    const { getConfig } = await import('@utils/config');
+    expect(getConfig().mcp).toMatchObject({
+      browserSessionQueueMaxPending: 80,
+      browserSessionQueueMaxPendingPerSession: 8,
+      browserSessionQueueWaitTimeoutMs: 12_000,
+      browserSessionSchedulerQuantumMs: 125,
+      browserSessionSchedulerAgingMs: 4_000,
+      browserSessionExpectedConcurrency: 10,
+      browserSessionReservedPendingPerSession: 2,
+      browserSessionCostEwmaAlpha: 0.35,
+    });
+  });
+
+  it('reads a typed browser fleet topology from environment', async () => {
+    process.env.MCP_BROWSER_FLEET_WORKER_ID = 'worker-a';
+    process.env.MCP_BROWSER_FLEET_WORKERS_JSON = JSON.stringify([
+      { id: 'worker-a', endpoint: 'http://worker-a', weight: 2 },
+      { id: 'worker-b', endpoint: 'http://worker-b', accepting: false },
+    ]);
+    process.env.MCP_BROWSER_FLEET_VIRTUAL_NODES = '64';
+    process.env.MCP_BROWSER_FLEET_LEASE_TTL_MS = '900000';
+    process.env.MCP_BROWSER_FLEET_MAX_LOCAL_LEASES = '8192';
+
+    const { getConfig } = await import('@utils/config');
+    expect(getConfig().mcp).toMatchObject({
+      browserFleetWorkerId: 'worker-a',
+      browserFleetWorkers: [
+        { id: 'worker-a', endpoint: 'http://worker-a', weight: 2 },
+        { id: 'worker-b', endpoint: 'http://worker-b', accepting: false },
+      ],
+      browserFleetVirtualNodes: 64,
+      browserFleetLeaseTtlMs: 900_000,
+      browserFleetMaxLocalLeases: 8192,
+    });
   });
 
   it('reads reverse-engineering runtime limits from environment', async () => {

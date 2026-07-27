@@ -10,6 +10,14 @@ describe('config validation – extended checks', () => {
     delete process.env.CACHE_TTL;
     delete process.env.MAX_CONCURRENT_ANALYSIS;
     delete process.env.MAX_CODE_SIZE_MB;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION;
+    delete process.env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS;
+    delete process.env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS;
+    delete process.env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS;
+    delete process.env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY;
+    delete process.env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION;
+    delete process.env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA;
     delete process.env.SEARCH_QUERY_CATEGORY_PROFILES_JSON;
     delete process.env.SEARCH_CJK_QUERY_ALIASES_JSON;
     delete process.env.SEARCH_INTENT_TOOL_BOOST_RULES_JSON;
@@ -33,6 +41,35 @@ describe('config validation – extended checks', () => {
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain('cache.ttl must be non-negative');
+  });
+
+  it('validates browser session scheduler limits', () => {
+    const config = getConfig();
+    config.mcp.browserSessionQueueMaxPending = 4;
+    config.mcp.browserSessionQueueMaxPendingPerSession = 5;
+    config.mcp.browserSessionQueueWaitTimeoutMs = 0;
+    config.mcp.browserSessionSchedulerQuantumMs = 0;
+    config.mcp.browserSessionSchedulerAgingMs = 0;
+    config.mcp.browserSessionExpectedConcurrency = 0;
+    config.mcp.browserSessionReservedPendingPerSession = -1;
+    config.mcp.browserSessionCostEwmaAlpha = 2;
+
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      'mcp.browserSessionQueueMaxPendingPerSession must not exceed ' +
+        'mcp.browserSessionQueueMaxPending',
+    );
+    expect(result.errors).toContain('mcp.browserSessionQueueWaitTimeoutMs must be at least 1');
+    expect(result.errors).toContain('mcp.browserSessionSchedulerQuantumMs must be at least 1');
+    expect(result.errors).toContain('mcp.browserSessionSchedulerAgingMs must be at least 1');
+    expect(result.errors).toContain('mcp.browserSessionExpectedConcurrency must be at least 1');
+    expect(result.errors).toContain(
+      'mcp.browserSessionReservedPendingPerSession must not be negative',
+    );
+    expect(result.errors).toContain(
+      'mcp.browserSessionCostEwmaAlpha must be greater than 0 and at most 1',
+    );
   });
 
   it('passes validation with correct defaults', () => {

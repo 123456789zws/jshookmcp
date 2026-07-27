@@ -6,8 +6,10 @@ import { config as dotenvConfig } from 'dotenv';
 import { z } from 'zod';
 import { DEFAULT_SEARCH_CONFIG } from '@src/config/search-defaults';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '@src/constants/search-model';
+import { logger } from './logger';
 import { getPackageVersion } from './packageVersion';
 import type {
+  BrowserFleetWorkerConfig,
   Config,
   ReverseEngineeringConfig,
   SearchCjkQueryAliasConfig,
@@ -68,6 +70,18 @@ const CONFIG_DEFAULTS = {
   mcp: {
     name: 'jshookmcp',
     version: getPackageVersion(import.meta.url),
+    browserSessionQueueMaxPending: 256,
+    browserSessionQueueMaxPendingPerSession: 16,
+    browserSessionQueueWaitTimeoutMs: 180_000,
+    browserSessionSchedulerQuantumMs: 250,
+    browserSessionSchedulerAgingMs: 15_000,
+    browserSessionExpectedConcurrency: 10,
+    browserSessionReservedPendingPerSession: 1,
+    browserSessionCostEwmaAlpha: 0.2,
+    browserFleetWorkerId: 'local',
+    browserFleetVirtualNodes: 128,
+    browserFleetLeaseTtlMs: 600_000,
+    browserFleetMaxLocalLeases: 4096,
   },
   cache: {
     enabled: false,
@@ -211,6 +225,44 @@ const ConfigSchema = z.object({
   // MCP
   MCP_SERVER_NAME: z.string().optional().default(CONFIG_DEFAULTS.mcp.name),
   MCP_SERVER_VERSION: z.string().optional().default(CONFIG_DEFAULTS.mcp.version),
+  MCP_BROWSER_SESSION_QUEUE_MAX_PENDING: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPending,
+  ).pipe(z.number().min(1).max(100_000)),
+  MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPendingPerSession,
+  ).pipe(z.number().min(1).max(100_000)),
+  MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionQueueWaitTimeoutMs,
+  ).pipe(z.number().min(1).max(3_600_000)),
+  MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionSchedulerQuantumMs,
+  ).pipe(z.number().min(1).max(60_000)),
+  MCP_BROWSER_SESSION_SCHEDULER_AGING_MS: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionSchedulerAgingMs,
+  ).pipe(z.number().min(1).max(3_600_000)),
+  MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionExpectedConcurrency,
+  ).pipe(z.number().min(1).max(10_000)),
+  MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION: envInt(
+    CONFIG_DEFAULTS.mcp.browserSessionReservedPendingPerSession,
+  ).pipe(z.number().min(0).max(10_000)),
+  MCP_BROWSER_SESSION_COST_EWMA_ALPHA: envFloat(
+    CONFIG_DEFAULTS.mcp.browserSessionCostEwmaAlpha,
+  ).pipe(z.number().gt(0).max(1)),
+  MCP_BROWSER_FLEET_WORKER_ID: z
+    .string()
+    .optional()
+    .default(CONFIG_DEFAULTS.mcp.browserFleetWorkerId),
+  MCP_BROWSER_FLEET_WORKERS_JSON: z.string().optional().default(''),
+  MCP_BROWSER_FLEET_VIRTUAL_NODES: envInt(CONFIG_DEFAULTS.mcp.browserFleetVirtualNodes).pipe(
+    z.number().min(1).max(4096),
+  ),
+  MCP_BROWSER_FLEET_LEASE_TTL_MS: envInt(CONFIG_DEFAULTS.mcp.browserFleetLeaseTtlMs).pipe(
+    z.number().min(1000).max(86_400_000),
+  ),
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES: envInt(CONFIG_DEFAULTS.mcp.browserFleetMaxLocalLeases).pipe(
+    z.number().min(1).max(1_000_000),
+  ),
 
   // Cache
   ENABLE_CACHE: envBool(CONFIG_DEFAULTS.cache.enabled),
@@ -588,6 +640,66 @@ function coerceFloatEnv(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function parseBrowserFleetWorkers(
+  value: unknown,
+  localWorkerId: string,
+): BrowserFleetWorkerConfig[] {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return [{ id: localWorkerId }];
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new TypeError('expected a non-empty JSON array');
+    }
+    const seen = new Set<string>();
+    const workers = parsed.map((item, index): BrowserFleetWorkerConfig => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+        throw new TypeError(`worker at index ${index} must be an object`);
+      }
+      const record = item as Record<string, unknown>;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      if (!id) throw new TypeError(`worker at index ${index} requires a non-empty id`);
+      if (seen.has(id)) throw new TypeError(`duplicate worker id: ${id}`);
+      seen.add(id);
+      const endpoint =
+        typeof record.endpoint === 'string' && record.endpoint.trim().length > 0
+          ? record.endpoint.trim()
+          : undefined;
+      const weight =
+        typeof record.weight === 'number' &&
+        Number.isInteger(record.weight) &&
+        record.weight >= 1 &&
+        record.weight <= 100
+          ? record.weight
+          : undefined;
+      if (record.weight !== undefined && weight === undefined) {
+        throw new TypeError(`worker ${id} weight must be an integer from 1 to 100`);
+      }
+      const accepting = typeof record.accepting === 'boolean' ? record.accepting : undefined;
+      return {
+        id,
+        ...(endpoint ? { endpoint } : {}),
+        ...(weight ? { weight } : {}),
+        ...(accepting === undefined ? {} : { accepting }),
+      };
+    });
+    if (!seen.has(localWorkerId)) {
+      throw new TypeError(`topology does not contain local worker ${localWorkerId}`);
+    }
+    if (!workers.some((worker) => worker.accepting !== false)) {
+      throw new TypeError('topology has no accepting worker');
+    }
+    return workers;
+  } catch (error) {
+    logger.warn(
+      `[Config] Invalid MCP_BROWSER_FLEET_WORKERS_JSON; using local worker only: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return [{ id: localWorkerId }];
+  }
+}
+
 function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEngineeringConfig {
   const defaults = CONFIG_DEFAULTS.reverseEngineering;
   return {
@@ -839,6 +951,15 @@ export function getConfig(): Config {
       homedir(),
     ),
   };
+  const browserFleetWorkerId =
+    typeof env.MCP_BROWSER_FLEET_WORKER_ID === 'string' &&
+    env.MCP_BROWSER_FLEET_WORKER_ID.trim().length > 0
+      ? env.MCP_BROWSER_FLEET_WORKER_ID.trim()
+      : CONFIG_DEFAULTS.mcp.browserFleetWorkerId;
+  const browserFleetWorkers = parseBrowserFleetWorkers(
+    env.MCP_BROWSER_FLEET_WORKERS_JSON,
+    browserFleetWorkerId,
+  );
 
   return {
     puppeteer: {
@@ -849,6 +970,52 @@ export function getConfig(): Config {
     mcp: {
       name: (env.MCP_SERVER_NAME as string) || CONFIG_DEFAULTS.mcp.name,
       version: (env.MCP_SERVER_VERSION as string) || CONFIG_DEFAULTS.mcp.version,
+      browserSessionQueueMaxPending: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING,
+        CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPending,
+      ),
+      browserSessionQueueMaxPendingPerSession: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION,
+        CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPendingPerSession,
+      ),
+      browserSessionQueueWaitTimeoutMs: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS,
+        CONFIG_DEFAULTS.mcp.browserSessionQueueWaitTimeoutMs,
+      ),
+      browserSessionSchedulerQuantumMs: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS,
+        CONFIG_DEFAULTS.mcp.browserSessionSchedulerQuantumMs,
+      ),
+      browserSessionSchedulerAgingMs: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS,
+        CONFIG_DEFAULTS.mcp.browserSessionSchedulerAgingMs,
+      ),
+      browserSessionExpectedConcurrency: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY,
+        CONFIG_DEFAULTS.mcp.browserSessionExpectedConcurrency,
+      ),
+      browserSessionReservedPendingPerSession: coerceIntegerEnv(
+        env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION,
+        CONFIG_DEFAULTS.mcp.browserSessionReservedPendingPerSession,
+      ),
+      browserSessionCostEwmaAlpha: coerceFloatEnv(
+        env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA,
+        CONFIG_DEFAULTS.mcp.browserSessionCostEwmaAlpha,
+      ),
+      browserFleetWorkerId,
+      browserFleetWorkers,
+      browserFleetVirtualNodes: coerceIntegerEnv(
+        env.MCP_BROWSER_FLEET_VIRTUAL_NODES,
+        CONFIG_DEFAULTS.mcp.browserFleetVirtualNodes,
+      ),
+      browserFleetLeaseTtlMs: coerceIntegerEnv(
+        env.MCP_BROWSER_FLEET_LEASE_TTL_MS,
+        CONFIG_DEFAULTS.mcp.browserFleetLeaseTtlMs,
+      ),
+      browserFleetMaxLocalLeases: coerceIntegerEnv(
+        env.MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+        CONFIG_DEFAULTS.mcp.browserFleetMaxLocalLeases,
+      ),
     },
     cache: {
       enabled: coerceBooleanEnv(env.ENABLE_CACHE, CONFIG_DEFAULTS.cache.enabled),
@@ -873,6 +1040,81 @@ export function getConfig(): Config {
 
 export function validateConfig(config: Config): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
+
+  if (config.mcp.browserSessionQueueMaxPending < 1) {
+    errors.push('mcp.browserSessionQueueMaxPending must be at least 1');
+  }
+
+  if (config.mcp.browserSessionQueueMaxPendingPerSession < 1) {
+    errors.push('mcp.browserSessionQueueMaxPendingPerSession must be at least 1');
+  } else if (
+    config.mcp.browserSessionQueueMaxPendingPerSession > config.mcp.browserSessionQueueMaxPending
+  ) {
+    errors.push(
+      'mcp.browserSessionQueueMaxPendingPerSession must not exceed ' +
+        'mcp.browserSessionQueueMaxPending',
+    );
+  }
+
+  if (config.mcp.browserSessionQueueWaitTimeoutMs < 1) {
+    errors.push('mcp.browserSessionQueueWaitTimeoutMs must be at least 1');
+  }
+
+  if (config.mcp.browserSessionSchedulerQuantumMs < 1) {
+    errors.push('mcp.browserSessionSchedulerQuantumMs must be at least 1');
+  }
+
+  if (config.mcp.browserSessionSchedulerAgingMs < 1) {
+    errors.push('mcp.browserSessionSchedulerAgingMs must be at least 1');
+  } else if (
+    config.mcp.browserSessionSchedulerAgingMs >= config.mcp.browserSessionQueueWaitTimeoutMs
+  ) {
+    errors.push(
+      'mcp.browserSessionSchedulerAgingMs must be less than ' +
+        'mcp.browserSessionQueueWaitTimeoutMs',
+    );
+  }
+
+  if (config.mcp.browserSessionExpectedConcurrency < 1) {
+    errors.push('mcp.browserSessionExpectedConcurrency must be at least 1');
+  }
+
+  if (config.mcp.browserSessionReservedPendingPerSession < 0) {
+    errors.push('mcp.browserSessionReservedPendingPerSession must not be negative');
+  } else if (
+    config.mcp.browserSessionExpectedConcurrency *
+      config.mcp.browserSessionReservedPendingPerSession >
+    config.mcp.browserSessionQueueMaxPending
+  ) {
+    errors.push(
+      'reserved browser session capacity must not exceed mcp.browserSessionQueueMaxPending',
+    );
+  }
+
+  if (config.mcp.browserSessionCostEwmaAlpha <= 0 || config.mcp.browserSessionCostEwmaAlpha > 1) {
+    errors.push('mcp.browserSessionCostEwmaAlpha must be greater than 0 and at most 1');
+  }
+
+  if (!config.mcp.browserFleetWorkerId.trim()) {
+    errors.push('mcp.browserFleetWorkerId must not be empty');
+  }
+  if (
+    !config.mcp.browserFleetWorkers.some((worker) => worker.id === config.mcp.browserFleetWorkerId)
+  ) {
+    errors.push('mcp.browserFleetWorkers must contain mcp.browserFleetWorkerId');
+  }
+  if (!config.mcp.browserFleetWorkers.some((worker) => worker.accepting !== false)) {
+    errors.push('mcp.browserFleetWorkers must contain at least one accepting worker');
+  }
+  if (config.mcp.browserFleetVirtualNodes < 1) {
+    errors.push('mcp.browserFleetVirtualNodes must be at least 1');
+  }
+  if (config.mcp.browserFleetLeaseTtlMs <= config.mcp.browserSessionQueueWaitTimeoutMs) {
+    errors.push('mcp.browserFleetLeaseTtlMs must exceed mcp.browserSessionQueueWaitTimeoutMs');
+  }
+  if (config.mcp.browserFleetMaxLocalLeases < 1) {
+    errors.push('mcp.browserFleetMaxLocalLeases must be at least 1');
+  }
 
   if (config.performance.maxConcurrentAnalysis < 1) {
     errors.push('maxConcurrentAnalysis must be at least 1');

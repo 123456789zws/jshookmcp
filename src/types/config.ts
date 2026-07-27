@@ -24,6 +24,26 @@ export interface PuppeteerConfig {
 export interface MCPConfig {
   name: string;
   version: string;
+  browserSessionQueueMaxPending: number;
+  browserSessionQueueMaxPendingPerSession: number;
+  browserSessionQueueWaitTimeoutMs: number;
+  browserSessionSchedulerQuantumMs: number;
+  browserSessionSchedulerAgingMs: number;
+  browserSessionExpectedConcurrency: number;
+  browserSessionReservedPendingPerSession: number;
+  browserSessionCostEwmaAlpha: number;
+  browserFleetWorkerId: string;
+  browserFleetWorkers: BrowserFleetWorkerConfig[];
+  browserFleetVirtualNodes: number;
+  browserFleetLeaseTtlMs: number;
+  browserFleetMaxLocalLeases: number;
+}
+
+export interface BrowserFleetWorkerConfig {
+  id: string;
+  endpoint?: string;
+  weight?: number;
+  accepting?: boolean;
 }
 
 export interface CacheConfig {

@@ -3,6 +3,7 @@ export type {
   Config,
   PuppeteerConfig,
   MCPConfig,
+  BrowserFleetWorkerConfig,
   CacheConfig,
   PerformanceConfig,
   SearchConfig,
