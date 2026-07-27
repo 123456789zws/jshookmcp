@@ -103,7 +103,7 @@ describe('NetworkMonitor.impl – additional coverage', () => {
 
       await monitor.disable();
 
-      expect(send).toHaveBeenCalledWith('Network.disable');
+      expect(send).toHaveBeenCalledWith('Network.disable', undefined);
       expect(monitor.isEnabled()).toBe(false);
     });
 

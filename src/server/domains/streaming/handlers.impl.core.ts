@@ -192,4 +192,11 @@ export class StreamingToolHandlers {
 
   handleWebRtcExportCapture = (args: Record<string, unknown>) =>
     this.webrtc.handleWebRtcExportCapture(args);
+
+  async close(): Promise<void> {
+    await Promise.allSettled([
+      this.ws.handleWsMonitorDisable({}),
+      this.grpc.handleGrpcMonitorDisable({}),
+    ]);
+  }
 }

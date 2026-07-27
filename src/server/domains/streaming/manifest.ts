@@ -6,6 +6,10 @@ import {
 } from '@server/domains/shared/registry';
 import { streamingTools } from '@server/domains/streaming/definitions';
 import type { StreamingToolHandlers } from '@server/domains/streaming/index';
+import {
+  SessionScopedResourcePool,
+  sessionResourcePoolOptions,
+} from '@server/runtime/SessionScopedResourcePool';
 
 const DOMAIN = 'streaming' as const;
 const DEP_KEY = 'streamingHandlers' as const;
@@ -40,7 +44,20 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   const { StreamingToolHandlers } = await import('@server/domains/streaming/index');
 
   await ensureBrowserCore(ctx);
-  if (!ctx.streamingHandlers) ctx.streamingHandlers = new StreamingToolHandlers(ctx.collector!);
+  if (!ctx.streamingHandlers) {
+    const createHandlers = () => new StreamingToolHandlers(ctx.collector!);
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        createHandlers,
+        async (handlers) => await handlers.close(),
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionStreamingHandlersPool', pool);
+      ctx.streamingHandlers = pool.getProxy();
+    } else {
+      ctx.streamingHandlers = createHandlers();
+    }
+  }
   return ctx.streamingHandlers;
 }
 

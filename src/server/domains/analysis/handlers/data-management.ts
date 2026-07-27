@@ -23,13 +23,17 @@ export class DataManagementHandlers {
 
   async handleClearCollectedData(): Promise<ToolResponse> {
     return handleSafe(async () => {
-      await this.collector.clearAllData();
+      if (typeof this.collector.clearSessionData === 'function') {
+        this.collector.clearSessionData();
+      } else {
+        await this.collector.clearAllData();
+      }
       this.scriptManager.clear();
       return {
-        message: 'All collected data cleared.',
+        message: 'Current MCP session collected view cleared.',
         cleared: {
-          fileCache: true,
-          compressionCache: true,
+          fileCache: false,
+          compressionCache: false,
           collectedUrls: true,
           scriptManager: true,
         },

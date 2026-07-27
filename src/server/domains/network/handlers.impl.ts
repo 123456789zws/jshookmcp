@@ -71,6 +71,13 @@ export class AdvancedToolHandlers {
     return this.performanceMonitor;
   }
 
+  async close(): Promise<void> {
+    if (this.performanceMonitor) {
+      await this.performanceMonitor.close();
+      this.performanceMonitor = null;
+    }
+  }
+
   handleNetworkEnable = (args: Record<string, unknown>) => this.core.handleNetworkEnable(args);
   handleNetworkDisable = (args: Record<string, unknown>) => this.core.handleNetworkDisable(args);
   handleNetworkGetStatus = (args: Record<string, unknown>) =>

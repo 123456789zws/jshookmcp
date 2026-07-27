@@ -17,6 +17,10 @@ import type { ReverseEvidenceGraph } from '@server/evidence/ReverseEvidenceGraph
 import type { RuntimeSnapshotScheduler } from '@server/persistence/RuntimeSnapshotScheduler';
 import type { ToolResponse } from '@server/types';
 import { resolve } from 'node:path';
+import {
+  SessionScopedResourcePool,
+  sessionResourcePoolOptions,
+} from '@server/runtime/SessionScopedResourcePool';
 
 const DOMAIN = 'instrumentation' as const;
 const DEP_KEY = 'instrumentationHandlers' as const;
@@ -104,11 +108,31 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   await ensureBrowserCore(ctx);
   if (!ctx.aiHookHandlers) {
     const { AIHookToolHandlers } = await import('@server/domains/instrumentation/hooks/index');
-    ctx.aiHookHandlers = new AIHookToolHandlers(ctx.pageController!);
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        () => new AIHookToolHandlers(ctx.pageController!),
+        undefined,
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionAiHookHandlersPool', pool);
+      ctx.aiHookHandlers = pool.getProxy();
+    } else {
+      ctx.aiHookHandlers = new AIHookToolHandlers(ctx.pageController!);
+    }
   }
   if (!ctx.hookPresetHandlers) {
     const { HookPresetToolHandlers } = await import('@server/domains/instrumentation/hooks/index');
-    ctx.hookPresetHandlers = new HookPresetToolHandlers(ctx.pageController!);
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        () => new HookPresetToolHandlers(ctx.pageController!),
+        undefined,
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionHookPresetHandlersPool', pool);
+      ctx.hookPresetHandlers = pool.getProxy();
+    } else {
+      ctx.hookPresetHandlers = new HookPresetToolHandlers(ctx.pageController!);
+    }
   }
 
   // Evidence — shared graph singleton

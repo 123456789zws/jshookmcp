@@ -476,7 +476,7 @@ describe('canvas domain ensure()', () => {
 
     await manifest.ensure(ctx as never);
 
-    expect(ctx.setDomainInstance).not.toHaveBeenCalled();
+    expect(ctx.setDomainInstance).not.toHaveBeenCalledWith('evidenceGraph', expect.anything());
   });
 
   it('creates CanvasToolHandlers with all dependencies', async () => {

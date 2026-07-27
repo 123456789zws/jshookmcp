@@ -8,6 +8,10 @@ import { workflowToolDefinitions } from '@server/domains/workflow/definitions';
 import { macroTools } from '@server/domains/workflow/macro/definitions';
 import type { WorkflowHandlers } from '@server/domains/workflow/index';
 import type { MacroToolHandlers } from '@server/domains/workflow/macro';
+import {
+  SessionScopedResourcePool,
+  sessionResourcePoolOptions,
+} from '@server/runtime/SessionScopedResourcePool';
 
 const DOMAIN = 'workflow' as const;
 const DEP_KEY = 'workflowHandlers' as const;
@@ -55,11 +59,23 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   const advancedHandlers = ctx.handlerDeps.advancedHandlers as typeof ctx.advancedHandlers;
 
   if (!ctx.workflowHandlers) {
-    ctx.workflowHandlers = new WorkflowHandlers({
-      browserHandlers: browserHandlers!,
-      advancedHandlers: advancedHandlers!,
-      serverContext: ctx,
-    });
+    const createHandlers = () =>
+      new WorkflowHandlers({
+        browserHandlers: browserHandlers!,
+        advancedHandlers: advancedHandlers!,
+        serverContext: ctx,
+      });
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        createHandlers,
+        undefined,
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionWorkflowHandlersPool', pool);
+      ctx.workflowHandlers = pool.getProxy();
+    } else {
+      ctx.workflowHandlers = createHandlers();
+    }
   }
 
   // Macro handlers (merged from the former macro domain)

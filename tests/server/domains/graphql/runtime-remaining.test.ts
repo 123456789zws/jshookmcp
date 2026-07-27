@@ -15,6 +15,7 @@ import { GraphQLToolHandlersIntrospection } from '@server/domains/graphql/handle
 import { GraphQLToolHandlersRuntime } from '@server/domains/graphql/handlers.impl.core.runtime.replay';
 import { GraphQLToolHandlersScriptReplace } from '@server/domains/graphql/handlers.impl.core.runtime.script-replace';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 interface IntrospectResponse {
   success: boolean;
@@ -484,6 +485,25 @@ describe('GraphQLToolHandlersScriptReplace - additional coverage', () => {
       }),
     );
     expect(body2.activeRuleCount).toBe(2);
+  });
+
+  it('keeps replacement rule counts isolated across ten MCP sessions', async () => {
+    const results = await Promise.all(
+      Array.from(
+        { length: 10 },
+        async (_, index) =>
+          await runWithToolRequestContext({ sessionId: `session-${index}` }, async () =>
+            parseJson<ScriptReplaceResponse>(
+              await handlers.handleScriptReplacePersist({
+                url: `/session-${index}.js`,
+                replacement: `owner(${index})`,
+              }),
+            ),
+          ),
+      ),
+    );
+
+    expect(results.every((body) => body.activeRuleCount === 1)).toBe(true);
   });
 
   it('calls evaluateOnNewDocument with rule metadata', async () => {

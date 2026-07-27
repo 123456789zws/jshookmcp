@@ -1,13 +1,10 @@
 import type { DomainManifest, MCPServerContext } from '@server/domains/shared/registry';
-import {
-  defineMethodRegistrations,
-  ensureBrowserCore,
-  toolLookup,
-} from '@server/domains/shared/registry';
+import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
 import { debuggerTools } from '@server/domains/debugger/definitions';
 import { antidebugTools } from '@server/domains/debugger/antidebug/definitions';
 import type { DebuggerToolHandlers } from '@server/domains/debugger/index';
 import type { AntiDebugToolHandlers } from '@server/domains/debugger/antidebug/index';
+import { ensureDebuggerCore } from '@server/registry/ensure-debugger-core';
 
 const DOMAIN = 'debugger' as const;
 const DEP_KEY = 'debuggerHandlers' as const;
@@ -58,22 +55,16 @@ const registrations = [
 ];
 
 async function ensure(ctx: MCPServerContext): Promise<H> {
-  const { DebuggerManager, RuntimeInspector } = await import('@server/domains/shared/modules');
   const { DebuggerToolHandlers } = await import('@server/domains/debugger/index');
-  await ensureBrowserCore(ctx);
-  if (!ctx.debuggerManager || !ctx.runtimeInspector || !ctx.debuggerHandlers) {
-    if (!ctx.debuggerManager) ctx.debuggerManager = new DebuggerManager(ctx.collector!);
-    if (!ctx.runtimeInspector)
-      ctx.runtimeInspector = new RuntimeInspector(ctx.collector!, ctx.debuggerManager);
-    if (!ctx.debuggerHandlers) {
-      const pageController = ctx.pageController;
-      ctx.debuggerHandlers = new DebuggerToolHandlers(
-        ctx.debuggerManager,
-        ctx.runtimeInspector,
-        ctx.eventBus,
-        pageController ? async () => pageController.getPage() : undefined,
-      );
-    }
+  await ensureDebuggerCore(ctx);
+  if (!ctx.debuggerHandlers) {
+    const pageController = ctx.pageController;
+    ctx.debuggerHandlers = new DebuggerToolHandlers(
+      ctx.debuggerManager!,
+      ctx.runtimeInspector!,
+      ctx.eventBus,
+      pageController ? async () => pageController.getPage() : undefined,
+    );
   }
 
   // Secondary: antidebugHandlers

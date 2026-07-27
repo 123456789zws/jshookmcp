@@ -207,7 +207,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      await this.cdpSession.send('Network.enable', {
+      await this.sendCdp('Network.enable', {
         maxTotalBufferSize: 10000000,
         maxResourceBufferSize: 5000000,
         maxPostDataSize: 65536,
@@ -353,7 +353,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     if (response.fromCache) return;
 
     try {
-      const rawResult = (await this.cdpSession.send('Network.getResponseBody', {
+      const rawResult = (await this.sendCdp('Network.getResponseBody', {
         requestId: this.toRawRequestId(requestId),
       })) as unknown;
 
@@ -414,7 +414,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      await this.cdpSession.send('Network.disable');
+      await this.sendCdp('Network.disable');
     } catch (error) {
       logger.warn('Failed to disable Network domain:', error);
     }
@@ -530,7 +530,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      const rawResult = (await this.cdpSession.send('Network.getResponseBody', {
+      const rawResult = (await this.sendCdp('Network.getResponseBody', {
         requestId: this.toRawRequestId(requestId),
       })) as unknown;
 
@@ -674,12 +674,12 @@ export class NetworkMonitor implements NetworkMonitorLike {
     const interceptorCode = buildXHRInterceptorCode(this.MAX_INJECTED_RECORDS);
 
     if (options?.persistent) {
-      await this.cdpSession.send('Page.addScriptToEvaluateOnNewDocument', {
+      await this.sendCdp('Page.addScriptToEvaluateOnNewDocument', {
         source: interceptorCode,
       });
       logger.info('XHR interceptor injected (persistent)');
     } else {
-      await this.cdpSession.send('Runtime.evaluate', {
+      await this.sendCdp('Runtime.evaluate', {
         expression: interceptorCode,
       });
       logger.info('XHR interceptor injected');
@@ -693,12 +693,12 @@ export class NetworkMonitor implements NetworkMonitorLike {
     const interceptorCode = buildFetchInterceptorCode(this.MAX_INJECTED_RECORDS);
 
     if (options?.persistent) {
-      await this.cdpSession.send('Page.addScriptToEvaluateOnNewDocument', {
+      await this.sendCdp('Page.addScriptToEvaluateOnNewDocument', {
         source: interceptorCode,
       });
       logger.info('Fetch interceptor injected (persistent)');
     } else {
-      await this.cdpSession.send('Runtime.evaluate', {
+      await this.sendCdp('Runtime.evaluate', {
         expression: interceptorCode,
       });
       logger.info('Fetch interceptor injected');
@@ -711,7 +711,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      const rawResult = (await this.cdpSession.send('Runtime.evaluate', {
+      const rawResult = (await this.sendCdp('Runtime.evaluate', {
         expression: 'window.__getXHRRequests ? window.__getXHRRequests() : []',
         returnByValue: true,
       })) as unknown;
@@ -733,7 +733,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      const rawResult = (await this.cdpSession.send('Runtime.evaluate', {
+      const rawResult = (await this.sendCdp('Runtime.evaluate', {
         expression: 'window.__getFetchRequests ? window.__getFetchRequests() : []',
         returnByValue: true,
       })) as unknown;
@@ -755,7 +755,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      const rawResult = (await this.cdpSession.send('Runtime.evaluate', {
+      const rawResult = (await this.sendCdp('Runtime.evaluate', {
         expression: CLEAR_INJECTED_BUFFERS_EXPRESSION,
         returnByValue: true,
       })) as unknown;
@@ -787,7 +787,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     }
 
     try {
-      const rawResult = (await this.cdpSession.send('Runtime.evaluate', {
+      const rawResult = (await this.sendCdp('Runtime.evaluate', {
         expression: RESET_INJECTED_INTERCEPTORS_EXPRESSION,
         returnByValue: true,
       })) as unknown;
@@ -815,6 +815,31 @@ export class NetworkMonitor implements NetworkMonitorLike {
 
   persistsAcrossContextSwitches(): boolean {
     return false;
+  }
+
+  /**
+   * Send a CDP command with a timeout guard.
+   *
+   * Prevents zombie CDP sessions (TCP half-open but unresponsive WebSocket) from
+   * hanging the MCP server indefinitely. Without this wrapper, a `send()` on a
+   * zombie session returns a Promise that never settles, which blocks the
+   * handler thread and cascades to all subsequent tool calls queued on the
+   * same transport.
+   */
+  private async sendCdp<T>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs = 15_000,
+  ): Promise<T> {
+    return Promise.race([
+      this.cdpSession!.send(method, params) as Promise<T>,
+      new Promise<T>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        ),
+      ),
+    ]);
   }
 
   private toScopedRequestId(rawRequestId: string): string {

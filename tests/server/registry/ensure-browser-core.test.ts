@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
+import type { SessionScopedResourcePool } from '@server/runtime/SessionScopedResourcePool';
 
 const state = vi.hoisted(() => ({
   CodeCollector: vi.fn(function (this: any, config: any) {
@@ -94,5 +96,39 @@ describe('registry/ensure-browser-core', () => {
     expect(state.ConsoleMonitor).not.toHaveBeenCalled();
     expect(ctx.registerCaches).not.toHaveBeenCalled();
     expect(ctx.collector).toBe(collector);
+  });
+
+  it('routes script and monitor state to ten independent MCP sessions', async () => {
+    const { ensureBrowserCore } = await import('@server/registry/ensure-browser-core');
+    const instances = new Map<string, unknown>();
+    const ctx = {
+      config: { puppeteer: {}, llm: {} },
+      registerCaches: vi.fn(async () => undefined),
+      getDomainInstance: <T>(key: string) => instances.get(key) as T | undefined,
+      setDomainInstance: (key: string, value: unknown) => instances.set(key, value),
+    };
+    await ensureBrowserCore(ctx as never);
+
+    const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+    await Promise.all(
+      sessionIds.map(
+        async (sessionId) =>
+          await runWithToolRequestContext({ sessionId }, async () => {
+            (ctx as any).scriptManager.owner = sessionId;
+            (ctx as any).consoleMonitor.owner = sessionId;
+          }),
+      ),
+    );
+
+    const scriptPool = instances.get('sessionScriptManagerPool') as SessionScopedResourcePool<
+      Record<string, unknown>
+    >;
+    const monitorPool = instances.get('sessionConsoleMonitorPool') as SessionScopedResourcePool<
+      Record<string, unknown>
+    >;
+    for (const sessionId of sessionIds) {
+      expect(scriptPool.getForSession(sessionId).owner).toBe(sessionId);
+      expect(monitorPool.getForSession(sessionId).owner).toBe(sessionId);
+    }
   });
 });

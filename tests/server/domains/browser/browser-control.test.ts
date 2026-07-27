@@ -30,17 +30,20 @@ vi.mock('@utils/config', () => ({
 }));
 
 import { BrowserControlHandlers } from '@server/domains/browser/handlers/browser-control';
+import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
 
 interface CollectorMock {
   connect: Mock<(args: any) => Promise<void>>;
   launch: Mock<(args: any) => Promise<any>>;
   close: Mock<() => Promise<void>>;
+  createPage: Mock<() => Promise<unknown>>;
   listPages: Mock<() => Promise<Array<{ index: number; url: string; title: string }>>>;
   listResolvedPages: Mock<() => Promise<Array<{ index: number; url: string; title: string }>>>;
   selectPage: Mock<(index: number) => Promise<void>>;
   getStatus: Mock<() => Promise<{ connected: boolean; pages?: number }>>;
   getChromePid: Mock<() => number | null>;
   getAttachedTargetInfo: Mock<() => { targetId: string } | null>;
+  getSelectedPageHandle: Mock<() => { index: number; page: object } | null>;
 }
 
 interface ConsoleMonitorMock {
@@ -69,12 +72,14 @@ function createMocks() {
       },
     })),
     close: vi.fn(async () => {}),
+    createPage: vi.fn(async () => ({})),
     listPages: vi.fn(async () => []),
     listResolvedPages: vi.fn(async () => []),
     selectPage: vi.fn(async () => {}),
     getStatus: vi.fn(async () => ({ connected: true })),
     getChromePid: vi.fn(() => 4321),
     getAttachedTargetInfo: vi.fn(() => null),
+    getSelectedPageHandle: vi.fn(() => null),
   };
 
   const consoleMonitor: ConsoleMonitorMock = {
@@ -175,6 +180,30 @@ describe('BrowserControlHandlers – handleBrowserLaunch', () => {
     expect(body.success).toBe(true);
     expect(body.mode).toBe('connect');
     expect(body.endpoint).toBe('http://127.0.0.1:9222');
+  });
+
+  it('requires browser_attach when a new session joins an owned connection', async () => {
+    const m = createMocks();
+    const coordinator = new BrowserSessionCoordinator(() => m.collector as any);
+    coordinator.claimBrowserLease('session-a');
+    const sessionHandlers = new BrowserControlHandlers({
+      ...m.deps,
+      sessionCoordinator: coordinator,
+    });
+
+    let body: any;
+    await coordinator.runExclusive('session-b', async () => {
+      body = parseJson(
+        await sessionHandlers.handleBrowserLaunch({
+          mode: 'connect',
+          browserURL: 'http://127.0.0.1:9222',
+        }),
+      );
+    });
+
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('Use browser_attach instead');
+    expect(m.collector.connect).not.toHaveBeenCalled();
   });
 
   it('connects chrome when mode=connect with wsEndpoint', async () => {
@@ -482,6 +511,60 @@ describe('BrowserControlHandlers – handleBrowserStatus', () => {
     expect(body.driver).toBe('chrome');
     expect(body.connected).toBe(true);
     expect(body.pages).toBe(2);
+  });
+
+  it('exposes aggregate scheduler health without per-session queue contents', async () => {
+    const m = createMocks();
+    const getQueueStats = vi.fn(() => ({
+      policy: 'drr-aging',
+      pending: 7,
+      admissionLimit: 247,
+      oldestPendingWaitMs: 1250,
+    }));
+    (m.deps as typeof m.deps & { sessionCoordinator: unknown }).sessionCoordinator = {
+      getQueueStats,
+    };
+    const statusHandlers = new BrowserControlHandlers(m.deps as any);
+
+    const body = parseJson<{ scheduler: Record<string, unknown> }>(
+      await statusHandlers.handleBrowserStatus({}),
+    );
+
+    expect(body.scheduler).toEqual({
+      policy: 'drr-aging',
+      pending: 7,
+      admissionLimit: 247,
+      oldestPendingWaitMs: 1250,
+    });
+    expect(getQueueStats).toHaveBeenCalledOnce();
+  });
+
+  it('exposes fleet topology and aggregate lease health', async () => {
+    const m = createMocks();
+    const getStats = vi.fn(() => ({
+      localWorkerId: 'worker-a',
+      topologyVersion: 3,
+      workers: 64,
+      acceptingWorkers: 63,
+      locallyOwnedRoutes: 127,
+      leaseStore: { activeLeases: 128, rejectedLeases: 2 },
+    }));
+    (m.deps as typeof m.deps & { fleetRouter: unknown }).fleetRouter = { getStats };
+    const statusHandlers = new BrowserControlHandlers(m.deps as any);
+
+    const body = parseJson<{ fleet: Record<string, unknown> }>(
+      await statusHandlers.handleBrowserStatus({}),
+    );
+
+    expect(body.fleet).toEqual({
+      localWorkerId: 'worker-a',
+      topologyVersion: 3,
+      workers: 64,
+      acceptingWorkers: 63,
+      locallyOwnedRoutes: 127,
+      leaseStore: { activeLeases: 128, rejectedLeases: 2 },
+    });
+    expect(getStats).toHaveBeenCalledOnce();
   });
 });
 
@@ -904,6 +987,69 @@ describe('BrowserControlHandlers – handleBrowserAttach', () => {
     expect(body.selectedIndex).toBe(0);
     expect(body.contextSwitched).toBe(false);
     expect(body.monitoringBindingDeferred).toBe(false);
+  });
+
+  it('isolates tabs and browser_close across ten concurrent HTTP sessions', async () => {
+    const m = createMocks();
+    const coordinator = new BrowserSessionCoordinator(() => m.collector as any);
+    const pages = [{ index: 0, url: testUrls.TEST_URLS.root, title: 'Existing' }];
+    const pageHandles: object[] = [{}];
+    let selectedIndex = 0;
+
+    m.collector.listPages.mockImplementation(async () => pages.map((page) => ({ ...page })));
+    m.collector.selectPage.mockImplementation(async (index) => {
+      selectedIndex = index;
+    });
+    m.collector.createPage.mockImplementation(async () => {
+      const page = {};
+      pageHandles.push(page);
+      pages.push({ index: pages.length, url: 'about:blank', title: '' });
+      return page;
+    });
+    m.collector.getSelectedPageHandle.mockImplementation(() => ({
+      index: selectedIndex,
+      page: pageHandles[selectedIndex]!,
+    }));
+
+    const sessionHandlers = new BrowserControlHandlers({
+      ...m.deps,
+      sessionCoordinator: coordinator,
+      getTabRegistry: () => coordinator.getTabRegistry(coordinator.getCurrentSessionId()),
+    });
+
+    const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+    const attaches = await Promise.all(
+      sessionIds.map(
+        async (sessionId) =>
+          await coordinator.runExclusive(sessionId, async () =>
+            parseJson<any>(await sessionHandlers.handleBrowserAttach({ channel: 'stable' })),
+          ),
+      ),
+    );
+
+    expect(attaches[0].sessionIsolation).toBe('existing-tab');
+    expect(attaches.slice(1).every((body) => body.sessionIsolation === 'dedicated-tab')).toBe(true);
+    expect(attaches.map((body) => body.selectedIndex)).toEqual(
+      Array.from({ length: 10 }, (_, index) => index),
+    );
+    expect(new Set(attaches.map((body) => body.selectedPageId)).size).toBe(10);
+    expect(m.collector.connect).toHaveBeenCalledTimes(10);
+    expect(m.collector.createPage).toHaveBeenCalledTimes(9);
+    expect(coordinator.getBrowserLease('session-9').totalOwners).toBe(10);
+
+    const closes = await Promise.all(
+      sessionIds.map(
+        async (sessionId) =>
+          await coordinator.runExclusive(sessionId, async () =>
+            parseJson<any>(await sessionHandlers.handleBrowserClose({})),
+          ),
+      ),
+    );
+
+    expect(closes.slice(0, -1).every((body) => body.browserClosed === false)).toBe(true);
+    expect(closes.at(-1).browserClosed).toBe(true);
+    expect(m.collector.close).toHaveBeenCalledOnce();
+    expect(m.consoleMonitor.disable).toHaveBeenCalledTimes(10);
   });
 });
 

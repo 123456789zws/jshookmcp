@@ -5,6 +5,7 @@ import * as net from 'node:net';
 import { once } from 'node:events';
 import { ProxyHandlers } from '@server/domains/proxy/index';
 import { TEST_HTTP_URLS, withPath } from '@tests/shared/test-urls';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 vi.mock('child_process', () => {
   return {
@@ -1263,5 +1264,42 @@ describe('ProxyHandlers (Integration)', () => {
     const data = parseAnyResponse(result);
     expect(result.isError).toBe(true);
     expect(data.error).toContain('mutually exclusive');
+  });
+
+  it('reuses one physical proxy across ten session leases and stops on the last release', async () => {
+    const shared = new ProxyHandlers();
+    const stop = vi.fn(async () => undefined);
+    Object.assign(shared as unknown as Record<string, unknown>, {
+      server: { stop },
+      currentPort: 18080,
+      currentUseHttps: false,
+    });
+    const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+
+    const starts = await Promise.all(
+      sessionIds.map(
+        async (sessionId) =>
+          await runWithToolRequestContext({ sessionId }, async () =>
+            parseResponse(await shared.handleProxyStart({ port: 18080, useHttps: false })),
+          ),
+      ),
+    );
+
+    expect(starts.every((result) => result.reused === true)).toBe(true);
+    expect(Math.max(...starts.map((result) => Number(result.totalOwners)))).toBe(10);
+
+    for (const sessionId of sessionIds.slice(0, -1)) {
+      const result = await runWithToolRequestContext({ sessionId }, async () =>
+        parseResponse(await shared.handleProxyStop({})),
+      );
+      expect(result.stopped).toBe(false);
+    }
+    expect(stop).not.toHaveBeenCalled();
+
+    const final = await runWithToolRequestContext({ sessionId: sessionIds.at(-1) }, async () =>
+      parseResponse(await shared.handleProxyStop({})),
+    );
+    expect(final.stopped).toBe(true);
+    expect(stop).toHaveBeenCalledOnce();
   });
 });

@@ -22,7 +22,11 @@ import { evaluatePredicate } from '@server/workflows/WorkflowPredicates';
 import type { BranchNode } from '@server/workflows/WorkflowContract';
 import type { InternalExecutionContext } from '@server/workflows/WorkflowEngine.types';
 import type { RetryPolicy } from '@server/workflows/WorkflowContract';
-import { getGlobalRetryPolicy, setGlobalRetryPolicy } from './retry-policy';
+import {
+  clearSessionRetryPolicy,
+  getGlobalRetryPolicy,
+  setGlobalRetryPolicy,
+} from './retry-policy';
 
 export type { WorkflowHandlersDeps } from './handlers/shared';
 
@@ -32,11 +36,13 @@ export class WorkflowHandlers {
   private api: ApiHandlers;
   private account: AccountHandlers;
   private reverseSession: ReverseSessionHandlers;
-  private retryPolicy: RetryPolicy | null = null;
-
   /** Exposed for tests — returns the stored retry policy (or null). */
   getStoredRetryPolicy(): RetryPolicy | null {
-    return this.retryPolicy ?? getGlobalRetryPolicy() ?? null;
+    return getGlobalRetryPolicy() ?? null;
+  }
+
+  dropSessionState(sessionId: string): void {
+    clearSessionRetryPolicy(sessionId);
   }
 
   constructor(deps: WorkflowHandlersDeps) {
@@ -324,7 +330,6 @@ export class WorkflowHandlers {
 
     const policy: RetryPolicy = { maxAttempts, backoffMs, multiplier };
 
-    this.retryPolicy = policy;
     setGlobalRetryPolicy(policy);
 
     return jsonTextResult({ success: true, stored: true, policy });

@@ -18,12 +18,38 @@ import {
 import { GRAPHQL_MAX_PREVIEW_CHARS } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
 import type { ScriptReplaceRule } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
 import { argString } from '@server/domains/shared/parse-args';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
+
+interface ScriptReplaceSessionState {
+  rules: ScriptReplaceRule[];
+  interceptionInstalledPages: WeakSet<Page>;
+}
 
 export class ScriptReplaceHandlers {
-  private readonly scriptReplaceRules: ScriptReplaceRule[] = [];
-  private readonly interceptionInstalledPages: WeakSet<Page> = new WeakSet();
+  private readonly states = new Map<string, ScriptReplaceSessionState>();
 
   constructor(private collector: CodeCollector) {}
+
+  private getSessionId(): string {
+    const sessionId = getToolRequestContext()?.sessionId;
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : 'default';
+  }
+
+  private getState(): ScriptReplaceSessionState {
+    const sessionId = this.getSessionId();
+    let state = this.states.get(sessionId);
+    if (!state) {
+      state = { rules: [], interceptionInstalledPages: new WeakSet() };
+      this.states.set(sessionId, state);
+    }
+    return state;
+  }
+
+  dropSessionState(sessionId: string): void {
+    this.states.delete(sessionId.trim() || 'default');
+  }
 
   async handleScriptReplacePersist(args: Record<string, unknown>) {
     try {
@@ -51,6 +77,7 @@ export class ScriptReplaceHandlers {
       }
 
       const page = await this.collector.getActivePage();
+      const state = this.getState();
 
       const rule: ScriptReplaceRule = {
         id: generateRuleId(),
@@ -61,13 +88,9 @@ export class ScriptReplaceHandlers {
         hits: 0,
       };
 
-      this.scriptReplaceRules.push(rule);
+      state.rules.push(rule);
 
-      await ensureScriptInterception(
-        this.scriptReplaceRules,
-        this.interceptionInstalledPages,
-        page,
-      );
+      await ensureScriptInterception(state.rules, state.interceptionInstalledPages, page);
 
       await page.evaluateOnNewDocument(
         (payload) => {
@@ -107,7 +130,7 @@ export class ScriptReplaceHandlers {
           preview: replacementPreview.preview,
           truncated: replacementPreview.truncated,
         },
-        activeRuleCount: this.scriptReplaceRules.length,
+        activeRuleCount: state.rules.length,
       });
     } catch (error) {
       return toError(error);

@@ -50,6 +50,7 @@ class TestCodeCollector extends CodeCollector {
 }
 
 interface BrowserMock extends Browser {
+  isConnected: any;
   on: any;
   pages: any;
   targets: any;
@@ -62,6 +63,7 @@ interface BrowserMock extends Browser {
 
 function createBrowserMock(): BrowserMock {
   return {
+    isConnected: vi.fn().mockReturnValue(true),
     on: vi.fn(),
     pages: vi.fn().mockResolvedValue([]),
     targets: vi.fn().mockReturnValue([]),
@@ -141,6 +143,47 @@ describe('CodeCollector', () => {
       running: true,
       pagesCount: 0,
     });
+  });
+
+  it('coalesces ten concurrent Chrome auto-connect requests into one approval', async () => {
+    const browser = createBrowserMock();
+    connectMock.mockResolvedValue(browser);
+
+    const collector = new CodeCollector(defaultConfig);
+    await Promise.all(
+      Array.from({ length: 10 }, async () => await collector.connect({ channel: 'stable' })),
+    );
+
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(browser.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('isolates collected file indexes across ten MCP sessions', () => {
+    const collector = new TestCodeCollector(defaultConfig);
+    const current = { sessionId: 'default' };
+    collector.setSessionIdResolver(() => current.sessionId);
+    const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+
+    for (const [index, sessionId] of sessionIds.entries()) {
+      current.sessionId = sessionId;
+      const url = `${testUrls.TEST_URLS.root}/session-${index}.js`;
+      collector.getCollectedFilesCache().set(url, {
+        url,
+        content: `const owner = ${index};`,
+        size: 16,
+        type: 'external',
+      });
+    }
+
+    for (const [index, sessionId] of sessionIds.entries()) {
+      current.sessionId = sessionId;
+      expect(collector.getCollectedFilesSummary()).toEqual([
+        expect.objectContaining({ url: `${testUrls.TEST_URLS.root}/session-${index}.js` }),
+      ]);
+    }
+    expect(collector.dropSessionState('session-4')).toBe(true);
+    current.sessionId = 'session-4';
+    expect(collector.getCollectedFilesSummary()).toEqual([]);
   });
 
   it('filters URLs against wildcard rules', () => {

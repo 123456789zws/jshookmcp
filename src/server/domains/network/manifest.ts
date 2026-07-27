@@ -2,6 +2,10 @@ import type { DomainManifest, MCPServerContext } from '@server/domains/shared/re
 import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
 import { advancedTools } from '@server/domains/network/definitions';
 import type { AdvancedToolHandlers } from '@server/domains/network/index';
+import {
+  SessionScopedResourcePool,
+  sessionResourcePoolOptions,
+} from '@server/runtime/SessionScopedResourcePool';
 
 const DOMAIN = 'network' as const;
 const DEP_KEY = 'advancedHandlers' as const;
@@ -97,12 +101,24 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   }
 
   if (!ctx.advancedHandlers) {
-    ctx.advancedHandlers = new AdvancedToolHandlers(
-      ctx.collector!,
-      ctx.consoleMonitor!,
-      ctx.eventBus,
-      () => ctx.traceRecorder ?? null,
-    );
+    const createHandlers = () =>
+      new AdvancedToolHandlers(
+        ctx.collector!,
+        ctx.consoleMonitor!,
+        ctx.eventBus,
+        () => ctx.traceRecorder ?? null,
+      );
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        createHandlers,
+        async (handlers) => await handlers.close(),
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionAdvancedHandlersPool', pool);
+      ctx.advancedHandlers = pool.getProxy();
+    } else {
+      ctx.advancedHandlers = createHandlers();
+    }
   }
 
   return ctx.advancedHandlers;

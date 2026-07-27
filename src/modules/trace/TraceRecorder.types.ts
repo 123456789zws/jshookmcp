@@ -23,6 +23,8 @@ export interface TraceNetworkCaptureOptions {
 
 /** Options for starting a trace recording session. */
 export interface TraceRecorderOptions {
+  /** MCP transport session that owns this recorder; filters wildcard EventBus traffic. */
+  mcpSessionId?: string;
   /** CDP domains to listen on. Default: ['Debugger', 'Runtime', 'Network', 'Page'] */
   cdpDomains?: string[];
   /** EventBus event categories to record. Default: all */

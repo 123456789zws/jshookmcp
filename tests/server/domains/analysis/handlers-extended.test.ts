@@ -750,7 +750,7 @@ describe('CoreAnalysisHandlers — extended coverage', () => {
       expect(deps.collector.clearAllData).toHaveBeenCalledOnce();
       expect(deps.scriptManager.clear).toHaveBeenCalledOnce();
       expect(body.success).toBe(true);
-      expect(body.cleared.fileCache).toBe(true);
+      expect(body.cleared.fileCache).toBe(false);
       expect(body.cleared.scriptManager).toBe(true);
     });
 

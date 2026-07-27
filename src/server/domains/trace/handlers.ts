@@ -14,6 +14,7 @@ import { resolveArtifactPath } from '@utils/artifacts';
 import { argEnum } from '@server/domains/shared/parse-args';
 import { handleSafe, R, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
 import { ToolError } from '@errors/ToolError';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 import { PrerequisiteError } from '@errors/PrerequisiteError';
 import { getProjectRoot, getSystemTempRoots } from '@utils/outputPaths';
 import {
@@ -182,6 +183,7 @@ export class TraceToolHandlers {
     }
 
     const session = await this.recorder.start(eventBus, cdpSession, {
+      mcpSessionId: getToolRequestContext()?.sessionId ?? undefined,
       cdpDomains,
       recordMemoryDeltas: recordMemoryDeltas ?? true,
       ownsSession: cdpSession !== null,

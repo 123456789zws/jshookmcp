@@ -723,6 +723,45 @@ describe('BrowserToolHandlers — additional delegation coverage', () => {
         expect(stop.script).not.toContain('#missing');
       });
 
+      it('keeps ten concurrent session recordings isolated', async () => {
+        const current = { sessionId: 'default' };
+        const isolated = new TestBrowserToolHandlers(
+          collector as any,
+          pageController as any,
+          scriptManager as any,
+          consoleMonitor as any,
+          eventBus as any,
+          () => current.sessionId,
+        );
+        const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+
+        for (const sessionId of sessionIds) {
+          current.sessionId = sessionId;
+          await isolated.handleBrowserCodegenStart();
+        }
+        for (const [index, sessionId] of sessionIds.entries()) {
+          await eventBus.emit('tool:called', {
+            toolName: 'page_navigate',
+            domain: 'browser',
+            sessionId,
+            timestamp: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+            success: true,
+            args: {
+              url: `${TEST_URLS.root}?session=${index}`,
+              _meta: { sessionId },
+            },
+          });
+        }
+
+        for (const [index, sessionId] of sessionIds.entries()) {
+          current.sessionId = sessionId;
+          const stop = parseJson<any>(await isolated.handleBrowserCodegenStop());
+          expect(stop.sessionId).toBe(sessionId);
+          expect(stop.rawStepCount).toBe(1);
+          expect(stop.steps[0].args).toEqual({ url: `${TEST_URLS.root}?session=${index}` });
+        }
+      });
+
       it('reports unavailable recorder when eventBus is missing', async () => {
         const noBusHandlers = new TestBrowserToolHandlers(
           collector as any,

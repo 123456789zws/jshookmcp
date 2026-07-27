@@ -1,5 +1,9 @@
 import type { DomainManifest, MCPServerContext } from '@server/domains/shared/registry';
-import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
+import {
+  defineMethodRegistrations,
+  ensureBrowserCore,
+  toolLookup,
+} from '@server/domains/shared/registry';
 import { graphqlTools } from '@server/domains/graphql/definitions';
 import type { GraphQLToolHandlers } from '@server/domains/graphql/index';
 
@@ -23,19 +27,11 @@ const registrations = defineMethodRegistrations<H, (typeof graphqlTools)[number]
 });
 
 async function ensure(ctx: MCPServerContext): Promise<H> {
-  const { CodeCollector, ConsoleMonitor } =
-    await import('@server/domains/shared/modules/collector');
   const { GraphQLToolHandlers } = await import('@server/domains/graphql/index');
-  if (!ctx.collector) {
-    ctx.collector = new CodeCollector(ctx.config.puppeteer);
-    void ctx.registerCaches();
-  }
-  if (!ctx.consoleMonitor) {
-    ctx.consoleMonitor = new ConsoleMonitor(ctx.collector);
-  }
+  await ensureBrowserCore(ctx);
   if (!ctx.graphqlHandlers) {
     ctx.graphqlHandlers = new GraphQLToolHandlers({
-      collector: ctx.collector,
+      collector: ctx.collector!,
       consoleMonitor: ctx.consoleMonitor,
     });
   }

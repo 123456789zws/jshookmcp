@@ -64,10 +64,36 @@ export interface ResolvedPageDescriptor {
   page: Page;
 }
 
+interface CollectionScope {
+  collectedUrls: Set<string>;
+  collectedFilesCache: Map<string, CodeFile>;
+}
+
+const DEFAULT_COLLECTION_SCOPE = 'default';
+const MAX_COLLECTION_SCOPES = 256;
+
+function chromeConnectRequestKey(endpointOrOptions: string | ChromeConnectOptions): string {
+  if (typeof endpointOrOptions === 'string') {
+    return `endpoint:${endpointOrOptions.trim()}`;
+  }
+
+  if (endpointOrOptions.wsEndpoint) {
+    return `ws:${endpointOrOptions.wsEndpoint.trim()}`;
+  }
+  if (endpointOrOptions.browserURL) {
+    return `url:${endpointOrOptions.browserURL.trim()}`;
+  }
+
+  const channel = endpointOrOptions.channel ?? 'stable';
+  const userDataDir = endpointOrOptions.userDataDir?.trim() ?? '';
+  return `auto:${channel}:${userDataDir}`;
+}
+
 export class CodeCollector {
   protected config: PuppeteerConfig;
   private lifecycleManager: BrowserLifecycleManager;
-  protected collectedUrls: Set<string> = new Set();
+  private readonly collectionScopes = new Map<string, CollectionScope>();
+  private sessionIdResolver: () => string | null | undefined = () => null;
   private initPromise: Promise<void> | null = null;
   private collectLock: Promise<CollectCodeResult> | null = null;
   private connectAttemptRef = { current: 0 };
@@ -78,7 +104,6 @@ export class CodeCollector {
   private readonly CONNECT_TIMEOUT_MS: number;
   protected readonly viewport: { width: number; height: number };
   protected readonly userAgent: string;
-  protected collectedFilesCache: Map<string, CodeFile> = new Map();
   private cache: CodeCache;
   public cacheEnabled: boolean = true;
   public smartCollector: SmartCodeCollector;
@@ -93,6 +118,9 @@ export class CodeCollector {
    *  which can hang on WebGL/Canvas-heavy tabs (e.g. games). */
   private cachedActivePage: Page | null = null;
   private explicitlyClosed: boolean = false;
+  private currentConnectRequestKey: string | null = null;
+  private connectGuard: Promise<void> | null = null;
+  private connectGuardKey: string | null = null;
   constructor(config: PuppeteerConfig) {
     this.config = config;
     this.MAX_COLLECTED_URLS = config.maxCollectedUrls ?? 10000;
@@ -120,6 +148,57 @@ export class CodeCollector {
       ` Strategy: Collect ALL files -> Cache -> Return summary/partial data to fit MCP limits`,
     );
   }
+
+  private normalizeCollectionScope(sessionId: string | null | undefined): string {
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : DEFAULT_COLLECTION_SCOPE;
+  }
+
+  private getCollectionScope(): CollectionScope {
+    const scopeId = this.normalizeCollectionScope(this.sessionIdResolver());
+    let scope = this.collectionScopes.get(scopeId);
+    if (!scope) {
+      if (this.collectionScopes.size >= MAX_COLLECTION_SCOPES) {
+        const oldest = this.collectionScopes.keys().next().value as string | undefined;
+        if (oldest) this.collectionScopes.delete(oldest);
+      }
+      scope = { collectedUrls: new Set(), collectedFilesCache: new Map() };
+      this.collectionScopes.set(scopeId, scope);
+    }
+    return scope;
+  }
+
+  protected get collectedUrls(): Set<string> {
+    return this.getCollectionScope().collectedUrls;
+  }
+
+  protected set collectedUrls(value: Set<string>) {
+    this.getCollectionScope().collectedUrls = value;
+  }
+
+  protected get collectedFilesCache(): Map<string, CodeFile> {
+    return this.getCollectionScope().collectedFilesCache;
+  }
+
+  protected set collectedFilesCache(value: Map<string, CodeFile>) {
+    this.getCollectionScope().collectedFilesCache = value;
+  }
+
+  setSessionIdResolver(resolver: () => string | null | undefined): void {
+    this.sessionIdResolver = resolver;
+  }
+
+  dropSessionState(sessionId: string): boolean {
+    return this.collectionScopes.delete(this.normalizeCollectionScope(sessionId));
+  }
+
+  clearSessionData(): void {
+    const scopeId = this.normalizeCollectionScope(this.sessionIdResolver());
+    this.collectionScopes.delete(scopeId);
+    logger.info(`Cleared collected-code view for MCP session ${scopeId}`);
+  }
+
   setCacheEnabled(enabled: boolean): void {
     this.cacheEnabled = enabled;
     logger.info(`Code cache ${enabled ? 'enabled' : 'disabled'}`);
@@ -135,8 +214,7 @@ export class CodeCollector {
     await this.cache.clear();
     this.compressor.clearCache();
     this.compressor.resetStats();
-    this.collectedUrls.clear();
-    this.collectedFilesCache.clear();
+    this.collectionScopes.clear();
     logger.success('All data cleared');
   }
   async getAllStats() {
@@ -188,11 +266,13 @@ export class CodeCollector {
   async launch(overrides?: ChromeLaunchOverrides): Promise<CodeCollectorLaunchResult> {
     this.explicitlyClosed = false;
     const result = await this.lifecycleManager.launch(overrides, this.initPromise);
+    if (result.action !== 'reused') this.currentConnectRequestKey = null;
     this.lifecycleManager.touch();
     return result;
   }
 
   async close(): Promise<void> {
+    this.currentConnectRequestKey = null;
     await this.lifecycleManager.close(this.clearAllData.bind(this));
     this.explicitlyClosed = true;
     this.activePageIndex = null;
@@ -220,6 +300,7 @@ export class CodeCollector {
   }
 
   private handleBrowserDisconnected(): void {
+    this.currentConnectRequestKey = null;
     this.activePageIndex = null;
     this.cachedActivePage = null;
     void this.browserTargetSessionManager?.dispose();
@@ -582,17 +663,53 @@ export class CodeCollector {
 
   async connect(endpointOrOptions: string | ChromeConnectOptions): Promise<void> {
     this.explicitlyClosed = false;
-    const connectOptions = await this.resolveConnectOptions(endpointOrOptions);
-    const target =
-      connectOptions.browserWSEndpoint ??
-      connectOptions.browserURL ??
-      'auto-detected Chrome debugging endpoint';
-    await this.lifecycleManager.connect(
-      connectOptions,
-      (opts, tgt) => this.connectWithTimeout(opts, tgt, endpointOrOptions),
-      target,
-    );
-    this.lifecycleManager.touch();
+    const requestKey = chromeConnectRequestKey(endpointOrOptions);
+    const existingBrowser = this.lifecycleManager.getBrowser();
+    if (
+      requestKey === this.currentConnectRequestKey &&
+      existingBrowser &&
+      existingBrowser.isConnected()
+    ) {
+      this.lifecycleManager.touch();
+      return;
+    }
+
+    if (this.connectGuard) {
+      if (this.connectGuardKey === requestKey) return await this.connectGuard;
+      await this.connectGuard;
+      return await this.connect(endpointOrOptions);
+    }
+
+    const connectRun = (async () => {
+      const connectOptions = await this.resolveConnectOptions(endpointOrOptions);
+      const target =
+        connectOptions.browserWSEndpoint ??
+        connectOptions.browserURL ??
+        'auto-detected Chrome debugging endpoint';
+      this.currentConnectRequestKey = null;
+      await this.lifecycleManager.connect(
+        connectOptions,
+        (opts, tgt) => this.connectWithTimeout(opts, tgt, endpointOrOptions),
+        target,
+      );
+      this.currentConnectRequestKey = requestKey;
+      this.lifecycleManager.touch();
+    })();
+    this.connectGuard = connectRun;
+    this.connectGuardKey = requestKey;
+    try {
+      await connectRun;
+    } finally {
+      if (this.connectGuard === connectRun) {
+        this.connectGuard = null;
+        this.connectGuardKey = null;
+      }
+    }
+  }
+
+  getSelectedPageHandle(): { index: number; page: Page } | null {
+    if (this.activePageIndex === null || !this.cachedActivePage) return null;
+    return { index: this.activePageIndex, page: this.cachedActivePage };
   }
   getBrowser(): Browser | null {
     this.lifecycleManager.touch();

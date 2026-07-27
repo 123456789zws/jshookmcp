@@ -2,6 +2,7 @@ import type { DomainManifest, MCPServerContext } from '@server/domains/shared/re
 import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
 import { TRACE_TOOLS } from '@server/domains/trace/definitions.tools';
 import type { TraceToolHandlers } from '@server/domains/trace/handlers';
+import { ensureTraceRecorder } from '@server/registry/ensure-trace-recorder';
 
 const DOMAIN = 'trace' as const;
 const DEP_KEY = 'traceHandlers' as const;
@@ -26,15 +27,10 @@ const registrations = defineMethodRegistrations<H, (typeof TRACE_TOOLS)[number][
 });
 
 async function ensure(ctx: MCPServerContext): Promise<H> {
-  const { TraceRecorder } = await import('@modules/trace/TraceRecorder');
   const { TraceToolHandlers } = await import('@server/domains/trace/handlers');
-  if (!ctx.traceRecorder || !ctx.traceHandlers) {
-    if (!ctx.traceRecorder) {
-      ctx.traceRecorder = new TraceRecorder();
-    }
-    if (!ctx.traceHandlers) {
-      ctx.traceHandlers = new TraceToolHandlers(ctx.traceRecorder, ctx);
-    }
+  const recorder = ensureTraceRecorder(ctx);
+  if (!ctx.traceHandlers) {
+    ctx.traceHandlers = new TraceToolHandlers(recorder, ctx);
   }
   return ctx.traceHandlers!;
 }

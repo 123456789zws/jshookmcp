@@ -22,6 +22,7 @@ vi.mock('@server/workflows/WorkflowEngine', () => ({
 }));
 
 import { WorkflowHandlers } from '@server/domains/workflow/handlers';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 // ── helpers ────────────────────────────────────────────────────────────
 interface ConditionalStepResponse {
@@ -411,6 +412,33 @@ describe('WorkflowHandlers — conditional_step + retry_policy', () => {
         backoffMs: 500,
         multiplier: 2,
       });
+    });
+
+    it('keeps retry defaults isolated across ten MCP sessions', async () => {
+      const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+
+      await Promise.all(
+        sessionIds.map(
+          async (sessionId, index) =>
+            await runWithToolRequestContext({ sessionId }, async () => {
+              await handlers.handleWorkflowRetryPolicy({
+                maxAttempts: index + 1,
+                backoffMs: index * 100,
+                multiplier: 2,
+              });
+            }),
+        ),
+      );
+
+      for (const [index, sessionId] of sessionIds.entries()) {
+        await runWithToolRequestContext({ sessionId }, async () => {
+          expect(handlers.getStoredRetryPolicy()).toEqual({
+            maxAttempts: index + 1,
+            backoffMs: index * 100,
+            multiplier: 2,
+          });
+        });
+      }
     });
   });
 });

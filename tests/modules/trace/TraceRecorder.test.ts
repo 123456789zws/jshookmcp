@@ -8,6 +8,7 @@ import { rm, mkdtemp } from 'node:fs/promises';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventBus } from '@server/EventBus';
 import type { ServerEventMap } from '@server/EventBus';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 import { TraceDB } from '@modules/trace/TraceDB';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
@@ -133,6 +134,33 @@ describe('TraceRecorder', () => {
 
     const result = db!.query("SELECT * FROM events WHERE event_type = 'tool:called'");
     expect(result.rowCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('records EventBus events only for its MCP session across ten agents', async () => {
+    await recorder.start(eventBus, null, { mcpSessionId: 'session-4' });
+
+    await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        runWithToolRequestContext({ sessionId: `session-${index}` }, async () => {
+          await eventBus.emit('browser:navigated', {
+            url: withPath(TEST_URLS.root, `session-${index}`),
+            timestamp: new Date().toISOString(),
+          });
+        }),
+      ),
+    );
+
+    const db = recorder.getDB()!;
+    db.flush();
+
+    const result = db.query(
+      "SELECT data FROM events WHERE event_type = 'browser:navigated' ORDER BY sequence",
+    );
+    expect(result.rowCount).toBe(1);
+    expect(JSON.parse(String(result.rows[0]![0]))).toMatchObject({
+      url: withPath(TEST_URLS.root, 'session-4'),
+      mcpSessionId: 'session-4',
+    });
   });
 
   it('maps event categories correctly', async () => {

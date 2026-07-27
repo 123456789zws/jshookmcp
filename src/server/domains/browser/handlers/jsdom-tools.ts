@@ -38,8 +38,8 @@ const MAX_HTML_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 /** Session lifetime in milliseconds. Configurable via env in future. */
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
-/** Maximum concurrent JSDOM sessions to prevent RSS explosion (~78 MB each). */
-const MAX_SESSIONS = 5;
+/** Allows one offline DOM workspace per member of a typical 10-agent fan-out. */
+const MAX_SESSIONS = 20;
 
 interface JsdomSession {
   dom: JSDOMType;

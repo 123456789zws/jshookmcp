@@ -10,6 +10,8 @@ import type { CanvasToolHandlers } from '@server/domains/canvas/handlers';
 import type { SkiaCaptureHandlers } from '@server/domains/canvas/skia';
 import type { ReverseEvidenceGraph } from '@server/evidence/ReverseEvidenceGraph';
 import type { CanvasDomainDependencies } from '@server/domains/canvas/dependencies';
+import { ensureDebuggerCore } from '@server/registry/ensure-debugger-core';
+import { ensureTraceRecorder } from '@server/registry/ensure-trace-recorder';
 
 const DOMAIN = 'canvas' as const;
 const DEP_KEY = 'canvasHandlers' as const;
@@ -42,14 +44,12 @@ const skiaRegistrations = defineMethodRegistrations<SK, (typeof skiaTools)[numbe
 });
 
 async function ensure(ctx: MCPServerContext): Promise<H> {
-  const { DebuggerManager } = await import('@server/domains/shared/modules');
-  const { TraceRecorder } = await import('@modules/trace/TraceRecorder');
   const { ReverseEvidenceGraph } = await import('@server/evidence/ReverseEvidenceGraph');
   const { CanvasToolHandlers, SkiaCaptureHandlers } = await import('@server/domains/canvas/index');
 
   await ensureBrowserCore(ctx);
-  if (!ctx.debuggerManager) ctx.debuggerManager = new DebuggerManager(ctx.collector!);
-  if (!ctx.traceRecorder) ctx.traceRecorder = new TraceRecorder();
+  await ensureDebuggerCore(ctx);
+  ensureTraceRecorder(ctx);
   let graph = ctx.getDomainInstance<ReverseEvidenceGraph>('evidenceGraph');
   if (!graph) {
     graph = new ReverseEvidenceGraph();
@@ -58,8 +58,8 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   if (!(ctx as unknown as Record<string, unknown>).canvasHandlers) {
     const deps: CanvasDomainDependencies = {
       pageController: ctx.pageController!,
-      debuggerManager: ctx.debuggerManager,
-      traceRecorder: ctx.traceRecorder,
+      debuggerManager: ctx.debuggerManager!,
+      traceRecorder: ctx.traceRecorder!,
       evidenceStore: graph,
     };
     (ctx as unknown as Record<string, unknown>).canvasHandlers = new CanvasToolHandlers(deps);

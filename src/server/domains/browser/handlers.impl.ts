@@ -40,6 +40,7 @@ import { initializeBrowserHandlerModules } from '@server/domains/browser/handler
 import type { TabRegistry } from '@modules/browser/TabRegistry';
 import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
 import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
 import {
   handleHumanMouse,
   handleHumanScroll,
@@ -121,11 +122,12 @@ export class BrowserToolHandlers {
   private readonly eventBus?: EventBus<ServerEventMap>;
   private readonly getCurrentSessionId?: () => string | null;
   private readonly sessionCoordinator?: BrowserSessionCoordinator;
+  private readonly fleetRouter?: BrowserFleetRouter;
   private readonly onBrowserAttachStateChanged?: (
     snapshot: Partial<BrowserAttachRuntimeSnapshot>,
   ) => void;
   private codegenStopListening?: () => void;
-  private codegenSteps: BrowserCodegenStep[] = [];
+  private readonly codegenStepsBySession = new Map<string, BrowserCodegenStep[]>();
 
   constructor(
     collector: CodeCollector,
@@ -137,6 +139,7 @@ export class BrowserToolHandlers {
     getCurrentSessionId?: () => string | null,
     sessionCoordinator?: BrowserSessionCoordinator,
     onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void,
+    fleetRouter?: BrowserFleetRouter,
   ) {
     this.collector = collector;
     this.pageController = pageController;
@@ -146,6 +149,7 @@ export class BrowserToolHandlers {
     this.eventBus = eventBus;
     this.getCurrentSessionId = getCurrentSessionId;
     this.sessionCoordinator = sessionCoordinator;
+    this.fleetRouter = fleetRouter;
     this.onBrowserAttachStateChanged = onBrowserAttachStateChanged;
 
     const screenshotDir = resolveOutputDirectory(
@@ -184,6 +188,8 @@ export class BrowserToolHandlers {
         this.captchaTimeout = value;
       },
       getTabRegistry: () => this.getCurrentTabRegistry(),
+      sessionCoordinator: this.sessionCoordinator,
+      fleetRouter: this.fleetRouter,
       onBrowserAttachStateChanged: this.onBrowserAttachStateChanged,
     });
 
@@ -218,6 +224,7 @@ export class BrowserToolHandlers {
 
   private sanitizeCodegenArgs(args: ToolArgs): ToolArgs {
     const sanitized = { ...args };
+    delete sanitized['_meta'];
     for (const key of ['delay', 'timeout']) {
       if (sanitized[key] === undefined) {
         delete sanitized[key];
@@ -229,6 +236,45 @@ export class BrowserToolHandlers {
   private getCurrentTabRegistry(): TabRegistry {
     const sessionId = this.getCurrentSessionId?.() ?? null;
     return this.sessionCoordinator?.getTabRegistry(sessionId) ?? this.tabRegistry;
+  }
+
+  private normalizeSessionId(sessionId: string | null | undefined): string {
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : 'default';
+  }
+
+  private getCurrentCodegenSessionId(): string {
+    return this.normalizeSessionId(this.getCurrentSessionId?.());
+  }
+
+  private ensureCodegenListener(): void {
+    if (!this.eventBus || this.codegenStopListening) return;
+    this.codegenStopListening = this.eventBus.on('tool:called', (payload) => {
+      if (payload.domain !== 'browser' || !payload.success || payload.result?.success === false)
+        return;
+      if (!CODEGEN_RECORDABLE_TOOLS.has(payload.toolName)) return;
+      const metaSessionId = (payload.args?.['_meta'] as { sessionId?: unknown } | undefined)
+        ?.sessionId;
+      const sessionId = this.normalizeSessionId(
+        payload.sessionId ?? (typeof metaSessionId === 'string' ? metaSessionId : null),
+      );
+      const steps = this.codegenStepsBySession.get(sessionId);
+      if (!steps) return;
+      steps.push({
+        tool: payload.toolName,
+        args: { ...payload.args },
+        timestamp: payload.timestamp,
+      });
+    });
+  }
+
+  dropSessionState(sessionId: string): void {
+    this.codegenStepsBySession.delete(this.normalizeSessionId(sessionId));
+    if (this.codegenStepsBySession.size === 0) {
+      this.codegenStopListening?.();
+      this.codegenStopListening = undefined;
+    }
   }
 
   private isSameFrameArgs(left: ToolArgs, right: ToolArgs): boolean {
@@ -379,6 +425,8 @@ export class BrowserToolHandlers {
                 driver: 'camoufox',
                 running,
                 hasActivePage: !!this.camoufoxPage,
+                scheduler: this.sessionCoordinator?.getQueueStats(),
+                fleet: this.fleetRouter?.getStats(),
               },
               null,
               2,
@@ -735,37 +783,32 @@ export class BrowserToolHandlers {
       });
     }
 
-    this.codegenStopListening?.();
-    this.codegenSteps = [];
-    this.codegenStopListening = this.eventBus.on('tool:called', (payload) => {
-      if (payload.domain !== 'browser' || !payload.success || payload.result?.success === false)
-        return;
-      if (!CODEGEN_RECORDABLE_TOOLS.has(payload.toolName)) return;
-      this.codegenSteps.push({
-        tool: payload.toolName,
-        args: { ...payload.args },
-        timestamp: payload.timestamp,
-      });
-    });
+    const sessionId = this.getCurrentCodegenSessionId();
+    this.codegenStepsBySession.set(sessionId, []);
+    this.ensureCodegenListener();
 
     return this.makeJsonResponse({
       success: true,
       recording: true,
+      sessionId,
       message: 'Browser action recording started.',
     });
   }
 
   async handleBrowserCodegenStop() {
-    this.codegenStopListening?.();
-    this.codegenStopListening = undefined;
-
-    const rawSteps = [...this.codegenSteps];
+    const sessionId = this.getCurrentCodegenSessionId();
+    const rawSteps = [...(this.codegenStepsBySession.get(sessionId) ?? [])];
     const steps = this.compactCodegenSteps(rawSteps);
-    this.codegenSteps = [];
+    this.codegenStepsBySession.delete(sessionId);
+    if (this.codegenStepsBySession.size === 0) {
+      this.codegenStopListening?.();
+      this.codegenStopListening = undefined;
+    }
 
     return this.makeJsonResponse({
       success: true,
       recording: false,
+      sessionId,
       stepCount: steps.length,
       rawStepCount: rawSteps.length,
       steps,

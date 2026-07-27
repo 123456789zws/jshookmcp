@@ -18,6 +18,11 @@ import { CodeCollector } from '@modules/collector/CodeCollector';
 import { PageController } from '@modules/collector/PageController';
 import { DOMInspector } from '@modules/collector/DOMInspector';
 import { ScriptManager } from '@modules/debugger/ScriptManager';
+import {
+  SessionScopedResourcePool,
+  sessionResourcePoolOptions,
+} from '@server/runtime/SessionScopedResourcePool';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 let ConsoleMonitorClass: typeof import('@modules/monitor/ConsoleMonitor').ConsoleMonitor | null =
   null;
@@ -35,11 +40,36 @@ export async function ensureBrowserCore(ctx: MCPServerContext): Promise<void> {
     ctx.collector = new CodeCollector(ctx.config.puppeteer);
     void ctx.registerCaches();
   }
+  if (typeof ctx.collector.setSessionIdResolver === 'function') {
+    ctx.collector.setSessionIdResolver(() => getToolRequestContext()?.sessionId);
+  }
   if (!ctx.pageController) ctx.pageController = new PageController(ctx.collector);
   if (!ctx.domInspector) ctx.domInspector = new DOMInspector(ctx.collector);
-  if (!ctx.scriptManager) ctx.scriptManager = new ScriptManager(ctx.collector);
+  if (!ctx.scriptManager) {
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        () => new ScriptManager(ctx.collector!),
+        async (manager) => await manager.close(),
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionScriptManagerPool', pool);
+      ctx.scriptManager = pool.getProxy();
+    } else {
+      ctx.scriptManager = new ScriptManager(ctx.collector);
+    }
+  }
   if (!ctx.consoleMonitor) {
     const CM = await getConsoleMonitorClass();
-    ctx.consoleMonitor = new CM(ctx.collector);
+    if (typeof ctx.setDomainInstance === 'function') {
+      const pool = new SessionScopedResourcePool(
+        () => new CM(ctx.collector!),
+        async (monitor) => await monitor.close(),
+        sessionResourcePoolOptions(ctx.config?.mcp),
+      );
+      ctx.setDomainInstance('sessionConsoleMonitorPool', pool);
+      ctx.consoleMonitor = pool.getProxy();
+    } else {
+      ctx.consoleMonitor = new CM(ctx.collector);
+    }
   }
 }

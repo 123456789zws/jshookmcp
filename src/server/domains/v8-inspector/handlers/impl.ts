@@ -24,6 +24,7 @@ import {
   loadPersistedSnapshot,
 } from './snapshot-persistence';
 import { resolveArtifactPath } from '@utils/artifacts';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 export interface V8InspectorDomainDependencies {
   ctx: MCPServerContext;
@@ -84,9 +85,20 @@ function createTargetSessionResolver(ctx: MCPServerContext): TargetSessionResolv
 }
 
 export class V8InspectorHandlers {
-  private currentSnapshotId: string | null = null;
+  private readonly currentSnapshotIds = new Map<string, string>();
 
   constructor(private readonly deps: V8InspectorDomainDependencies) {}
+
+  private getCurrentSessionId(): string {
+    const sessionId = getToolRequestContext()?.sessionId;
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : 'default';
+  }
+
+  dropSessionState(sessionId: string): void {
+    this.currentSnapshotIds.delete(sessionId.trim() || 'default');
+  }
 
   async handle(toolName: string, args: ToolArgs): Promise<unknown> {
     const dispatchTable: Record<string, (toolArgs: ToolArgs) => Promise<unknown>> = {
@@ -210,9 +222,11 @@ export class V8InspectorHandlers {
 
       const result = await handleHeapSnapshotCapture(args, {
         getPage,
-        getSnapshot: () => this.currentSnapshotId,
+        getSnapshot: () => this.currentSnapshotIds.get(this.getCurrentSessionId()) ?? null,
         setSnapshot: (id: string | null) => {
-          this.currentSnapshotId = id;
+          const sessionId = this.getCurrentSessionId();
+          if (id) this.currentSnapshotIds.set(sessionId, id);
+          else this.currentSnapshotIds.delete(sessionId);
         },
         client: this.deps.client,
         persist,

@@ -52,6 +52,10 @@ export class GraphQLToolHandlers {
     this.schemaEnum = new SchemaEnumHandlers();
   }
 
+  dropSessionState(sessionId: string): void {
+    this.scriptReplace.dropSessionState(sessionId);
+  }
+
   // ── Call Graph ──
   async handleCallGraphAnalyzeTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleCallGraphAnalyze(args));

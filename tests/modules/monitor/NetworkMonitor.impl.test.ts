@@ -110,7 +110,7 @@ describe('NetworkMonitor impl', () => {
     await monitor.disable();
 
     expect(session.off).toHaveBeenCalledTimes(3);
-    expect(session.send).toHaveBeenCalledWith('Network.disable');
+    expect(session.send).toHaveBeenCalledWith('Network.disable', undefined);
     expect(monitor.isEnabled()).toBe(false);
   });
 

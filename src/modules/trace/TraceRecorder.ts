@@ -160,6 +160,16 @@ export class TraceRecorder {
       this.eventBusUnsub = eventBus.onAny((wrapped: { event: string; payload: unknown }) => {
         if (this.state !== 'recording') return;
         try {
+          if (options?.mcpSessionId && wrapped.payload && typeof wrapped.payload === 'object') {
+            const eventPayload = wrapped.payload as Record<string, unknown>;
+            const eventSessionId =
+              typeof eventPayload['mcpSessionId'] === 'string'
+                ? eventPayload['mcpSessionId']
+                : wrapped.event === 'tool:called' && typeof eventPayload['sessionId'] === 'string'
+                  ? eventPayload['sessionId']
+                  : null;
+            if (eventSessionId && eventSessionId !== options.mcpSessionId) return;
+          }
           const now = Date.now();
           this.db?.insertEvent({
             timestamp: now,

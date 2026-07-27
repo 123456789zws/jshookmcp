@@ -29,6 +29,8 @@ import { PageDialogHandlers } from '@server/domains/browser/handlers/page-dialog
 import { JsdomHandlers } from '@server/domains/browser/handlers/jsdom-tools';
 import { TabRegistry } from '@modules/browser/TabRegistry';
 import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
+import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
 
 export interface BrowserHandlerModuleInitDeps {
   collector: CodeCollector;
@@ -50,6 +52,8 @@ export interface BrowserHandlerModuleInitDeps {
   setAutoSwitchHeadless: (value: boolean) => void;
   setCaptchaTimeout: (value: number) => void;
   getTabRegistry?: () => TabRegistry;
+  sessionCoordinator?: BrowserSessionCoordinator;
+  fleetRouter?: BrowserFleetRouter;
   eventBus?: EventBus<ServerEventMap>;
   onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void;
 }
@@ -106,6 +110,8 @@ export function initializeBrowserHandlerModules(
       getCamoufoxManager: deps.getCamoufoxManager,
       getCamoufoxPage: deps.getCamoufoxPage,
       getTabRegistry,
+      sessionCoordinator: deps.sessionCoordinator,
+      fleetRouter: deps.fleetRouter,
       clearAttachedTargetContext: (context) => targetControl.clearAttachedTargetContext(context),
       onBrowserAttachStateChanged: deps.onBrowserAttachStateChanged,
     }),

@@ -8,6 +8,7 @@ import { browserTools, advancedBrowserToolDefinitions } from '@server/domains/br
 import type { BrowserToolHandlers } from '@server/domains/browser/index';
 import { getRuntimeState } from '@server/runtime/ServerRuntimeState';
 import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
 
 const DOMAIN = 'browser' as const;
 const DEP_KEY = 'browserHandlers' as const;
@@ -108,10 +109,15 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
       typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
     const setDomainInstance =
       typeof ctx.setDomainInstance === 'function' ? ctx.setDomainInstance.bind(ctx) : null;
+    const schedulerConfig = ctx.config?.mcp;
     const coordinator =
       getDomainInstance?.<BrowserSessionCoordinator>('browserSessionCoordinator') ??
       (compatCtx.browserSessionCoordinator as BrowserSessionCoordinator | undefined) ??
-      new BrowserSessionCoordinator(() => ctx.collector);
+      new BrowserSessionCoordinator(() => ctx.collector, {
+        maxPending: schedulerConfig?.browserSessionQueueMaxPending,
+        maxPendingPerSession: schedulerConfig?.browserSessionQueueMaxPendingPerSession,
+        waitTimeoutMs: schedulerConfig?.browserSessionQueueWaitTimeoutMs,
+      });
     if (setDomainInstance) {
       setDomainInstance('browserSessionCoordinator', coordinator);
     } else {
@@ -128,6 +134,7 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
       (snapshot) => {
         getRuntimeState(ctx)?.setBrowserAttach(snapshot);
       },
+      getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter'),
     );
   }
   return ctx.browserHandlers;

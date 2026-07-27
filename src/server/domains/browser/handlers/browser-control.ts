@@ -11,6 +11,8 @@ import { projectRoot } from '@utils/config';
 import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
+import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
 
 const projectEnvPath = join(projectRoot, '.env');
 const CHROME_CHANNELS = new Set(['stable', 'beta', 'dev', 'canary'] as const);
@@ -48,6 +50,8 @@ interface BrowserControlHandlersDeps {
     targetId: string | null;
     type: string | null;
   }>;
+  sessionCoordinator?: BrowserSessionCoordinator;
+  fleetRouter?: BrowserFleetRouter;
   onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void;
 }
 
@@ -96,22 +100,33 @@ export class BrowserControlHandlers {
     }
   }
 
-  private async syncTabRegistryWithCollectorPages(context: string): Promise<void> {
+  private async syncTabRegistryWithCollectorPages(context: string): Promise<string | null> {
     try {
-      // Use listPages() instead of listResolvedPages() — the latter calls resolvePageTargetHandle()
-      // for every target simultaneously, which blocks indefinitely on WebGL/Canvas-heavy tabs.
       const pages = await this.deps.collector.listPages();
       const registry = this.deps.getTabRegistry();
-      registry.reconcilePages(
-        pages.map(() => null as unknown as import('rebrowser-puppeteer-core').Page),
-        pages,
-      );
+      for (const page of pages) {
+        const known = registry.getTabByIndex(page.index);
+        if (known) registry.upsertPage(known.page, page);
+      }
+
+      const selected = this.deps.collector.getSelectedPageHandle();
+      if (!selected) return registry.getCurrentPageId();
+      const meta = pages[selected.index];
+      if (!meta) return registry.getCurrentPageId();
+      const pageId = registry.upsertPage(selected.page, meta);
+      registry.setCurrentPageId(pageId);
+      return pageId;
     } catch (error) {
       logger.warn(
         `[${context}] Failed to sync attached tabs into TabRegistry: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
+      return null;
     }
+  }
+
+  private getCurrentSessionId(): string | null {
+    return this.deps.sessionCoordinator?.getCurrentSessionId() ?? null;
   }
 
   private parseHeadlessArg(value: unknown): boolean | undefined {
@@ -278,6 +293,21 @@ export class BrowserControlHandlers {
     try {
       const driver = this.parseBrowserDriver(args);
       const mode = this.parseBrowserLaunchMode(args);
+      const sessionId = this.getCurrentSessionId();
+      const lease = this.deps.sessionCoordinator?.getBrowserLease(sessionId);
+
+      if (mode === 'launch' && lease && lease.otherOwners > 0) {
+        return R.fail(
+          `browser_launch is blocked while ${lease.otherOwners} other browser session(s) are active. ` +
+            'Use browser_attach to share the existing Chrome connection without replacing it.',
+        ).json();
+      }
+      if (mode === 'connect' && lease && !lease.owned && lease.otherOwners > 0) {
+        return R.fail(
+          'browser_launch(mode="connect") cannot join a browser owned by another session because it does not ' +
+            'allocate an isolated tab. Use browser_attach instead.',
+        ).json();
+      }
 
       if (driver === 'camoufox') {
         if (mode === 'connect') {
@@ -320,6 +350,7 @@ export class BrowserControlHandlers {
         }
 
         await this.deps.collector.connect(connectRequest);
+        const claim = this.deps.sessionCoordinator?.claimBrowserLease(sessionId);
         const status = await this.deps.collector.getStatus();
 
         return R.ok()
@@ -333,6 +364,7 @@ export class BrowserControlHandlers {
             manualApprovalMayBeRequired: this.isAutoConnectRequest(connectRequest),
             approvalHint: this.getAutoConnectApprovalHint(connectRequest),
             message: 'Connected to existing Chrome browser successfully',
+            browserSessionOwners: claim?.totalOwners ?? 1,
             status,
           })
           .json();
@@ -347,11 +379,11 @@ export class BrowserControlHandlers {
 
         // Auto-select the first tab so page_navigate / page_evaluate work immediately after launch.
         const pages = await this.deps.collector.listPages();
-        const registry = this.deps.getTabRegistry();
         if (pages.length > 0) {
           await this.deps.collector.selectPage(0);
-          registry.setCurrentByIndex(0);
+          await this.syncTabRegistryWithCollectorPages('browser_launch');
         }
+        const claim = this.deps.sessionCoordinator?.claimBrowserLease(sessionId);
         const currentPage = pages[0];
         this.deps.onBrowserAttachStateChanged?.({
           endpoint: null,
@@ -381,6 +413,7 @@ export class BrowserControlHandlers {
             currentUrl: currentPage?.url ?? null,
             currentTitle: currentPage?.title ?? null,
             totalPages: pages.length,
+            browserSessionOwners: claim?.totalOwners ?? 1,
             status,
           })
           .json();
@@ -398,11 +431,11 @@ export class BrowserControlHandlers {
           headless: true,
         });
         const pages = await this.deps.collector.listPages();
-        const registry = this.deps.getTabRegistry();
         if (pages.length > 0) {
           await this.deps.collector.selectPage(0);
-          registry.setCurrentByIndex(0);
+          await this.syncTabRegistryWithCollectorPages('browser_launch_fallback');
         }
+        const claim = this.deps.sessionCoordinator?.claimBrowserLease(sessionId);
         const currentPage = pages[0];
         this.deps.onBrowserAttachStateChanged?.({
           endpoint: null,
@@ -428,6 +461,7 @@ export class BrowserControlHandlers {
             currentUrl: currentPage?.url ?? null,
             currentTitle: currentPage?.title ?? null,
             totalPages: pages.length,
+            browserSessionOwners: claim?.totalOwners ?? 1,
             status: fallbackStatus,
             fallback: {
               applied: true,
@@ -445,8 +479,34 @@ export class BrowserControlHandlers {
 
   async handleBrowserClose(_args: Record<string, unknown>): Promise<ToolResponse> {
     try {
+      const sessionId = this.getCurrentSessionId();
+      try {
+        await this.deps.consoleMonitor.disable();
+      } catch (error) {
+        logger.warn(
+          `[browser_close] Failed to disable the calling session monitor: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const release = this.deps.sessionCoordinator?.releaseBrowserLease(sessionId);
+      this.deps.sessionCoordinator?.clearSessionContext(sessionId);
+      if (release && release.remainingOwners > 0) {
+        return R.ok()
+          .merge({
+            message: 'Browser session released; shared Chrome connection remains active',
+            browserClosed: false,
+            remainingSessionOwners: release.remainingOwners,
+          })
+          .json();
+      }
       await this.deps.collector.close();
-      return R.ok().set('message', 'Browser closed successfully').json();
+      this.deps.sessionCoordinator?.clearBrowserLeases();
+      return R.ok()
+        .merge({
+          message: 'Browser closed successfully',
+          browserClosed: true,
+          remainingSessionOwners: 0,
+        })
+        .json();
     } catch (e) {
       return R.fail(e).json();
     }
@@ -456,7 +516,12 @@ export class BrowserControlHandlers {
     try {
       const status = await this.deps.collector.getStatus();
       return R.ok()
-        .merge({ driver: 'chrome', ...status })
+        .merge({
+          driver: 'chrome',
+          ...status,
+          scheduler: this.deps.sessionCoordinator?.getQueueStats(),
+          fleet: this.deps.fleetRouter?.getStats(),
+        })
         .json();
     } catch (e) {
       return R.fail(e).json();
@@ -598,6 +663,8 @@ export class BrowserControlHandlers {
       }
 
       const clearedTarget = await this.deps.clearAttachedTargetContext('browser_attach');
+      const sessionId = this.getCurrentSessionId();
+      const existingLease = this.deps.sessionCoordinator?.getBrowserLease(sessionId);
       await this.deps.collector.connect(connectRequest);
 
       const rawPageIndex = args.pageIndex;
@@ -613,11 +680,21 @@ export class BrowserControlHandlers {
             : 0;
       const requestedIndex = Number.isFinite(pageIndex) ? pageIndex : 0;
 
-      const pages = await this.deps.collector.listPages();
-      const preferred = this.pickPreferredAttachPage(
-        pages,
-        pageIndexProvided ? requestedIndex : null,
-      );
+      let pages = await this.deps.collector.listPages();
+      let isolatedTabCreated = false;
+      if (
+        !pageIndexProvided &&
+        existingLease &&
+        !existingLease.owned &&
+        existingLease.otherOwners > 0
+      ) {
+        await this.deps.collector.createPage();
+        pages = await this.deps.collector.listPages();
+        isolatedTabCreated = pages.length > 0;
+      }
+      const preferred = isolatedTabCreated
+        ? { selectedIndex: pages.length - 1, selected: pages.at(-1) ?? null }
+        : this.pickPreferredAttachPage(pages, pageIndexProvided ? requestedIndex : null);
       const selectedIndex = preferred.selectedIndex;
 
       if (pages.length > 0) {
@@ -631,9 +708,13 @@ export class BrowserControlHandlers {
       }
 
       const registry = this.deps.getTabRegistry();
-      await this.syncTabRegistryWithCollectorPages('browser_attach');
+      const syncedPageId = await this.syncTabRegistryWithCollectorPages('browser_attach');
       const actualIndex = pages.length > 0 ? Math.min(selectedIndex, pages.length - 1) : 0;
-      const tab = pages.length > 0 ? registry.setCurrentByIndex(actualIndex) : null;
+      const tab = syncedPageId
+        ? registry.getTabById(syncedPageId)
+        : pages.length > 0
+          ? registry.setCurrentByIndex(actualIndex)
+          : null;
       const selected = pages[actualIndex];
       const pageHandleReady = Boolean(tab?.pageId);
       const browserPid = this.deps.collector.getChromePid();
@@ -647,6 +728,7 @@ export class BrowserControlHandlers {
       }
 
       const status = await this.deps.collector.getStatus();
+      const claim = this.deps.sessionCoordinator?.claimBrowserLease(sessionId);
       const attachedTargetInfo = this.deps.collector.getAttachedTargetInfo();
       this.deps.onBrowserAttachStateChanged?.({
         endpoint: this.describeChromeConnectRequest(connectRequest),
@@ -672,6 +754,13 @@ export class BrowserControlHandlers {
           currentUrl: selected?.url ?? null,
           currentTitle: selected?.title ?? null,
           totalPages: pages.length,
+          connectionReused: Boolean(existingLease?.owned || existingLease?.otherOwners),
+          sessionIsolation: isolatedTabCreated
+            ? 'dedicated-tab'
+            : pageIndexProvided && existingLease?.otherOwners
+              ? 'explicit-shared-tab'
+              : 'existing-tab',
+          browserSessionOwners: claim?.totalOwners ?? 1,
           contextSwitched: pages.length > 0,
           detachedCdpTarget: clearedTarget.detached,
           detachedCdpTargetId: clearedTarget.targetId,
