@@ -27,12 +27,16 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
           _req?.headers?.['mcp-session-id'] && typeof _req.headers['mcp-session-id'] === 'string'
             ? _req.headers['mcp-session-id']
             : null;
-        this.sessionId = requestedSessionId ?? `session-${mocks.innerTransports.length}`;
+        this.sessionId = requestedSessionId ?? this.sessionIdGenerator();
       }
     });
 
-    constructor() {
+    constructor(private readonly options: { sessionIdGenerator: () => string }) {
       mocks.innerTransports.push(this);
+    }
+
+    private sessionIdGenerator(): string {
+      return this.options.sessionIdGenerator();
     }
   },
 }));
@@ -79,6 +83,180 @@ describe('MultiplexedStreamableHttpTransport', () => {
     const existingSessionId = existing.sessionId;
     await transport.handleRequest(createReq('POST', existingSessionId), createRes(), {});
     expect(existing.handleRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds initialized sessions before allocating another inner transport', async () => {
+    const onSessionOpened = vi.fn(async () => undefined);
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      capacityRetryAfterMs: 2_500,
+      onSessionOpened,
+    });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const admitted = mocks.innerTransports[0];
+    expect(onSessionOpened).toHaveBeenCalledWith(admitted.sessionId);
+    expect(transport.getStats()).toEqual({
+      sessions: 1,
+      sessionLimit: 1,
+      sessionIdleTtlMs: null,
+      inFlight: 0,
+      pendingAdmissions: 0,
+    });
+
+    const overloaded = createRes();
+    await transport.handleRequest(createReq('POST'), overloaded, {});
+
+    expect(mocks.innerTransports).toHaveLength(1);
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '3',
+    });
+    expect(JSON.parse(overloaded.end.mock.calls[0]![0])).toMatchObject({
+      error: {
+        code: -32001,
+        data: {
+          code: 'MCP_SESSION_CAPACITY',
+          retryAfterMs: 2_500,
+          sessionCount: 1,
+          sessionLimit: 1,
+        },
+      },
+    });
+
+    admitted.onclose?.();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    expect(mocks.innerTransports).toHaveLength(2);
+  });
+
+  it('reserves capacity while asynchronous session admission is pending', async () => {
+    let releaseAdmission!: () => void;
+    const admissionGate = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    const onSessionOpened = vi.fn(async () => await admissionGate);
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      onSessionOpened,
+    });
+    await transport.start();
+
+    const first = transport.handleRequest(createReq('POST'), createRes(), {});
+    await vi.waitFor(() => {
+      expect(onSessionOpened).toHaveBeenCalledOnce();
+      expect(transport.getStats().pendingAdmissions).toBe(1);
+    });
+
+    const overloaded = createRes();
+    await transport.handleRequest(createReq('POST'), overloaded, {});
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, expect.any(Object));
+    expect(JSON.parse(overloaded.end.mock.calls[0]![0])).toMatchObject({
+      error: {
+        data: {
+          code: 'MCP_SESSION_CAPACITY',
+          sessionCount: 1,
+          pendingAdmissions: 1,
+        },
+      },
+    });
+    expect(mocks.innerTransports).toHaveLength(0);
+
+    releaseAdmission();
+    await first;
+    expect(mocks.innerTransports).toHaveLength(1);
+    expect(transport.getStats()).toMatchObject({ sessions: 1, pendingAdmissions: 0 });
+  });
+
+  it('fails initialization before the SDK responds when fleet admission is rejected', async () => {
+    const onSessionOpened = vi.fn(async () => {
+      throw Object.assign(new Error('worker lease capacity reached'), {
+        code: 'BROWSER_FLEET_LEASE_CAPACITY',
+        retryAfterMs: 2_500,
+      });
+    });
+    const transport = new MultiplexedStreamableHttpTransport({ maxSessions: 1, onSessionOpened });
+    await transport.start();
+
+    const response = createRes();
+    await transport.handleRequest(createReq('POST'), response, {});
+
+    expect(mocks.innerTransports).toHaveLength(0);
+    expect(response.writeHead).toHaveBeenCalledWith(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '3',
+    });
+    expect(JSON.parse(response.end.mock.calls[0]![0])).toMatchObject({
+      error: {
+        code: -32002,
+        data: {
+          code: 'BROWSER_FLEET_LEASE_CAPACITY',
+          retryAfterMs: 2_500,
+        },
+      },
+    });
+    expect(transport.getStats()).toMatchObject({ sessions: 0, pendingAdmissions: 0 });
+  });
+
+  it('expires idle sessions and admits replacement transports', async () => {
+    let now = 0;
+    const onSessionClosed = vi.fn();
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      sessionIdleTtlMs: 100,
+      now: () => now,
+      onSessionClosed,
+    });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const expired = mocks.innerTransports[0];
+
+    now = 101;
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+
+    expect(expired.close).toHaveBeenCalledOnce();
+    expect(onSessionClosed).toHaveBeenCalledWith(expired.sessionId);
+    expect(mocks.innerTransports).toHaveLength(2);
+    expect(transport.getStats()).toMatchObject({ sessions: 1, sessionIdleTtlMs: 100 });
+
+    now = 202;
+    const expiredResponse = createRes();
+    const currentSession = mocks.innerTransports[1];
+    await transport.handleRequest(createReq('POST', currentSession.sessionId), expiredResponse, {});
+    expect(expiredResponse.writeHead).toHaveBeenCalledWith(404, {
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(expiredResponse.end.mock.calls[0]![0])).toMatchObject({
+      error: { data: { code: 'MCP_SESSION_EXPIRED' } },
+    });
+  });
+
+  it('does not evict a session while one of its requests is in flight', async () => {
+    let now = 0;
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      sessionIdleTtlMs: 100,
+      now: () => now,
+    });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementationOnce(async () => await gate);
+
+    now = 90;
+    const active = transport.handleRequest(createReq('POST', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(transport.getStats().inFlight).toBe(1));
+    now = 200;
+    const overloaded = createRes();
+    await transport.handleRequest(createReq('POST'), overloaded, {});
+
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, expect.any(Object));
+    expect(session.close).not.toHaveBeenCalled();
+    release();
+    await active;
   });
 
   it('routes same client request ids from different sessions back to the correct inner transport', async () => {

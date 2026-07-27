@@ -21,6 +21,8 @@ import { logger } from '@utils/logger';
 interface SessionRecord {
   sessionId: string;
   transport: StreamableHTTPServerTransport;
+  lastTouchedAt: number;
+  inFlight: number;
 }
 
 interface RequestRouteRecord {
@@ -31,6 +33,11 @@ interface RequestRouteRecord {
 
 export interface MultiplexedStreamableHttpTransportOptions {
   onSessionClosed?: (sessionId: string) => void;
+  onSessionOpened?: (sessionId: string) => void | Promise<void>;
+  maxSessions?: number;
+  capacityRetryAfterMs?: number;
+  sessionIdleTtlMs?: number;
+  now?: () => number;
 }
 
 function getSessionHeader(req: IncomingMessage): string | null {
@@ -55,6 +62,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly requestRoutes = new Map<string, RequestRouteRecord>();
   private readonly sessionOriginalToInternal = new Map<string, Map<string, string>>();
+  private pendingSessionAdmissions = 0;
   private requestSequence = 0;
 
   constructor(private readonly options: MultiplexedStreamableHttpTransportOptions = {}) {}
@@ -138,24 +146,145 @@ export class MultiplexedStreamableHttpTransport implements Transport {
         );
         return;
       }
-      await existing.transport.handleRequest(req, res, parsedBody);
+      const now = this.getNow();
+      const idleTtlMs = this.options.sessionIdleTtlMs ?? Number.POSITIVE_INFINITY;
+      if (existing.inFlight === 0 && now - existing.lastTouchedAt >= idleTtlMs) {
+        this.dropSession(sessionId);
+        await existing.transport.close().catch(() => undefined);
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: `Expired MCP session: ${sessionId}`,
+              data: { code: 'MCP_SESSION_EXPIRED' },
+            },
+            id: null,
+          }),
+        );
+        return;
+      }
+      existing.inFlight += 1;
+      existing.lastTouchedAt = now;
+      try {
+        await existing.transport.handleRequest(req, res, parsedBody);
+      } finally {
+        existing.inFlight = Math.max(0, existing.inFlight - 1);
+        existing.lastTouchedAt = this.getNow();
+      }
       return;
     }
 
-    const transport = this.createInnerTransport();
-    await transport.handleRequest(req, res, parsedBody);
-
-    if (transport.sessionId && !this.sessions.has(transport.sessionId)) {
-      this.sessions.set(transport.sessionId, {
-        sessionId: transport.sessionId,
-        transport,
+    const maxSessions = this.options.maxSessions ?? Number.MAX_SAFE_INTEGER;
+    if (this.getSessionAdmissionUsage() >= maxSessions) await this.evictExpiredSessions();
+    if (this.getSessionAdmissionUsage() >= maxSessions) {
+      const retryAfterMs = this.options.capacityRetryAfterMs ?? 1_000;
+      const admissionUsage = this.getSessionAdmissionUsage();
+      res.writeHead(503, {
+        'Content-Type': 'application/json',
+        'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
       });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: {
+            code: -32001,
+            message: 'MCP session capacity reached',
+            data: {
+              code: 'MCP_SESSION_CAPACITY',
+              retryAfterMs,
+              sessionCount: admissionUsage,
+              sessionLimit: maxSessions,
+              pendingAdmissions: this.pendingSessionAdmissions,
+            },
+          },
+          id: null,
+        }),
+      );
+      return;
+    }
+
+    const candidateSessionId = randomUUID();
+    this.pendingSessionAdmissions += 1;
+    let admissionClaimed = false;
+    let registered = false;
+    let transport: StreamableHTTPServerTransport | null = null;
+    try {
+      try {
+        if (this.options.onSessionOpened) {
+          await this.options.onSessionOpened(candidateSessionId);
+          admissionClaimed = true;
+        }
+      } catch (error) {
+        logger.warn(
+          `[http] MCP session admission hook failed for ${candidateSessionId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+        this.writeSessionAdmissionError(res, error);
+        return;
+      }
+
+      transport = this.createInnerTransport(candidateSessionId);
+      try {
+        await transport.handleRequest(req, res, parsedBody);
+      } catch (error) {
+        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
+        await transport.close().catch(() => undefined);
+        throw error;
+      }
+
+      if (transport.sessionId) {
+        if (transport.sessionId !== candidateSessionId) {
+          if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
+          await transport.close().catch(() => undefined);
+          throw new Error(
+            `Inner HTTP transport changed its reserved session id from ` +
+              `${candidateSessionId} to ${transport.sessionId}`,
+          );
+        }
+        if (!this.sessions.has(candidateSessionId)) {
+          this.sessions.set(candidateSessionId, {
+            sessionId: candidateSessionId,
+            transport,
+            lastTouchedAt: this.getNow(),
+            inFlight: 0,
+          });
+          registered = true;
+        }
+      } else {
+        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
+        await transport.close().catch(() => undefined);
+      }
+    } finally {
+      this.pendingSessionAdmissions = Math.max(0, this.pendingSessionAdmissions - 1);
+      if (!registered && transport?.sessionId === candidateSessionId) {
+        await transport.close().catch(() => undefined);
+      }
     }
   }
 
-  private createInnerTransport(): StreamableHTTPServerTransport {
+  getStats(): {
+    sessions: number;
+    sessionLimit: number;
+    sessionIdleTtlMs: number | null;
+    inFlight: number;
+    pendingAdmissions: number;
+  } {
+    let inFlight = 0;
+    for (const session of this.sessions.values()) inFlight += session.inFlight;
+    return {
+      sessions: this.sessions.size,
+      sessionLimit: this.options.maxSessions ?? Number.MAX_SAFE_INTEGER,
+      sessionIdleTtlMs: this.options.sessionIdleTtlMs ?? null,
+      inFlight,
+      pendingAdmissions: this.pendingSessionAdmissions,
+    };
+  }
+
+  private createInnerTransport(sessionId: string): StreamableHTTPServerTransport {
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
+      sessionIdGenerator: () => sessionId,
     });
 
     // eslint-disable-next-line unicorn/prefer-add-event-listener
@@ -281,6 +410,63 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     }
     if (existed) this.notifySessionClosed(sessionId);
     logger.info(`[http] MCP session closed: ${sessionId}`);
+  }
+
+  private async evictExpiredSessions(): Promise<void> {
+    const idleTtlMs = this.options.sessionIdleTtlMs ?? Number.POSITIVE_INFINITY;
+    if (!Number.isFinite(idleTtlMs)) return;
+    const cutoff = this.getNow() - idleTtlMs;
+    const expired: SessionRecord[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.inFlight === 0 && session.lastTouchedAt <= cutoff) expired.push(session);
+    }
+    for (const session of expired) this.dropSession(session.sessionId);
+    await Promise.allSettled(expired.map(async (session) => await session.transport.close()));
+  }
+
+  private getNow(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private getSessionAdmissionUsage(): number {
+    return this.sessions.size + this.pendingSessionAdmissions;
+  }
+
+  private writeSessionAdmissionError(res: ServerResponse, error: unknown): void {
+    const details =
+      typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : null;
+    const retryAfterMs =
+      typeof details?.['retryAfterMs'] === 'number' &&
+      Number.isFinite(details['retryAfterMs']) &&
+      details['retryAfterMs'] >= 0
+        ? details['retryAfterMs']
+        : (this.options.capacityRetryAfterMs ?? 1_000);
+    const errorCode =
+      typeof details?.['code'] === 'string' ? details['code'] : 'MCP_SESSION_ADMISSION_FAILED';
+    res.writeHead(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+    });
+    res.end(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32002,
+          message: error instanceof Error ? error.message : 'MCP session admission failed',
+          data: {
+            code: errorCode,
+            retryAfterMs,
+            ...(typeof details?.['targetWorkerId'] === 'string'
+              ? { targetWorkerId: details['targetWorkerId'] }
+              : {}),
+            ...(typeof details?.['targetEndpoint'] === 'string'
+              ? { targetEndpoint: details['targetEndpoint'] }
+              : {}),
+          },
+        },
+        id: null,
+      }),
+    );
   }
 
   private notifySessionClosed(sessionId: string): void {
