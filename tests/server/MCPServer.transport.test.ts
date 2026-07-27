@@ -84,8 +84,10 @@ vi.mock('@server/transport/MultiplexedStreamableHttpTransport', () => ({
     public onclose?: () => void;
     public onerror?: (error: Error) => void;
     public onmessage?: (...args: any[]) => void;
+    public readonly options?: { onSessionClosed?: (sessionId: string) => void };
 
-    constructor() {
+    constructor(options?: { onSessionClosed?: (sessionId: string) => void }) {
+      this.options = options;
       mocks.httpTransports.push(this);
     }
 
@@ -292,6 +294,43 @@ describe('MCPServer.transport', () => {
     expect(mocks.logger.success).toHaveBeenCalledWith(
       'MCP Streamable HTTP server listening on http://0.0.0.0:4321/mcp',
     );
+  });
+
+  it('drops all session-scoped state when an HTTP session closes', async () => {
+    const sessionId = 'session-cleanup';
+    const coordinator = { dropSession: vi.fn() };
+    const pool = { dropSession: vi.fn(async () => undefined) };
+    const browserHandlers = { dropSessionState: vi.fn() };
+    const workflowHandlers = { dropSessionState: vi.fn() };
+    const v8InspectorHandlers = { dropSessionState: vi.fn() };
+    const graphqlHandlers = { dropSessionState: vi.fn() };
+    const collector = { dropSessionState: vi.fn() };
+    const proxyHandlers = { dropSessionState: vi.fn(async () => undefined) };
+    const ctx = createCtx({
+      browserHandlers,
+      workflowHandlers,
+      v8InspectorHandlers,
+      graphqlHandlers,
+      collector,
+      proxyHandlers,
+      getDomainInstance: vi.fn((key: string) =>
+        key === 'browserSessionCoordinator' ? coordinator : pool,
+      ),
+    });
+
+    await startHttpTransport(ctx);
+    mocks.httpTransports[0].options.onSessionClosed(sessionId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(coordinator.dropSession).toHaveBeenCalledWith(sessionId);
+    expect(browserHandlers.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(workflowHandlers.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(v8InspectorHandlers.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(graphqlHandlers.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(collector.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(proxyHandlers.dropSessionState).toHaveBeenCalledWith(sessionId);
+    expect(pool.dropSession).toHaveBeenCalledTimes(10);
+    expect(pool.dropSession).toHaveBeenCalledWith(sessionId);
   });
 
   it('serves /health without invoking auth middleware and includes verbose details when enabled', async () => {

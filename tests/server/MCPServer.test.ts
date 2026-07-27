@@ -136,6 +136,7 @@ vi.mock('@utils/CacheAdapters', () => ({
 
 vi.mock('@src/utils/logger', () => ({
   logger: {
+    debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
@@ -171,7 +172,11 @@ vi.mock('@src/server/registry/index', () => ({
 }));
 
 import { MCPServer } from '@server/MCPServer';
-import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import { estimateBrowserSessionToolCostMs } from '@server/MCPServer.execution';
+import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import { InMemoryBrowserFleetLeaseStore } from '@server/runtime/BrowserFleetRouter';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
+import { TEST_URLS } from '@tests/shared/test-urls';
 
 describe('MCPServer', () => {
   const baseConfig = {
@@ -181,7 +186,18 @@ describe('MCPServer', () => {
       secondary: { apiKey: '', model: 'y' },
     },
     puppeteer: { headless: true, timeout: 1000 },
-    mcp: { name: 'test-server', version: '1.0.0' },
+    mcp: {
+      name: 'test-server',
+      version: '1.0.0',
+      browserSessionQueueMaxPending: 256,
+      browserSessionQueueMaxPendingPerSession: 16,
+      browserSessionQueueWaitTimeoutMs: 180_000,
+      browserSessionSchedulerQuantumMs: 250,
+      browserSessionSchedulerAgingMs: 15_000,
+      browserSessionExpectedConcurrency: 10,
+      browserSessionReservedPendingPerSession: 1,
+      browserSessionCostEwmaAlpha: 0.2,
+    },
     cache: { enabled: true, dir: '.cache', ttl: 60 },
     performance: { maxConcurrentAnalysis: 1, maxCodeSizeMB: 1 },
   } as any;
@@ -318,6 +334,167 @@ describe('MCPServer', () => {
     expect(listed?.resources).toEqual([
       expect.objectContaining({ uri: 'jshook://instrumentation/session/sess-1' }),
     ]);
+  });
+
+  it('injects browser session scheduler config into the coordinator', () => {
+    const configuredServer = new MCPServer({
+      ...baseConfig,
+      mcp: {
+        ...baseConfig.mcp,
+        browserSessionQueueMaxPending: 40,
+        browserSessionQueueMaxPendingPerSession: 4,
+        browserSessionQueueWaitTimeoutMs: 12_000,
+        browserSessionSchedulerQuantumMs: 125,
+        browserSessionSchedulerAgingMs: 4_000,
+        browserSessionExpectedConcurrency: 10,
+        browserSessionReservedPendingPerSession: 2,
+        browserSessionCostEwmaAlpha: 0.35,
+      },
+    }) as any;
+    const coordinator = configuredServer.getDomainInstance('browserSessionCoordinator');
+
+    expect(coordinator.getQueueStats()).toMatchObject({
+      maxPending: 40,
+      maxPendingPerSession: 4,
+      waitTimeoutMs: 12_000,
+      quantumMs: 125,
+      agingMs: 4_000,
+      expectedConcurrency: 10,
+      reservedPendingPerSession: 2,
+      costEwmaAlpha: 0.35,
+    });
+  });
+
+  it('injects browser fleet topology and lease capacity into the router', () => {
+    const configuredServer = new MCPServer(
+      {
+        ...baseConfig,
+        mcp: {
+          ...baseConfig.mcp,
+          browserFleetWorkerId: 'worker-a',
+          browserFleetWorkers: [
+            { id: 'worker-a', endpoint: 'http://worker-a', weight: 2 },
+            { id: 'worker-b', endpoint: 'http://worker-b' },
+          ],
+          browserFleetVirtualNodes: 64,
+          browserFleetLeaseTtlMs: 900_000,
+          browserFleetMaxLocalLeases: 128,
+        },
+      },
+      { browserFleetLeaseStore: new InMemoryBrowserFleetLeaseStore(128) },
+    ) as any;
+    const fleetRouter = configuredServer.getDomainInstance('browserFleetRouter');
+
+    expect(fleetRouter.getStats()).toMatchObject({
+      localWorkerId: 'worker-a',
+      workers: 2,
+      acceptingWorkers: 2,
+      ringPoints: 192,
+      virtualNodes: 64,
+      leaseTtlMs: 900_000,
+      leaseStore: { activeLeases: 0, maxLeases: 128 },
+    });
+  });
+
+  it('fails closed when a multi-worker topology has no shared lease store', () => {
+    expect(
+      () =>
+        new MCPServer({
+          ...baseConfig,
+          mcp: {
+            ...baseConfig.mcp,
+            browserFleetWorkerId: 'worker-a',
+            browserFleetWorkers: [{ id: 'worker-a' }, { id: 'worker-b' }],
+          },
+        }),
+    ).toThrow('requires a shared BrowserFleetLeaseStore');
+  });
+
+  it('derives bounded cold-start browser costs from duration, timeout, and tool class', () => {
+    expect(estimateBrowserSessionToolCostMs('human_scroll', { durationMs: 600 })).toBe(600);
+    expect(estimateBrowserSessionToolCostMs('page_navigate', { timeout: 120_000 })).toBe(30_000);
+    expect(estimateBrowserSessionToolCostMs('page_navigate', {})).toBe(7_500);
+    expect(estimateBrowserSessionToolCostMs('browser_status', {})).toBe(50);
+    expect(estimateBrowserSessionToolCostMs('page_click', {})).toBe(250);
+  });
+
+  it('returns a fenced wrong-worker route before executing browser code', async () => {
+    const configuredServer = new MCPServer(
+      {
+        ...baseConfig,
+        mcp: {
+          ...baseConfig.mcp,
+          browserFleetWorkerId: 'worker-a',
+          browserFleetWorkers: [
+            { id: 'worker-a', endpoint: 'http://worker-a' },
+            { id: 'worker-b', endpoint: 'http://worker-b' },
+          ],
+        },
+      },
+      { browserFleetLeaseStore: new InMemoryBrowserFleetLeaseStore(128) },
+    ) as any;
+    const fleetRouter = configuredServer.getDomainInstance('browserFleetRouter');
+    const remoteSession = Array.from({ length: 1_000 }, (_, index) => `remote-${index}`).find(
+      (sessionId) => fleetRouter.getAssignedWorker(sessionId).id === 'worker-b',
+    );
+    configuredServer.router.execute = vi.fn();
+
+    const response = await configuredServer.executeToolWithTracking('tool_alpha', {
+      _meta: { sessionId: remoteSession },
+    });
+    const payload = JSON.parse(response.content[0]!.text);
+
+    expect(response.isError).toBe(true);
+    expect(payload).toMatchObject({
+      success: false,
+      code: 'BROWSER_FLEET_WRONG_WORKER',
+      retryAfterMs: 0,
+      targetWorkerId: 'worker-b',
+      targetEndpoint: 'http://worker-b',
+      fencingToken: null,
+    });
+    expect(configuredServer.router.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not count browser queue overload as a tool circuit-breaker failure', async () => {
+    const configuredServer = new MCPServer({
+      ...baseConfig,
+      mcp: {
+        ...baseConfig.mcp,
+        browserSessionQueueMaxPending: 1,
+        browserSessionQueueMaxPendingPerSession: 1,
+        browserSessionQueueWaitTimeoutMs: 5_000,
+      },
+    }) as any;
+    const coordinator = configuredServer.getDomainInstance('browserSessionCoordinator');
+    const recordFailure = vi.spyOn(configuredServer.circuitBreaker, 'recordFailure');
+    configuredServer.router.execute = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: '{"success":true}' }],
+    });
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const active = coordinator.runExclusive('session-active', async () => await activeGate);
+    const queued = configuredServer.executeToolWithTracking('tool_alpha', {
+      _meta: { sessionId: 'session-a' },
+    });
+
+    const overload = await configuredServer.executeToolWithTracking('tool_alpha', {
+      _meta: { sessionId: 'session-b' },
+    });
+    expect(overload.isError).toBe(true);
+    expect(JSON.parse(overload.content[0]!.text)).toMatchObject({
+      success: false,
+      code: 'BROWSER_SESSION_QUEUE_FULL',
+      retryAfterMs: expect.any(Number),
+      queueDepth: 1,
+      queueLimit: 1,
+    });
+    expect(recordFailure).not.toHaveBeenCalled();
+
+    releaseActive();
+    await Promise.all([active, queued]);
   });
 
   it('resolves tool profile from environment when explicitly provided', () => {
@@ -504,6 +681,35 @@ describe('MCPServer', () => {
     vi.useRealTimers();
     warnSpy.mockRestore();
   });
+  it('does not report queued browser work as an actively hung tool', async () => {
+    const server = new MCPServer(baseConfig) as any;
+    vi.useFakeTimers();
+    mocks.getToolDomain.mockReturnValue('browser');
+    const { logger } = await import('@src/utils/logger');
+    const warnSpy = vi.spyOn(logger, 'warn');
+    const coordinator = server.getDomainInstance('browserSessionCoordinator');
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const active = coordinator.runExclusive('active-session', async () => await activeGate);
+    server.router.execute = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: '{"success":true}' }],
+    });
+
+    const queued = server.executeToolWithTracking('browser_status', {
+      _meta: { sessionId: 'queued-session' },
+    });
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Tool execution hung (>30s) for 'browser_status'"),
+    );
+
+    releaseActive();
+    await Promise.all([active, queued]);
+    vi.useRealTimers();
+    warnSpy.mockRestore();
+  });
   it('executeToolWithTracking catches trackingError and refreshes TTL when activated', async () => {
     const server = new MCPServer(baseConfig);
     server.activatedToolNames.add('tool_alpha');
@@ -531,6 +737,7 @@ describe('MCPServer', () => {
     expect(emitSpy).toHaveBeenCalledWith('tool:called', {
       toolName: 'tool_alpha',
       domain: 'browser',
+      sessionId: null,
       timestamp: expect.any(String),
       success: true,
       args: { x: 7 },
@@ -555,6 +762,7 @@ describe('MCPServer', () => {
     expect(emitSpy).toHaveBeenCalledWith('tool:called', {
       toolName: 'unknown_tool',
       domain: null,
+      sessionId: null,
       timestamp: expect.any(String),
       success: true,
       args: {},
@@ -649,6 +857,63 @@ describe('MCPServer', () => {
 
     expect(runExclusiveSpy).toHaveBeenCalledTimes(1);
     expect(restoreSpy).toHaveBeenCalledWith('sess-first-browser-call');
+  });
+
+  it('propagates the ambient MCP session into nested browser tool calls', async () => {
+    const server = new MCPServer(baseConfig) as any;
+    const coordinator = server.getDomainInstance(
+      'browserSessionCoordinator',
+    ) as BrowserSessionCoordinator;
+    const restoreSpy = vi.spyOn(coordinator, 'restoreSessionContext');
+    server.router.execute = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: '{"success":true}' }],
+    });
+
+    await runWithToolRequestContext({ sessionId: 'ambient-session' }, async () => {
+      await server.executeToolWithTracking('tool_alpha', {});
+    });
+
+    expect(restoreSpy).toHaveBeenCalledWith('ambient-session');
+  });
+
+  it('enriches browser responses from the calling session registry', async () => {
+    const server = new MCPServer(baseConfig) as any;
+    const coordinator = new BrowserSessionCoordinator(() => null);
+    server.setDomainInstance('browserSessionCoordinator', coordinator);
+    server.handlerDeps.browserHandlers = {
+      getTabRegistry: () => coordinator.getTabRegistry(coordinator.getCurrentSessionId()),
+    };
+    const registryA = coordinator.getTabRegistry('session-a');
+    const pageA = {};
+    const pageAId = registryA.registerPage(pageA, {
+      index: 0,
+      url: TEST_URLS.a,
+      title: 'A',
+    });
+    registryA.setCurrentPageId(pageAId);
+    const registryB = coordinator.getTabRegistry('session-b');
+    const pageB = {};
+    const pageBId = registryB.registerPage(pageB, {
+      index: 1,
+      url: TEST_URLS.b,
+      title: 'B',
+    });
+    registryB.setCurrentPageId(pageBId);
+    server.router.execute = vi.fn().mockImplementation(async () => ({
+      content: [{ type: 'text', text: '{"success":true}' }],
+    }));
+
+    const responseA = await server.executeToolWithTracking('page_navigate', {
+      _meta: { sessionId: 'session-a' },
+    });
+    const responseB = await server.executeToolWithTracking('page_navigate', {
+      _meta: { sessionId: 'session-b' },
+    });
+    const bodyA = JSON.parse(responseA.content[0].text);
+    const bodyB = JSON.parse(responseB.content[0].text);
+
+    expect(bodyA._tabContext).toMatchObject({ url: TEST_URLS.a, tabIndex: 0 });
+    expect(bodyB._tabContext).toMatchObject({ url: TEST_URLS.b, tabIndex: 1 });
   });
 
   it('registerCaches catches errors from createCacheAdapters and logs them', async () => {

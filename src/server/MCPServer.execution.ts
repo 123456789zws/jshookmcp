@@ -18,15 +18,60 @@ import { getToolDomain } from '@server/ToolCatalog';
 import { refreshDomainTtlForTool } from '@server/MCPServer.activation.ttl';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { ToolArgs } from '@server/types';
-import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
-import { parseBrowserSessionSnapshot } from '@server/runtime/BrowserSessionCoordinator';
+import {
+  BrowserSessionQueueError,
+  parseBrowserSessionSnapshot,
+  type BrowserSessionCoordinator,
+} from '@server/runtime/BrowserSessionCoordinator';
+import {
+  BrowserFleetLeaseError,
+  type BrowserFleetRoute,
+  type BrowserFleetRouter,
+} from '@server/runtime/BrowserFleetRouter';
 import type { ServerRuntimeState } from '@server/runtime/ServerRuntimeState';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
+import { SessionScopedResourcePoolCapacityError } from '@server/runtime/SessionScopedResourcePool';
 import {
   shouldCollectExecutionMetrics,
   captureExecutionMetricMemory,
   buildExecutionMetrics,
   appendExecutionMetrics,
 } from '@server/MCPServer.metrics';
+
+const DIRECT_COST_KEYS = ['durationMs', 'waitMs', 'captureDurationMs', 'sampleDurationMs'] as const;
+const TIMEOUT_COST_KEYS = ['timeoutMs', 'timeout'] as const;
+const MIN_BROWSER_COST_HINT_MS = 1;
+const MAX_BROWSER_COST_HINT_MS = 30_000;
+
+function finitePositiveNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export function estimateBrowserSessionToolCostMs(toolName: string, args: ToolArgs): number {
+  for (const key of DIRECT_COST_KEYS) {
+    const value = finitePositiveNumber(args[key]);
+    if (value !== null) {
+      return Math.min(MAX_BROWSER_COST_HINT_MS, Math.max(MIN_BROWSER_COST_HINT_MS, value));
+    }
+  }
+
+  for (const key of TIMEOUT_COST_KEYS) {
+    const value = finitePositiveNumber(args[key]);
+    if (value !== null) {
+      // A timeout is an upper bound rather than an expected duration. The EWMA
+      // replaces this conservative cold-start estimate after the first sample.
+      return Math.min(MAX_BROWSER_COST_HINT_MS, Math.max(MIN_BROWSER_COST_HINT_MS, value * 0.25));
+    }
+  }
+
+  if (/captcha_(wait|solve)|widget_solve/.test(toolName)) return MAX_BROWSER_COST_HINT_MS;
+  if (/page_(navigate|wait_for_selector)|debugger_.*wait|wait_for_debugger/.test(toolName)) {
+    return 7_500;
+  }
+  if (/human_mouse_move/.test(toolName)) return 600;
+  if (/human_scroll/.test(toolName)) return 1_500;
+  return /(^|_)(get|list|status|inspect|detect|stats|capabilities)(_|$)/.test(toolName) ? 50 : 250;
+}
 
 /**
  * Executes a tool with full tracking: circuit breaker, session coordination,
@@ -43,18 +88,6 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
   const executionCpuStart = collectExecutionMetrics ? process.cpuUsage() : null;
   const executionMemoryBefore = collectExecutionMetrics ? captureExecutionMetricMemory() : null;
   try {
-    timeoutTimer = setTimeout(() => {
-      try {
-        const safeArgs = JSON.stringify(args).slice(0, 500);
-        logger.warn(
-          `Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'. Args preview: ${safeArgs}...`,
-        );
-      } catch {
-        logger.warn(`Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'.`);
-      }
-    }, timeoutMs);
-    timeoutTimer.unref();
-
     if (ctx.circuitBreaker.shouldBlock(name)) {
       const state = ctx.circuitBreaker.getState(name);
       const retryAfter = state
@@ -79,40 +112,79 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
       };
     }
 
-    let response;
+    let enriched;
     try {
+      const toolDomain = getToolDomain(name);
       const browserCoordinator =
-        getToolDomain(name) === 'browser'
+        toolDomain === 'browser' || ctx.contextGuard.isContextSensitive(name)
           ? ctx.getDomainInstance<BrowserSessionCoordinator>('browserSessionCoordinator')
           : null;
-      const sessionId = (args['_meta'] as { sessionId?: string } | undefined)?.sessionId ?? null;
-      response = browserCoordinator
-        ? await browserCoordinator.runExclusive(sessionId, async () => {
-            await browserCoordinator.restoreSessionContext(sessionId);
-            return await ctx.router.execute(name, args);
+      const explicitSessionId = (args['_meta'] as { sessionId?: unknown } | undefined)?.sessionId;
+      const sessionId =
+        typeof explicitSessionId === 'string' && explicitSessionId.trim().length > 0
+          ? explicitSessionId.trim()
+          : (getToolRequestContext()?.sessionId ?? null);
+      const fleetRouter = browserCoordinator
+        ? ctx.getDomainInstance<BrowserFleetRouter>('browserFleetRouter')
+        : null;
+      let fleetRoute: BrowserFleetRoute | null = null;
+      if (browserCoordinator && fleetRouter) {
+        fleetRoute = await fleetRouter.admitLocalSession(sessionId?.trim() || 'default');
+      }
+      const executeInContext = async () => {
+        timeoutTimer = setTimeout(() => {
+          try {
+            const safeArgs = JSON.stringify(args).slice(0, 500);
+            logger.warn(
+              `Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'. ` +
+                `Args preview: ${safeArgs}...`,
+            );
+          } catch {
+            logger.warn(`Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'.`);
+          }
+        }, timeoutMs);
+        timeoutTimer.unref();
+        try {
+          const executeTool = async () => {
+            if (browserCoordinator) {
+              await browserCoordinator.restoreSessionContext(sessionId);
+            }
+            const response = await ctx.router.execute(name, args);
+
+            // Keep browser-derived state reads inside the session AsyncLocalStorage scope.
+            ctx.largeDataOffloader.offload(name, response);
+            if (toolDomain === 'browser') {
+              browserCoordinator?.noteToolResult(
+                sessionId,
+                name,
+                parseBrowserSessionSnapshot(response),
+              );
+            }
+            ctx.contextGuard.recordCall(name);
+            return ctx.contextGuard.enrichResponse(name, response);
+          };
+          if (fleetRouter && fleetRoute) {
+            const execution = await fleetRouter.runWithLeaseKeepAlive(fleetRoute, executeTool);
+            fleetRoute = execution.route;
+            return execution.value;
+          }
+          return await executeTool();
+        } finally {
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+          timeoutTimer = undefined;
+        }
+      };
+      enriched = browserCoordinator
+        ? await browserCoordinator.runExclusive(sessionId, executeInContext, {
+            toolName: name,
+            costHintMs: estimateBrowserSessionToolCostMs(name, args),
+            signal: getToolRequestContext()?.signal,
           })
-        : await ctx.router.execute(name, args);
+        : await executeInContext();
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
     }
-
-    // Offload large response data (>512KB) to disk / DetailedDataManager
-    // to prevent context bloat while preserving data for later retrieval.
-    ctx.largeDataOffloader.offload(name, response);
-
-    if (getToolDomain(name) === 'browser') {
-      const browserCoordinator = ctx.getDomainInstance<BrowserSessionCoordinator>(
-        'browserSessionCoordinator',
-      );
-      const sessionId = (args['_meta'] as { sessionId?: string } | undefined)?.sessionId ?? null;
-      browserCoordinator?.noteToolResult(sessionId, name, parseBrowserSessionSnapshot(response));
-    }
-
-    // Track consecutive tool calls for repeat loop detection
-    ctx.contextGuard.recordCall(name);
     ctx.getDomainInstance<ServerRuntimeState>('serverRuntimeState')?.recordToolCall(name, args);
-    // Enrich context-sensitive tool responses with current tab metadata
-    let enriched = ctx.contextGuard.enrichResponse(name, response);
     if (
       collectExecutionMetrics &&
       executionStartedAt &&
@@ -161,6 +233,10 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
     void ctx.eventBus.emit('tool:called', {
       toolName: name,
       domain: getToolDomain(name) ?? null,
+      sessionId:
+        typeof (args['_meta'] as { sessionId?: unknown } | undefined)?.sessionId === 'string'
+          ? (args['_meta'] as { sessionId: string }).sessionId.trim() || null
+          : (getToolRequestContext()?.sessionId ?? null),
       timestamp: new Date().toISOString(),
       success: toolResultSuccess,
       args,
@@ -188,8 +264,67 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
       ?.commit();
     return enriched;
   } catch (error) {
-    ctx.circuitBreaker.recordFailure(name);
-    const errorResponse = asErrorResponse(error);
+    const admissionError =
+      error instanceof BrowserSessionQueueError ||
+      error instanceof BrowserFleetLeaseError ||
+      error instanceof SessionScopedResourcePoolCapacityError;
+    if (!admissionError) {
+      ctx.circuitBreaker.recordFailure(name);
+    }
+    const errorResponse =
+      error instanceof BrowserSessionQueueError
+        ? {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: error.message,
+                  code: error.code,
+                  retryAfterMs: error.retryAfterMs,
+                  queueDepth: error.queueDepth,
+                  queueLimit: error.queueLimit,
+                }),
+              },
+            ],
+            isError: true,
+          }
+        : error instanceof BrowserFleetLeaseError
+          ? {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    success: false,
+                    error: error.message,
+                    code: error.code,
+                    retryAfterMs: error.retryAfterMs,
+                    targetWorkerId: error.targetWorkerId,
+                    targetEndpoint: error.targetEndpoint,
+                    fencingToken: error.fencingToken,
+                  }),
+                },
+              ],
+              isError: true,
+            }
+          : error instanceof SessionScopedResourcePoolCapacityError
+            ? {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: error.message,
+                      code: error.code,
+                      retryAfterMs: error.retryAfterMs,
+                      resourceCount: error.size,
+                      resourceLimit: error.limit,
+                    }),
+                  },
+                ],
+                isError: true,
+              }
+            : asErrorResponse(error);
     try {
       ctx.tokenBudget.recordToolCall(name, args, errorResponse);
     } catch (trackingError) {
@@ -200,6 +335,7 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
         'evidenceGraph',
       )
       ?.commit();
+    if (admissionError) return errorResponse;
     throw error;
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);

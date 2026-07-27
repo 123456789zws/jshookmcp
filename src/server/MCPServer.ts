@@ -43,6 +43,12 @@ import {
   restorePendingDomainActivations,
 } from '@server/runtime/ServerRuntimeState';
 import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import {
+  BrowserFleetRouter,
+  getConfiguredBrowserFleetLeaseStore,
+  InMemoryBrowserFleetLeaseStore,
+  type BrowserFleetLeaseStore,
+} from '@server/runtime/BrowserFleetRouter';
 import type { ToolHandlerDeps } from '@server/registry/contracts';
 import type {
   ExtensionListResult,
@@ -58,6 +64,10 @@ import {
   reloadExtensions as reloadExtensionsImpl,
 } from '@server/extensions/ExtensionManager';
 import { executeToolWithTracking as executeToolWithTrackingImpl } from '@server/MCPServer.execution';
+
+export interface MCPServerRuntimeOptions {
+  browserFleetLeaseStore?: BrowserFleetLeaseStore;
+}
 
 export class MCPServer implements MCPServerContext {
   public readonly config: Config;
@@ -234,7 +244,7 @@ export class MCPServer implements MCPServerContext {
     | import('@server/domains/instrumentation/index').InstrumentationHandlers
     | undefined;
 
-  constructor(config: Config) {
+  constructor(config: Config, runtimeOptions: MCPServerRuntimeOptions = {}) {
     this.config = config;
     this.cache = new CacheManager(config.cache);
     this.tokenBudget = new TokenBudgetManager();
@@ -404,10 +414,41 @@ export class MCPServer implements MCPServerContext {
     const stateDir = getStateDir();
     const snapshotScheduler = new RuntimeSnapshotScheduler();
     const runtimeState = new ServerRuntimeState();
-    const browserSessionCoordinator = new BrowserSessionCoordinator(() => this.collector);
+    const browserFleetWorkerId = config.mcp.browserFleetWorkerId?.trim() || 'local';
+    const configuredLeaseStore =
+      runtimeOptions.browserFleetLeaseStore ?? getConfiguredBrowserFleetLeaseStore();
+    if ((config.mcp.browserFleetWorkers?.length ?? 0) > 1 && !configuredLeaseStore) {
+      throw new TypeError(
+        'Multi-worker browser fleet topology requires a shared BrowserFleetLeaseStore via fleet-api',
+      );
+    }
+    const browserFleetRouter = new BrowserFleetRouter(
+      {
+        localWorkerId: browserFleetWorkerId,
+        workers:
+          config.mcp.browserFleetWorkers?.length > 0
+            ? config.mcp.browserFleetWorkers
+            : [{ id: browserFleetWorkerId }],
+        virtualNodes: config.mcp.browserFleetVirtualNodes ?? 128,
+        leaseTtlMs: config.mcp.browserFleetLeaseTtlMs ?? 600_000,
+      },
+      configuredLeaseStore ??
+        new InMemoryBrowserFleetLeaseStore(config.mcp.browserFleetMaxLocalLeases ?? 4096),
+    );
+    const browserSessionCoordinator = new BrowserSessionCoordinator(() => this.collector, {
+      maxPending: config.mcp.browserSessionQueueMaxPending,
+      maxPendingPerSession: config.mcp.browserSessionQueueMaxPendingPerSession,
+      waitTimeoutMs: config.mcp.browserSessionQueueWaitTimeoutMs,
+      quantumMs: config.mcp.browserSessionSchedulerQuantumMs,
+      agingMs: config.mcp.browserSessionSchedulerAgingMs,
+      expectedConcurrency: config.mcp.browserSessionExpectedConcurrency,
+      reservedPendingPerSession: config.mcp.browserSessionReservedPendingPerSession,
+      costEwmaAlpha: config.mcp.browserSessionCostEwmaAlpha,
+    });
     this.setDomainInstance('snapshotScheduler', snapshotScheduler);
     this.setDomainInstance('snapshotStateDir', stateDir);
     this.setDomainInstance('serverRuntimeState', runtimeState);
+    this.setDomainInstance('browserFleetRouter', browserFleetRouter);
     this.setDomainInstance('browserSessionCoordinator', browserSessionCoordinator);
     snapshotScheduler.register(`${stateDir}/runtime-state.json`, runtimeState);
     snapshotScheduler

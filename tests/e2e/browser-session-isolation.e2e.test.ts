@@ -18,49 +18,45 @@ describe('Browser session isolation E2E', { timeout: 120_000, sequential: true }
     await client.cleanup();
   });
 
-  test('tab_workflow shared context is isolated by logical sessionId', async () => {
+  test('tab_workflow shared context is isolated across ten logical sessions', async () => {
     if (!client.getToolMap().has('tab_workflow')) {
       client.recordSynthetic('browser-session-isolation', 'SKIP', 'Missing tab_workflow tool');
       return;
     }
 
-    const sessionA = { sessionId: 'e2e-session-a' };
-    const sessionB = { sessionId: 'e2e-session-b' };
+    const sessions = Array.from({ length: 10 }, (_, index) => ({
+      sessionId: `e2e-session-${index}`,
+      value: `owner-${index}`,
+    }));
 
-    const setA = await client.callWithMeta(
-      'tab_workflow',
-      { action: 'context_set', key: 'owner', value: 'A' },
-      sessionA,
-      30_000,
+    const setResults = await Promise.all(
+      sessions.map(
+        async ({ sessionId, value }) =>
+          await client.callWithMeta(
+            'tab_workflow',
+            { action: 'context_set', key: 'owner', value },
+            { sessionId },
+            30_000,
+          ),
+      ),
     );
-    expect(setA.result.status).not.toBe('FAIL');
+    expect(setResults.every((result) => result.result.status !== 'FAIL')).toBe(true);
 
-    const setB = await client.callWithMeta(
-      'tab_workflow',
-      { action: 'context_set', key: 'owner', value: 'B' },
-      sessionB,
-      30_000,
+    const getResults = await Promise.all(
+      sessions.map(
+        async ({ sessionId }) =>
+          await client.callWithMeta(
+            'tab_workflow',
+            { action: 'context_get', key: 'owner' },
+            { sessionId },
+            30_000,
+          ),
+      ),
     );
-    expect(setB.result.status).not.toBe('FAIL');
-
-    const getA = await client.callWithMeta(
-      'tab_workflow',
-      { action: 'context_get', key: 'owner' },
-      sessionA,
-      30_000,
-    );
-    const getABody = getA.parsed as TabWorkflowBody;
-    expect(getABody.found).toBe(true);
-    expect(getABody.value).toBe('A');
-
-    const getB = await client.callWithMeta(
-      'tab_workflow',
-      { action: 'context_get', key: 'owner' },
-      sessionB,
-      30_000,
-    );
-    const getBBody = getB.parsed as TabWorkflowBody;
-    expect(getBBody.found).toBe(true);
-    expect(getBBody.value).toBe('B');
+    for (const [index, result] of getResults.entries()) {
+      const body = result.parsed as TabWorkflowBody;
+      expect(body.found).toBe(true);
+      expect(body.value).toBe(`owner-${index}`);
+    }
   });
 });

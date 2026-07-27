@@ -18,6 +18,9 @@ import { ProcessRegistry } from '@utils/ProcessRegistry';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import { MultiplexedStreamableHttpTransport } from '@server/transport/MultiplexedStreamableHttpTransport';
 import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
+import type { SessionScopedResourcePool } from '@server/runtime/SessionScopedResourcePool';
+import type { ConsoleMonitor } from '@modules/monitor/ConsoleMonitor';
 
 export async function startStdioTransport(ctx: MCPServerContext): Promise<void> {
   const transport = new StdioServerTransport();
@@ -78,14 +81,78 @@ export async function startStdioTransport(ctx: MCPServerContext): Promise<void> 
 export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
   const port = parseInt(process.env.MCP_PORT ?? '3000', 10);
   const host = process.env.MCP_HOST ?? '127.0.0.1';
+  const getDomainInstance =
+    typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
 
   const transport = new MultiplexedStreamableHttpTransport({
+    maxSessions: ctx.config?.mcp?.browserFleetMaxLocalLeases ?? 4096,
+    capacityRetryAfterMs: 1_000,
+    sessionIdleTtlMs: ctx.config?.mcp?.browserFleetLeaseTtlMs ?? 600_000,
+    onSessionOpened: async (sessionId) => {
+      const fleetRouter = getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter');
+      if (fleetRouter && typeof fleetRouter.claimLocalSession === 'function') {
+        await fleetRouter.claimLocalSession(sessionId);
+      }
+    },
     onSessionClosed: (sessionId) => {
-      ctx
-        .getDomainInstance<BrowserSessionCoordinator>('browserSessionCoordinator')
-        ?.dropSession(sessionId);
+      const fleetRouter = getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter');
+      const releaseFleetLease =
+        fleetRouter && typeof fleetRouter.releaseLocalSession === 'function'
+          ? fleetRouter.releaseLocalSession(sessionId)
+          : null;
+      void releaseFleetLease?.catch((error: unknown) => {
+        logger.warn(
+          `[http] browser fleet lease cleanup failed for ${sessionId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+      getDomainInstance?.<BrowserSessionCoordinator>('browserSessionCoordinator')?.dropSession(
+        sessionId,
+      );
+      ctx.browserHandlers?.dropSessionState(sessionId);
+      ctx.workflowHandlers?.dropSessionState(sessionId);
+      ctx.v8InspectorHandlers?.dropSessionState(sessionId);
+      ctx.graphqlHandlers?.dropSessionState(sessionId);
+      ctx.collector?.dropSessionState(sessionId);
+      void ctx.proxyHandlers?.dropSessionState(sessionId).catch((error: unknown) => {
+        logger.warn(
+          `[http] proxy lease cleanup failed for ${sessionId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+      const poolKeys = [
+        'sessionConsoleMonitorPool',
+        'sessionScriptManagerPool',
+        'sessionDebuggerManagerPool',
+        'sessionRuntimeInspectorPool',
+        'sessionTraceRecorderPool',
+        'sessionAdvancedHandlersPool',
+        'sessionStreamingHandlersPool',
+        'sessionWorkflowHandlersPool',
+        'sessionAiHookHandlersPool',
+        'sessionHookPresetHandlersPool',
+      ] as const;
+      void Promise.allSettled(
+        poolKeys.map(async (key) => {
+          const pool = getDomainInstance?.<SessionScopedResourcePool<object>>(key);
+          await pool?.dropSession(sessionId);
+        }),
+      ).then((results) => {
+        for (let index = 0; index < results.length; index++) {
+          const result = results[index];
+          if (result?.status === 'rejected') {
+            logger.warn(
+              `[http] ${poolKeys[index]} cleanup failed for ${sessionId}: ` +
+                `${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+          }
+        }
+      });
     },
   });
+  if (typeof ctx.setDomainInstance === 'function') {
+    ctx.setDomainInstance('httpMultiplexTransport', transport);
+  }
 
   await ctx.server.connect(transport);
 
@@ -181,6 +248,25 @@ function handleHealthCheck(ctx: MCPServerContext, res: HttpServerResponse): void
       currentUsage: budgetStats.currentUsage,
       maxTokens: budgetStats.maxTokens,
     };
+    const getDomainInstance =
+      typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
+    const scheduler = getDomainInstance?.<BrowserSessionCoordinator>('browserSessionCoordinator');
+    const fleet = getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter');
+    const httpTransport =
+      getDomainInstance?.<MultiplexedStreamableHttpTransport>('httpMultiplexTransport');
+    if (
+      typeof scheduler?.getQueueStats === 'function' ||
+      typeof fleet?.getStats === 'function' ||
+      typeof httpTransport?.getStats === 'function'
+    ) {
+      body.browserRuntime = {
+        scheduler:
+          typeof scheduler?.getQueueStats === 'function' ? scheduler.getQueueStats() : null,
+        fleet: typeof fleet?.getStats === 'function' ? fleet.getStats() : null,
+        httpSessions:
+          typeof httpTransport?.getStats === 'function' ? httpTransport.getStats() : null,
+      };
+    }
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -222,11 +308,10 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
 
     ctx.detailedData.shutdown();
 
-    const activationController =
-      typeof ctx.getDomainInstance === 'function'
-        ? ctx.getDomainInstance<{ dispose?: () => void }>('activationController')
-        : ((ctx as MCPServerContext & { activationController?: { dispose?: () => void } })
-            .activationController ?? undefined);
+    const activationController = getInst
+      ? getInst<{ dispose?: () => void }>('activationController')
+      : ((ctx as MCPServerContext & { activationController?: { dispose?: () => void } })
+          .activationController ?? undefined);
     if (activationController && typeof activationController.dispose === 'function') {
       try {
         activationController.dispose();
@@ -251,15 +336,50 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
 
     // Unified disposable cleanup: iterate all closable domain instances.
     // Each entry: [field name for logging, instance ref, close method name].
+    const monitorPool = getInst?.<SessionScopedResourcePool<ConsoleMonitor>>(
+      'sessionConsoleMonitorPool',
+    );
+    const scriptManagerPool = getInst?.<SessionScopedResourcePool<object>>(
+      'sessionScriptManagerPool',
+    );
+    const debuggerManagerPool = getInst?.<SessionScopedResourcePool<object>>(
+      'sessionDebuggerManagerPool',
+    );
+    const runtimeInspectorPool = getInst?.<SessionScopedResourcePool<object>>(
+      'sessionRuntimeInspectorPool',
+    );
     const closables: Array<[string, unknown, string]> = [
-      ['consoleMonitor', ctx.consoleMonitor, 'disable'],
-      ['runtimeInspector', ctx.runtimeInspector, 'close'],
-      ['debuggerManager', ctx.debuggerManager, 'close'],
-      ['scriptManager', ctx.scriptManager, 'close'],
+      [
+        monitorPool ? 'sessionConsoleMonitorPool' : 'consoleMonitor',
+        monitorPool ?? ctx.consoleMonitor,
+        monitorPool ? 'close' : 'disable',
+      ],
+      [
+        runtimeInspectorPool ? 'sessionRuntimeInspectorPool' : 'runtimeInspector',
+        runtimeInspectorPool ?? ctx.runtimeInspector,
+        'close',
+      ],
+      [
+        debuggerManagerPool ? 'sessionDebuggerManagerPool' : 'debuggerManager',
+        debuggerManagerPool ?? ctx.debuggerManager,
+        'close',
+      ],
+      [
+        scriptManagerPool ? 'sessionScriptManagerPool' : 'scriptManager',
+        scriptManagerPool ?? ctx.scriptManager,
+        'close',
+      ],
+      ['sessionTraceRecorderPool', getInst?.('sessionTraceRecorderPool'), 'close'],
+      ['sessionAdvancedHandlersPool', getInst?.('sessionAdvancedHandlersPool'), 'close'],
+      ['sessionStreamingHandlersPool', getInst?.('sessionStreamingHandlersPool'), 'close'],
+      ['sessionWorkflowHandlersPool', getInst?.('sessionWorkflowHandlersPool'), 'close'],
+      ['sessionAiHookHandlersPool', getInst?.('sessionAiHookHandlersPool'), 'close'],
+      ['sessionHookPresetHandlersPool', getInst?.('sessionHookPresetHandlersPool'), 'close'],
       ['transformHandlers', ctx.transformHandlers, 'close'],
+      ['proxyHandlers', ctx.proxyHandlers, 'close'],
       // Lazy domain — undefined when never activated (or in a partial context),
       // skipped by the guard below.
-      ['nativeEmulatorHandlers', ctx.getDomainInstance?.('nativeEmulatorHandlers'), 'dispose'],
+      ['nativeEmulatorHandlers', getInst?.('nativeEmulatorHandlers'), 'dispose'],
     ];
 
     for (const [name, instance, method] of closables) {
