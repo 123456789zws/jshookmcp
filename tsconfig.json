@@ -21,6 +21,7 @@
     },
 
     /* Emit */
+    "noEmit": true,
     "outDir": "./dist",
 
     "sourceMap": false,
