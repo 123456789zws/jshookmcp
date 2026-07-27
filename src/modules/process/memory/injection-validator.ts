@@ -10,6 +10,7 @@
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { UnifiedProcessManager } from '@modules/process/UnifiedProcessManager';
 import { logger } from '@utils/logger';
 
 export enum InjectionValidationMode {
@@ -117,7 +118,6 @@ export class InjectionValidator {
 
     // Check if process exists and is accessible
     try {
-      const { UnifiedProcessManager } = await import('@modules/process');
       const processMgr = new UnifiedProcessManager();
       const processInfo = await processMgr.getProcessByPid(pid);
 

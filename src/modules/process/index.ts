@@ -4,11 +4,6 @@
  * Supports: Windows, Linux, macOS
  */
 
-import { ProcessManager as WindowsProcessManager } from '@modules/process/ProcessManager';
-import { LinuxProcessManager } from '@modules/process/LinuxProcessManager';
-import { MacProcessManager } from '@modules/process/MacProcessManager';
-import { logger } from '@utils/logger';
-
 // Re-export types
 export type {
   ProcessInfo,
@@ -21,9 +16,9 @@ export type { ChromeProcess as LinuxChromeProcess } from '@modules/process/Linux
 export type { ChromeProcess as MacChromeProcess } from '@modules/process/MacProcessManager';
 
 // Export platform-specific implementations
-export { WindowsProcessManager };
-export { LinuxProcessManager };
-export { MacProcessManager };
+export { ProcessManager as WindowsProcessManager } from '@modules/process/ProcessManager';
+export { LinuxProcessManager } from '@modules/process/LinuxProcessManager';
+export { MacProcessManager } from '@modules/process/MacProcessManager';
 
 // Export Memory Manager
 export {
@@ -49,115 +44,10 @@ export {
   enumerateModules,
 } from '@modules/process/memoryUtils';
 
-export type Platform = 'win32' | 'linux' | 'darwin' | 'unknown';
-
-export function detectPlatform(): Platform {
-  const platform = process.platform;
-
-  switch (platform) {
-    case 'win32':
-      return 'win32';
-    case 'linux':
-      return 'linux';
-    case 'darwin':
-      return 'darwin';
-    default:
-      logger.warn(`Unsupported platform: ${platform}`);
-      return 'unknown';
-  }
-}
-
-export function createProcessManager():
-  | WindowsProcessManager
-  | LinuxProcessManager
-  | MacProcessManager {
-  const platform = detectPlatform();
-
-  logger.info(`Creating ProcessManager for platform: ${platform}`);
-
-  switch (platform) {
-    case 'win32':
-      return new WindowsProcessManager();
-    case 'linux':
-      return new LinuxProcessManager();
-    case 'darwin':
-      return new MacProcessManager();
-    default:
-      throw new Error(
-        `Unsupported platform: ${platform}. ProcessManager requires Windows, Linux, or macOS.`,
-      );
-  }
-}
-
-export function isProcessManagementSupported(): boolean {
-  return detectPlatform() !== 'unknown';
-}
-
-/**
- * Unified interface for cross-platform process operations
- * This provides a common API regardless of the underlying platform
- */
-export class UnifiedProcessManager {
-  private manager: WindowsProcessManager | LinuxProcessManager | MacProcessManager;
-  private platform: Platform;
-
-  constructor() {
-    this.platform = detectPlatform();
-    this.manager = createProcessManager();
-  }
-
-  getPlatform(): Platform {
-    return this.platform;
-  }
-
-  async findProcesses(pattern: string) {
-    return this.manager.findProcesses(pattern);
-  }
-
-  async getProcessByPid(pid: number) {
-    return this.manager.getProcessByPid(pid);
-  }
-
-  async getProcessWindows(pid: number) {
-    return this.manager.getProcessWindows(pid);
-  }
-
-  async checkDebugPort(pid: number, options?: { commandLine?: string }) {
-    return this.manager.checkDebugPort(pid, options);
-  }
-
-  async launchWithDebug(executablePath: string, debugPort?: number, args?: string[]) {
-    return this.manager.launchWithDebug(executablePath, debugPort, args);
-  }
-
-  async killProcess(pid: number) {
-    return this.manager.killProcess(pid);
-  }
-
-  async getProcessCommandLine(pid: number) {
-    return this.manager.getProcessCommandLine(pid);
-  }
-
-  /**
-   * Platform-specific: Find Chromium-based browser processes
-   */
-  async findBrowserProcesses(config?: {
-    processNamePattern?: string;
-    windowClassPattern?: string;
-  }) {
-    if (this.platform === 'win32') {
-      if (config?.processNamePattern || config?.windowClassPattern) {
-        return (this.manager as WindowsProcessManager).findChromiumProcesses({
-          processNamePattern: config.processNamePattern,
-          windowClassPattern: config.windowClassPattern,
-        });
-      }
-      return (this.manager as WindowsProcessManager).findChromiumAppProcesses();
-    } else if (this.platform === 'linux') {
-      return (this.manager as LinuxProcessManager).findChromeProcesses();
-    } else if (this.platform === 'darwin') {
-      return (this.manager as MacProcessManager).findChromeProcesses();
-    }
-    return null;
-  }
-}
+export {
+  createProcessManager,
+  detectPlatform,
+  isProcessManagementSupported,
+  UnifiedProcessManager,
+  type Platform,
+} from '@modules/process/UnifiedProcessManager';

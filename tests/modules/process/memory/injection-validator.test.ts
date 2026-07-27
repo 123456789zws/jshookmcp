@@ -38,7 +38,7 @@ vi.mock('node:crypto', () => ({
   createHash: state.createHash,
 }));
 
-vi.mock('@modules/process', () => ({
+vi.mock('@modules/process/UnifiedProcessManager', () => ({
   UnifiedProcessManager: class {
     async getProcessByPid(pid: number) {
       return state.processInfo(pid);
