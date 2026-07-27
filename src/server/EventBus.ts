@@ -5,6 +5,8 @@
  * Supports async listeners, one-time subscriptions, and wildcard listeners.
  */
 
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
+
 export type EventHandler<T = unknown> = (payload: T) => void | Promise<void>;
 
 /** Core event map — extend via module augmentation for domain-specific events. */
@@ -15,6 +17,7 @@ export interface ServerEventMap {
   'tool:called': {
     toolName: string;
     domain: string | null;
+    sessionId?: string | null;
     timestamp: string;
     success: boolean;
     args?: Record<string, unknown>;
@@ -295,7 +298,12 @@ export class EventBus<TMap extends Record<string, unknown> = ServerEventMap> {
     // Wildcard listeners run in parallel — they are telemetry/observability
     // side-effects whose completion order is irrelevant.
     if (this.wildcardListeners.length > 0) {
-      const wildPayload = { event, payload };
+      const sessionId = getToolRequestContext()?.sessionId;
+      const wildcardPayload =
+        sessionId && typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+          ? { ...(payload as Record<string, unknown>), mcpSessionId: sessionId }
+          : payload;
+      const wildPayload = { event, payload: wildcardPayload };
       const promises = this.wildcardListeners.map((sub) => {
         try {
           return Promise.resolve(sub.handler(wildPayload));

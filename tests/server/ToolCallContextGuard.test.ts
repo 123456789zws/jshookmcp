@@ -11,6 +11,7 @@ vi.mock('@src/utils/logger', () => ({
 }));
 
 import { ToolCallContextGuard } from '@server/ToolCallContextGuard';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 interface TextContent {
   type: 'text';
@@ -300,6 +301,24 @@ describe('ToolCallContextGuard', () => {
     expect(guard.isContextSensitive('js_heap_snapshot')).toBe(true);
     expect(guard.isContextSensitive('script_list')).toBe(true);
     expect(guard.isContextSensitive('captcha_solve')).toBe(true);
+    expect(guard.isContextSensitive('canvas_scene_dump')).toBe(true);
+    expect(guard.isContextSensitive('webgpu_pipeline_dump')).toBe(true);
+    expect(guard.isContextSensitive('v8_heap_snapshot_capture')).toBe(true);
+    expect(guard.isContextSensitive('wasm_dump')).toBe(true);
+    expect(guard.isContextSensitive('graphql_introspect')).toBe(true);
+    expect(guard.isContextSensitive('call_graph_analyze')).toBe(true);
+    expect(guard.isContextSensitive('script_replace_persist')).toBe(true);
+    expect(guard.isContextSensitive('collect_code')).toBe(true);
+    expect(guard.isContextSensitive('breakpoint')).toBe(true);
+    expect(guard.isContextSensitive('performance_trace')).toBe(true);
+    expect(guard.isContextSensitive('profiler_cpu')).toBe(true);
+    expect(guard.isContextSensitive('page_script_run')).toBe(true);
+    expect(guard.isContextSensitive('grpc_monitor')).toBe(true);
+    expect(guard.isContextSensitive('sourcemap_discover')).toBe(true);
+    expect(guard.isContextSensitive('webpack_enumerate')).toBe(true);
+    expect(guard.isContextSensitive('save_page_snapshot')).toBe(true);
+    expect(guard.isContextSensitive('start_trace_recording')).toBe(true);
+    expect(guard.isContextSensitive('crypto_extract_standalone')).toBe(true);
 
     // Non-matching
     expect(guard.isContextSensitive('search_tools')).toBe(false);
@@ -477,6 +496,26 @@ describe('ToolCallContextGuard', () => {
       expect(guard.recordCall('search_tools')).toBe(0);
       expect(guard.recordCall('route_tool')).toBe(0);
       expect(guard.recordCall('call_tool')).toBe(0);
+    });
+
+    it('does not combine repeat counts across ten MCP sessions', async () => {
+      const guard = new ToolCallContextGuard(() => null);
+
+      await runWithToolRequestContext({ sessionId: 'session-0' }, async () => {
+        guard.recordCall('page_navigate');
+        guard.recordCall('page_navigate');
+        expect(guard.isRepeatLoop()).toBe(false);
+      });
+      for (let index = 1; index < 10; index++) {
+        await runWithToolRequestContext({ sessionId: `session-${index}` }, async () => {
+          expect(guard.recordCall('page_navigate')).toBe(1);
+          expect(guard.isRepeatLoop()).toBe(false);
+        });
+      }
+      await runWithToolRequestContext({ sessionId: 'session-0' }, async () => {
+        expect(guard.recordCall('page_navigate')).toBe(3);
+        expect(guard.isRepeatLoop()).toBe(true);
+      });
     });
   });
 });

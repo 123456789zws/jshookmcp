@@ -12,6 +12,7 @@
  */
 
 import { logger } from '@utils/logger';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 /** Minimal TabRegistry surface needed by the guard. */
 interface TabContextProvider {
@@ -39,6 +40,23 @@ type ContextSensitiveToolDomain =
   | 'instrumentation'
   | 'hook_preset'
   | 'ws'
+  | 'sse'
+  | 'fetch_stream'
+  | 'webrtc'
+  | 'canvas'
+  | 'skia'
+  | 'webgpu'
+  | 'v8'
+  | 'wasm'
+  | 'trace'
+  | 'graphql'
+  | 'sourcemap'
+  | 'performance'
+  | 'profiler'
+  | 'page_script'
+  | 'grpc'
+  | 'antidebug'
+  | 'blackbox'
   | 'evidence';
 
 type ContextSensitiveToolPrefix = `${ContextSensitiveToolDomain}_`;
@@ -59,11 +77,68 @@ const CONTEXT_SENSITIVE_PREFIXES = [
   'instrumentation_',
   'hook_preset_',
   'ws_',
+  'sse_',
+  'fetch_stream_',
+  'webrtc_',
+  'canvas_',
+  'skia_',
+  'webgpu_',
+  'v8_',
+  'wasm_',
+  'trace_',
+  'graphql_',
+  'sourcemap_',
+  'performance_',
+  'profiler_',
+  'page_script_',
+  'grpc_',
+  'antidebug_',
+  'blackbox_',
   'evidence_',
 ] as const satisfies readonly ContextSensitiveToolPrefix[];
 
+const CONTEXT_SENSITIVE_TOOLS = new Set([
+  'collect_code',
+  'call_graph_analyze',
+  'script_replace_persist',
+  // Debugger tools whose historical names predate the debugger_ prefix.
+  'breakpoint',
+  'get_call_stack',
+  'get_object_properties',
+  'get_scope_variables_enhanced',
+  'watch',
+  // Analysis and workflow tools that resolve the collector's active page.
+  'search_in_scripts',
+  'extract_function_tree',
+  'clear_collected_data',
+  'get_collection_stats',
+  'webpack_enumerate',
+  'api_probe_batch',
+  'js_bundle_search',
+  // Coordination data is shared, but capture/restore must use the caller's tab.
+  'create_task_handoff',
+  'save_page_snapshot',
+  'restore_page_snapshot',
+  'coordination_restore_snapshot',
+  // Trace lifecycle binds a recorder/CDP session to the caller's current tab.
+  'start_trace_recording',
+  'stop_trace_recording',
+  // Encoding operations can resolve request bodies from the active page.
+  'binary_detect_format',
+  'binary_decode',
+  'binary_encode',
+  'binary_entropy_analysis',
+  'protobuf_decode_raw',
+  // Transform operations may resolve script IDs or functions in page context.
+  'ast_transform_preview',
+  'ast_transform_chain',
+  'ast_transform_apply',
+  'crypto_extract_standalone',
+]);
+
 /** Max consecutive identical calls before injecting a warning. */
 const MAX_CONSECUTIVE_REPEATS = 3;
+const MAX_REPEAT_SCOPES = 256;
 
 /** Raw network tools exempt from context-sensitivity (no browser/UI needed). */
 const NETWORK_RAW_TOOLS = new Set([
@@ -105,11 +180,27 @@ export class ToolCallContextGuard {
   /** Memoize prefix-match results — tool names repeat heavily across calls. */
   private readonly contextSensitiveCache = new Map<string, boolean>();
 
-  /** Ring buffer tracking the last tool call name for repeat detection. */
-  private lastToolName: string | null = null;
-  private consecutiveCount = 0;
+  /** Repeat detection is isolated per MCP client session in shared-daemon mode. */
+  private readonly repeatStates = new Map<
+    string,
+    { lastToolName: string | null; consecutiveCount: number }
+  >();
 
   constructor(private getProvider: () => TabContextProvider | null) {}
+
+  private getRepeatState(): { lastToolName: string | null; consecutiveCount: number } {
+    const scope = getToolRequestContext()?.sessionId ?? 'default';
+    let state = this.repeatStates.get(scope);
+    if (!state) {
+      if (this.repeatStates.size >= MAX_REPEAT_SCOPES) {
+        const oldest = this.repeatStates.keys().next().value as string | undefined;
+        if (oldest) this.repeatStates.delete(oldest);
+      }
+      state = { lastToolName: null, consecutiveCount: 0 };
+      this.repeatStates.set(scope, state);
+    }
+    return state;
+  }
 
   /** Check whether a tool name belongs to a context-sensitive domain. */
   isContextSensitive(toolName: string): boolean {
@@ -121,7 +212,9 @@ export class ToolCallContextGuard {
       return false;
     }
 
-    const result = CONTEXT_SENSITIVE_PREFIXES.some((p) => toolName.startsWith(p));
+    const result =
+      CONTEXT_SENSITIVE_TOOLS.has(toolName) ||
+      CONTEXT_SENSITIVE_PREFIXES.some((prefix) => toolName.startsWith(prefix));
     this.contextSensitiveCache.set(toolName, result);
     return result;
   }
@@ -137,20 +230,21 @@ export class ToolCallContextGuard {
       return 0;
     }
 
-    if (toolName === this.lastToolName) {
-      this.consecutiveCount++;
+    const state = this.getRepeatState();
+    if (toolName === state.lastToolName) {
+      state.consecutiveCount++;
     } else {
-      this.lastToolName = toolName;
-      this.consecutiveCount = 1;
+      state.lastToolName = toolName;
+      state.consecutiveCount = 1;
     }
-    return this.consecutiveCount;
+    return state.consecutiveCount;
   }
 
   /**
    * Check if the current call is a suspected repeat loop.
    */
   isRepeatLoop(): boolean {
-    return this.consecutiveCount >= MAX_CONSECUTIVE_REPEATS;
+    return this.getRepeatState().consecutiveCount >= MAX_CONSECUTIVE_REPEATS;
   }
 
   /**
@@ -256,6 +350,7 @@ export class ToolCallContextGuard {
     toolName: string,
     response: T,
   ): void {
+    const consecutiveCount = this.getRepeatState().consecutiveCount;
     const prefix = toolName.split('_')[0] ?? '';
     const alternatives =
       toolName === 'page_evaluate'
@@ -266,9 +361,9 @@ export class ToolCallContextGuard {
 
     const warning = {
       detected: true,
-      consecutiveCount: this.consecutiveCount,
+      consecutiveCount,
       message:
-        `⚠ You have called "${toolName}" ${this.consecutiveCount} times in a row. ` +
+        `⚠ You have called "${toolName}" ${consecutiveCount} times in a row. ` +
         `This is likely a loop — consider what you actually need to do next.`,
       suggestedTools: suggestions,
       hint:

@@ -10,6 +10,7 @@ vi.mock('@src/utils/logger', () => ({
 }));
 
 import { ToolCircuitBreaker } from '@server/security/ToolCircuitBreaker';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 describe('ToolCircuitBreaker', () => {
   let breaker: ToolCircuitBreaker;
@@ -165,5 +166,21 @@ describe('ToolCircuitBreaker', () => {
 
   it('getRecoveryMs returns 30000', () => {
     expect(breaker.getRecoveryMs()).toBe(30_000);
+  });
+
+  it('isolates failures across ten MCP sessions', async () => {
+    await runWithToolRequestContext({ sessionId: 'session-0' }, async () => {
+      breaker.recordFailure('page_navigate');
+      breaker.recordFailure('page_navigate');
+      breaker.recordFailure('page_navigate');
+      expect(breaker.shouldBlock('page_navigate')).toBe(true);
+    });
+
+    for (let index = 1; index < 10; index++) {
+      await runWithToolRequestContext({ sessionId: `session-${index}` }, async () => {
+        expect(breaker.shouldBlock('page_navigate')).toBe(false);
+        expect(breaker.getState('page_navigate')).toBeUndefined();
+      });
+    }
   });
 });

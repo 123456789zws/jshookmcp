@@ -8,11 +8,13 @@ export interface ToolRequestExtra {
   requestInfo?: {
     headers?: Record<string, string | string[] | undefined>;
   };
+  signal?: AbortSignal;
 }
 
 export interface ToolRequestContextValue {
   sessionId: string | null;
   requestId: RequestId | null;
+  signal?: AbortSignal;
 }
 
 const requestContext = new AsyncLocalStorage<ToolRequestContextValue>();
@@ -48,6 +50,7 @@ export function runWithToolRequestContext<T>(
     {
       sessionId: resolveToolRequestSessionId(extra),
       requestId: extra?.requestId ?? null,
+      ...(extra?.signal ? { signal: extra.signal } : {}),
     },
     callback,
   );

@@ -1,4 +1,5 @@
 import { logger } from '@utils/logger';
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 export interface CircuitBreakerState {
   toolName: string;
@@ -18,6 +19,11 @@ export class ToolCircuitBreaker {
   private readonly halfOpenCalls = new Map<string, number>();
   private readonly listeners = new Set<CircuitBreakerEventHandler>();
 
+  private stateKey(toolName: string): string {
+    const sessionId = getToolRequestContext()?.sessionId ?? 'default';
+    return `${sessionId}\u0000${toolName}`;
+  }
+
   onChange(handler: CircuitBreakerEventHandler): void {
     this.listeners.add(handler);
   }
@@ -33,11 +39,12 @@ export class ToolCircuitBreaker {
   }
 
   getState(toolName: string): CircuitBreakerState | undefined {
-    return this.states.get(toolName);
+    return this.states.get(this.stateKey(toolName));
   }
 
   shouldBlock(toolName: string): boolean {
-    const entry = this.states.get(toolName);
+    const key = this.stateKey(toolName);
+    const entry = this.states.get(key);
     if (!entry) return false;
 
     if (entry.state === 'closed') return false;
@@ -46,7 +53,7 @@ export class ToolCircuitBreaker {
       const elapsed = Date.now() - entry.lastFailureTime;
       if (elapsed >= RECOVERY_MS) {
         entry.state = 'half-open';
-        this.halfOpenCalls.set(toolName, 1);
+        this.halfOpenCalls.set(key, 1);
         logger.info(`[CircuitBreaker] ${toolName}: open → half-open`);
         return false;
       }
@@ -54,9 +61,9 @@ export class ToolCircuitBreaker {
     }
 
     if (entry.state === 'half-open') {
-      const calls = this.halfOpenCalls.get(toolName) ?? 0;
+      const calls = this.halfOpenCalls.get(key) ?? 0;
       if (calls >= HALF_OPEN_MAX_CALLS) return true;
-      this.halfOpenCalls.set(toolName, calls + 1);
+      this.halfOpenCalls.set(key, calls + 1);
       return false;
     }
 
@@ -64,13 +71,14 @@ export class ToolCircuitBreaker {
   }
 
   recordSuccess(toolName: string): void {
-    const entry = this.states.get(toolName);
+    const key = this.stateKey(toolName);
+    const entry = this.states.get(key);
     if (!entry) return;
 
     if (entry.state === 'half-open') {
       entry.state = 'closed';
       entry.failureCount = 0;
-      this.halfOpenCalls.delete(toolName);
+      this.halfOpenCalls.delete(key);
       logger.info(`[CircuitBreaker] ${toolName}: half-open → closed`);
       this.emit('recovered', toolName);
       return;
@@ -80,7 +88,8 @@ export class ToolCircuitBreaker {
   }
 
   recordFailure(toolName: string): void {
-    let entry = this.states.get(toolName);
+    const key = this.stateKey(toolName);
+    let entry = this.states.get(key);
     if (!entry) {
       entry = {
         toolName,
@@ -88,7 +97,7 @@ export class ToolCircuitBreaker {
         lastFailureTime: 0,
         state: 'closed',
       };
-      this.states.set(toolName, entry);
+      this.states.set(key, entry);
     }
 
     entry.failureCount++;
@@ -96,7 +105,7 @@ export class ToolCircuitBreaker {
 
     if (entry.state === 'half-open') {
       entry.state = 'open';
-      this.halfOpenCalls.delete(toolName);
+      this.halfOpenCalls.delete(key);
       logger.warn(`[CircuitBreaker] ${toolName}: half-open → open (probe failed)`);
       this.emit('opened', toolName);
       return;
@@ -116,8 +125,9 @@ export class ToolCircuitBreaker {
   }
 
   reset(toolName: string): void {
-    this.states.delete(toolName);
-    this.halfOpenCalls.delete(toolName);
+    const key = this.stateKey(toolName);
+    this.states.delete(key);
+    this.halfOpenCalls.delete(key);
   }
 
   getRecoveryMs(): number {

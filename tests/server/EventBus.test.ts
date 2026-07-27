@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventBus, createServerEventBus, type ServerEventMap } from '@server/EventBus';
+import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
+import { TEST_URLS } from '@tests/shared/test-urls';
 
 describe('EventBus', () => {
   it('calls listeners when event is emitted', async () => {
@@ -61,6 +63,25 @@ describe('EventBus', () => {
     expect(handler).toHaveBeenCalledTimes(2);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ event: 'tool:activated' }));
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ event: 'domain:loaded' }));
+  });
+
+  it('adds the ambient MCP session only to wildcard event payloads', async () => {
+    const bus = new EventBus<ServerEventMap>();
+    const named = vi.fn();
+    const wildcard = vi.fn();
+    bus.on('browser:navigated', named);
+    bus.onAny(wildcard);
+
+    const payload = { url: TEST_URLS.root, timestamp: new Date().toISOString() };
+    await runWithToolRequestContext({ sessionId: 'session-7' }, async () => {
+      await bus.emit('browser:navigated', payload);
+    });
+
+    expect(named).toHaveBeenCalledWith(payload);
+    expect(wildcard).toHaveBeenCalledWith({
+      event: 'browser:navigated',
+      payload: { ...payload, mcpSessionId: 'session-7' },
+    });
   });
 
   it('swallows listener errors without breaking other listeners', async () => {
