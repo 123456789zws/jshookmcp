@@ -579,6 +579,34 @@ export const nativeEmulatorTools: Tool[] = [
       .required('sessionId')
       .query(),
   ),
+  // ── Code discovery ─────────────────────────────────────────────────
+  tool('nemu_dlsym_diag', (t) =>
+    t
+      .desc(
+        'Read the dlsym resolution log from the current session. Tracks every symbol lookup the emulated code requested via dlsym() — essential for discovering which VM handler names an obfuscated dispatch engine tries to resolve. Actions: read (default, reads+clears), snapshot (read-only), clear.',
+      )
+      .string('sessionId', 'Session id to inspect')
+      .enum(
+        'action',
+        ['read', 'snapshot', 'clear'],
+        'read=read+clear log, snapshot=read-only, clear=discard',
+        { default: 'read' },
+      )
+      .required('sessionId')
+      .query(),
+  ),
+  tool('nemu_find_functions', (t) =>
+    t
+      .desc(
+        'Scan mapped guest memory for AArch64 function prologues (STP x29,x30,[sp,#-N]!). Returns sorted list of {vaddr, frameSize}. Use on stripped/obfuscated SOs where .dynsym exports few symbols — the real code entry points are discovered by scanning for standard ARM64 function preambles. Default scans [0x0, 0x400000).',
+      )
+      .string('sessionId', 'Session id to scan')
+      .number('startAddr', 'Start address for scan (default 0x0)')
+      .number('endAddr', 'End address (default 0x400000)')
+      .number('maxResults', 'Max results (default 200, max 1000)')
+      .required('sessionId')
+      .query(),
+  ),
   // ── VM state bridge (Python ↔ Native) ────────────────────────────
   tool('nemu_vm_state_dump', (t) =>
     t

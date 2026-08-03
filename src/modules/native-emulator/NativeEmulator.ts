@@ -145,6 +145,42 @@ export class NativeEmulator {
   }
 
   /**
+   * Scan mapped guest memory for AArch64 function prologues (STP x29,x30,[sp,#-N]!).
+   * Returns addresses sorted by vaddr. Useful for discovering real code entry points
+   * in stripped/obfuscated SOs where the symbol table is incomplete.
+   */
+  findFunctionPrologues(
+    startAddr = 0x0,
+    endAddr?: number,
+    maxResults = 200,
+  ): Array<{ vaddr: number; frameSize: number }> {
+    const results: Array<{ vaddr: number; frameSize: number }> = [];
+    // Default end: scan up to 4MB or the first unmapped page
+    let addr = startAddr;
+    const stop = endAddr ?? 0x400000;
+    while (addr < stop && results.length < maxResults) {
+      try {
+        const w = Number(this.engine.loadValue(addr, 4));
+        // STP x29, x30, [sp, #-N]!  →  0xA9BF7Bxx where xx encodes N*8
+        // Also match 0x6DBF27xx (STP d15,d14 variant, same frame pattern)
+        if ((w & 0xFFC00000) === 0xA9800000) {
+          const imm7 = (w >> 15) & 0x7F;
+          const frameSize = imm7 * 8;
+          results.push({ vaddr: addr, frameSize });
+          // Skip past the prologue (4-6 instructions)
+          addr += 24;
+        } else {
+          addr += 4;
+        }
+      } catch {
+        // Unmapped memory — stop scanning
+        break;
+      }
+    }
+    return results;
+  }
+
+  /**
    * Bind bionic libc stubs (malloc/memcpy/strlen/…) at the given guest addresses.
    * Until L3 PLT/GOT relocation lands, callers route a `.so`'s libc imports to
    * these addresses explicitly; the facade just forwards to installBionicStubs.

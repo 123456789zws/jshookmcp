@@ -16083,6 +16083,41 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_dlsym_diag",
+      "description": "Read the dlsym resolution log from the current session. Tracks every symbol lookup the emulated code requested via dlsym() — essential for discovering which VM handler names an obfuscated dispatch engine tries to resolve. Actions: read (default, reads+clears), snapshot (read-only), clear.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to inspect"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "snapshot",
+              "clear"
+            ],
+            "description": "read=read+clear log, snapshot=read-only, clear=discard",
+            "default": "read"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_dump_frame",
       "description": "Read and decode a CreateLitevm frame structure from guest memory. Parses the 256-byte frame fields: chain pointer, bytecode count, frame data, and sub-function flags. Essential for understanding the VM dispatch state at any point during execution.",
       "inputSchema": {
@@ -16150,6 +16185,43 @@ export const GENERATED_TOOL_CATALOG = [
         },
         "required": [
           "apkPath"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_find_functions",
+      "description": "Scan mapped guest memory for AArch64 function prologues (STP x29,x30,[sp,#-N]!). Returns sorted list of {vaddr, frameSize}. Use on stripped/obfuscated SOs where .dynsym exports few symbols — the real code entry points are discovered by scanning for standard ARM64 function preambles. Default scans [0x0, 0x400000).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to scan"
+          },
+          "startAddr": {
+            "type": "number",
+            "description": "Start address for scan (default 0x0)"
+          },
+          "endAddr": {
+            "type": "number",
+            "description": "End address (default 0x400000)"
+          },
+          "maxResults": {
+            "type": "number",
+            "description": "Max results (default 200, max 1000)"
+          }
+        },
+        "required": [
+          "sessionId"
         ]
       },
       "annotations": {
