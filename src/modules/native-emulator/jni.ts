@@ -99,6 +99,17 @@ export const JNI_INDEX = {
   GetJavaVM: 219,
   NewWeakGlobalRef: 226,
   DeleteWeakGlobalRef: 227,
+  UnregisterNatives: 216,
+  MonitorEnter: 217,
+  MonitorExit: 218,
+  // Extended indices — custom functions beyond the standard Oracle JNI table
+  // (e.g. libmetasec_ml.so's VMP dispatch bridges into Java reflection at slots 280+)
+  ExtFunc_280: 280,
+  ExtFunc_300: 300,
+  ExtFunc_316: 316,
+  ExtFunc_322: 322,
+  ExtFunc_326: 326,
+  ExtFunc_336: 336,
   // Exceptions.
   Throw: 13,
   ThrowNew: 14,
@@ -128,7 +139,7 @@ export const JNI_INVOKE_INDEX = {
   AttachCurrentThreadAsDaemon: 7,
 } as const;
 
-const TABLE_SLOTS = 232; // ≥ highest index we touch (219) + headroom.
+const TABLE_SLOTS = 400; // ≥ highest extended index (336) + headroom for future custom stubs.
 const POINTER_SIZE = 8;
 
 // Guest memory layout for the JNI scaffolding (distinct high addresses).
@@ -459,8 +470,21 @@ export class JniEnvironment {
     b(JNI_INDEX.DeleteLocalRef, () => undefined);
     b(JNI_INDEX.NewWeakGlobalRef, (ctx) => ctx.x(1));
     b(JNI_INDEX.DeleteWeakGlobalRef, () => undefined);
+    b(JNI_INDEX.UnregisterNatives, () => 0n);
+    b(JNI_INDEX.MonitorEnter, () => 0n);
+    b(JNI_INDEX.MonitorExit, () => 0n);
     b(JNI_INDEX.IsSameObject, (ctx) => (ctx.x(1) === ctx.x(2) ? 1n : 0n));
     b(JNI_INDEX.IsInstanceOf, () => 1n);
+
+    // ── Extended index stubs (280+) — return identifiable values per slot ────
+    // Each returns its own index so native callers get a distinguishable signal.
+    // Later these will be replaced with real JNI impls (FindClass, GetMethodID, etc.).
+    b(JNI_INDEX.ExtFunc_280, () => 280n);
+    b(JNI_INDEX.ExtFunc_300, () => 300n);
+    b(JNI_INDEX.ExtFunc_316, () => 316n);
+    b(JNI_INDEX.ExtFunc_322, () => 322n);
+    b(JNI_INDEX.ExtFunc_326, () => 326n);
+    b(JNI_INDEX.ExtFunc_336, () => 336n);
 
     // ── Auto-fill every remaining NULL slot with a diagnostic stub ──────────
     // Instead of pre-baking every JNI function, we fill unfilled table entries
