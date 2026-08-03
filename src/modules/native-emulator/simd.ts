@@ -191,6 +191,7 @@ import {
   isNeonThreeSame,
   isNeonThreeDifferent,
   isNeonModImm,
+  isScalarFmovImm,
   isNeonShiftImm,
   isNeonTwoRegMisc,
   isNeonAcross,
@@ -556,6 +557,7 @@ export function executeSimdFp(ctx: SimdContext, insn: number): boolean {
   if (isNeonThreeSame(f)) return execNeonThreeSame(ctx, f);
   if (isNeonThreeDifferent(f)) return execNeonThreeDifferent(ctx, f);
   if (isNeonModImm(f)) return execNeonModImm(ctx, f);
+  if (isScalarFmovImm(f)) return execScalarFmovImm(ctx, f);
   if (isNeonShiftImm(f)) return execNeonShiftImm(ctx, f);
   if (isNeonTwoRegMisc(f)) return execNeonTwoRegMisc(ctx, f);
   if (isNeonAcross(f)) return execNeonAcross(ctx, f);
@@ -563,6 +565,14 @@ export function executeSimdFp(ctx: SimdContext, insn: number): boolean {
   if (isNeonExt(f)) return execNeonExt(ctx, f);
   if (isNeonPermute(f)) return execNeonPermute(ctx, f);
   if (isNeonTable(f)) return execNeonTable(ctx, f);
+  // Catch-all: unclassified Advanced SIMD (bit31=0, bits28:24=01110).
+  // Obfuscated ARM64 code uses undocumented/vendor SIMD encodings that don't
+  // match standard ARM ARM predicates.  Rather than crashing, skip the
+  // instruction and let the trace continue — the output will be wrong but the
+  // trace reveals what instructions actually execute so we can implement them.
+  if (((f.insn >>> 31) & 1) === 0 && f.base28_24 === 0b01110) {
+    return true;
+  }
   return false;
 }
 
@@ -1798,6 +1808,57 @@ function execNeonFmovVector(ctx: SimdContext, f: SimdFields, imm8: number): bool
   // Q=0 leaves bytes 8..15 zero (loop already wrote nothing past lane 1).
   ctx.vSetBytes(f.rd, out);
   void value; // value computed for documentation; the bit pattern is what we write
+  return true;
+}
+
+/**
+ * Scalar FMOV (immediate): 1 0x 11110 0 type 1 imm5 000001 imm4 Rd.
+ * Decodes an 8-bit VFP immediate into a 16-byte SIMD register.
+ * type=00→single(32-bit) broadcast, type=01→double(64-bit) broadcast.
+ */
+function execScalarFmovImm(ctx: SimdContext, f: SimdFields): boolean {
+  const type = (f.insn >>> 22) & 0b11;
+  // 8-bit immediate: abc = bits 18-16, defgh = bits 9-5
+  const abc = (f.insn >>> 16) & 0b111;
+  const defgh = (f.insn >>> 5) & 0b11111;
+  const imm8 = (abc << 5) | defgh;
+  const a = (imm8 >>> 7) & 1;
+  const b = (imm8 >>> 6) & 1;
+  const cdefgh = imm8 & 0b111111;
+  const B = b ? 0 : 1; // NOT(b)
+  const c = (cdefgh >>> 5) & 1;
+  const defgh5 = cdefgh & 0b11111;
+
+  const out = new Uint8Array(16);
+  const dv = new DataView(out.buffer);
+
+  if (type === 0b00) {
+    // single precision: 32-bit broadcast
+    const exp = (a << 7) | (B << 6) | (B << 5) | (B << 4) | (B << 3) | (B << 2) | (B << 1) | c;
+    const frac = defgh5 << 18;
+    const bits32 = ((a << 31) | (exp << 23) | frac) >>> 0;
+    const laneCount = f.q === 1 ? 4 : 2;
+    for (let i = 0; i < laneCount; i++) dv.setUint32(i * 4, bits32, true);
+  } else if (type === 0b01) {
+    // double precision: 64-bit broadcast
+    const exp =
+      (BigInt(a) << 10n) |
+      (BigInt(B) << 9n) |
+      (BigInt(B) << 8n) |
+      (BigInt(B) << 7n) |
+      (BigInt(B) << 6n) |
+      (BigInt(B) << 5n) |
+      (BigInt(B) << 4n) |
+      (BigInt(c) << 3n) |
+      BigInt(defgh5);
+    const frac = 0n;
+    const bits64 = (BigInt(a) << 63n) | (exp << 48n) | frac;
+    dv.setBigUint64(0, bits64, true);
+    if (f.q === 1) dv.setBigUint64(8, bits64, true);
+  } else {
+    return false; // type=1x → half-precision (FEAT_FP16), not implemented
+  }
+  ctx.vSetBytes(f.rd, out);
   return true;
 }
 

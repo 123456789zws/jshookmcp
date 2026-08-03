@@ -13,6 +13,10 @@ function tryDisassemble(insn: number, pc: bigint): DisasmResult | null {
   if (insn === 0xd65f03c0) return { mnemonic: 'ret', operands: '' };
   if (insn === 0xd503201f) return { mnemonic: 'nop', operands: '' };
 
+  // ── PAC HINT forms (NOP-space, check before generic NOP mask) ────
+  const pacHint = decodePacHint(insn);
+  if (pacHint) return pacHint;
+
   // ── Move register (ORR Xd, XZR, Xm) alias ───────────────────────
   // Must be checked BEFORE logical shifted register to produce the alias
   if (m(insn, 0x7fe0ffe0, 0x2a0003e0)) {
@@ -59,6 +63,9 @@ function tryDisassemble(insn: number, pc: bigint): DisasmResult | null {
   if (m(insn, 0x1f200000, 0x0a000000)) return decodeLogicalShiftedReg(insn);
   if (m(insn, 0x1f200000, 0x0b000000)) return decodeAddSubShiftedReg(insn);
   if (m(insn, 0x1fe00000, 0x1a800000)) return decodeCondSelect(insn);
+
+  // ── Pointer Authentication (3-source): 0xDAC00000 prefix ─────────
+  if (m(insn, 0xffe00000, 0xdac00000)) return decodePac3Source(insn);
 
   // ── FP / SIMD (scalar) ───────────────────────────────────────────
   if (m(insn, 0x1f200000, 0x0e200000)) return decodeFpSimdScalar(insn);
@@ -625,4 +632,48 @@ function decodeFpSimdScalar(insn: number): DisasmResult | null {
   }
 
   return null;
+}
+
+// ─── Pointer Authentication ────────────────────────────────────────────────
+
+/** Decode HINT-space PAC instructions (0xD5032xxxF). Returns null if not PAC. */
+function decodePacHint(insn: number): DisasmResult | null {
+  if ((insn & 0xfffff01f) >>> 0 !== 0xd503201f) return null;
+  const crm = (insn >>> 8) & 0xf;
+  const op2 = (insn >>> 5) & 0b111;
+  // XPACLRI: CRm=0, op2=7
+  if (crm === 0b0000 && op2 === 0b111) return { mnemonic: 'xpaclri', operands: '' };
+  // Is this a PAC HINT at all? CRm[1] must be 1.
+  if ((crm & 0b0010) === 0) return null;
+  const isAut = (crm & 0b1000) !== 0; // CRm bit3
+  const isB = (crm & 0b0100) !== 0; // CRm bit2
+  const z = op2 === 0b010 || op2 === 0b110;
+  const prefix = isAut ? 'auti' : 'paci';
+  const key = isB ? 'b' : 'a';
+  if (z) return { mnemonic: `${prefix}z${key}`, operands: '' };
+  return { mnemonic: `${prefix}${key}sp`, operands: '' };
+}
+
+/** Decode 3-source PAC instructions (top byte 0xDA). Returns null if not PAC. */
+function decodePac3Source(insn: number): DisasmResult | null {
+  if ((insn & 0xff000000) >>> 0 !== 0xda000000) return null;
+  const op31 = (insn >>> 21) & 0b111;
+  const o0 = (insn >>> 15) & 1;
+  const rm = (insn >>> 16) & 0b11111;
+  const rn = (insn >>> 5) & 0b11111;
+  const rd = insn & 0b11111;
+  const sf = insn >>> 31;
+  const reg = sf ? 'x' : 'w';
+
+  const isAut = (op31 & 0b100) !== 0;
+  const isB = (op31 & 0b010) !== 0;
+  const prefix = isAut ? 'aut' : 'pac';
+  const key = isB ? 'b' : 'a';
+  if (op31 !== 0b001 && op31 !== 0b011 && op31 !== 0b101 && op31 !== 0b111) return null;
+
+  if (o0 === 1) {
+    return { mnemonic: `${prefix}iz${key}`, operands: `${reg}${rd}, ${reg}${rn}` };
+  }
+  const modReg = rm === 31 ? 'xzr' : `x${rm}`;
+  return { mnemonic: `${prefix}i${key}`, operands: `${reg}${rd}, ${reg}${rn}, ${modReg}` };
 }

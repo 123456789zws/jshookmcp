@@ -65,7 +65,11 @@ export type {
  * empty/absent `files` map means a clean device: every fopen returns NULL.
  */
 /** Bump-allocator heap base — distinct from typical code/data vaddrs. */
-const HEAP_BASE = 0x100000;
+let HEAP_BASE = 0x41000000;
+/** Override the heap base at runtime (one-shot, before first allocation). */
+export function setBionicHeapBase(addr: number): void {
+  HEAP_BASE = addr;
+}
 /** Allocation granularity (bytes); keeps returned pointers naturally aligned. */
 const HEAP_ALIGN = 16;
 /** Default emulated page size returned by libc/sysconf imports. */
@@ -91,7 +95,7 @@ export function createBionicLibrary(
   options: BionicOptions = {},
 ): BionicLibrary {
   const lib = new BionicLibrary();
-  let bump = HEAP_BASE;
+  let bump = options.heapBase ?? HEAP_BASE;
   // Track allocation sizes so realloc can copy the old contents forward.
   const sizes = new Map<number, number>();
 
@@ -385,25 +389,30 @@ export function createBionicLibrary(
     const symbol = readCString(ctx, Number(ctx.x(1)));
     if (!symbol) {
       lastDlError = 'dlsym: empty symbol';
+      lib.dlsymLog.push(`dlsym: (empty) → NULL`);
       return 0n;
     }
     const exported = engine.lookupSymbol(symbol);
     if (exported !== undefined) {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${exported.toString(16)} (exported)`);
       return BigInt(exported);
     }
     const resolved = lib.resolveSymbol(symbol);
     if (resolved?.kind === 'data') {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${resolved.address.toString(16)} (data)`);
       return BigInt(resolved.address);
     }
     const stub =
       resolved?.kind === 'function' ? engine.bindImportStub(symbol, resolved.fn) : undefined;
     if (stub !== undefined) {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → stub @0x${stub.toString(16)}`);
       return BigInt(stub);
     }
     lastDlError = `dlsym: symbol not found: ${symbol}`;
+    lib.dlsymLog.push(`dlsym: ${symbol} → NULL (NOT FOUND)`);
     return 0n;
   });
   lib.set('dlerror', (ctx) => writeDlError(ctx));
@@ -598,6 +607,207 @@ export function createBionicLibrary(
 
   installAndroidAssetStubs(lib, options);
 
+  // ── Stubs for libsgmainso unresolved imports ──
+
+  // --- string/memory helpers ---
+  lib.set('strndup', (ctx) => {
+    const body = readGuestCStringBytes(ctx, Number(ctx.x(0)), Number(ctx.x(1)));
+    const ptr = alloc(body.length + 1);
+    const out = new Uint8Array(body.length + 1);
+    out.set(body);
+    ctx.write(ptr, out);
+    return BigInt(ptr);
+  });
+  lib.set('strnlen', (ctx) => {
+    const body = readGuestCStringBytes(ctx, Number(ctx.x(0)), Number(ctx.x(1)));
+    return BigInt(body.length);
+  });
+  lib.set('strsep', (ctx) => {
+    const sptr = Number(ctx.x(0));
+    const delim = Number(ctx.x(1));
+    if (sptr === 0) return 0n;
+    const strPtrVal = Number(ctx.loadValue(sptr, 8));
+    if (strPtrVal === 0) return 0n;
+    const s = readGuestCStringBytes(ctx, strPtrVal);
+    const d = ctx.read(delim, 1)[0]!;
+    const idx = s.indexOf(d);
+    if (idx < 0) {
+      ctx.storeValue(sptr, 8, 0n);
+      return BigInt(strPtrVal);
+    }
+    ctx.write(strPtrVal + idx, new Uint8Array([0]));
+    ctx.storeValue(sptr, 8, BigInt(strPtrVal + idx + 1));
+    return BigInt(strPtrVal);
+  });
+  lib.set('strtok_r', (ctx) => {
+    // Simplified: returns first token, NULL after
+    const s = Number(ctx.x(0));
+    const delim = Number(ctx.x(1));
+    if (s === 0) return 0n;
+    const body = readGuestCStringBytes(ctx, s);
+    const d = ctx.read(delim, 1)[0]!;
+    const idx = body.indexOf(d);
+    if (idx < 0) return ctx.x(0);
+    ctx.write(s + idx, new Uint8Array([0]));
+    return ctx.x(0);
+  });
+  lib.set('strcat', (ctx) => {
+    const dst = Number(ctx.x(0));
+    const srcBody = readGuestCStringBytes(ctx, Number(ctx.x(1)));
+    const dstBody = readGuestCStringBytes(ctx, dst);
+    const off = dstBody.length;
+    ctx.write(dst + off, srcBody);
+    ctx.write(dst + off + srcBody.length, new Uint8Array([0]));
+    return BigInt(dst);
+  });
+  lib.set('strsignal', (ctx) => {
+    const msg = `Signal ${Number(ctx.x(0))}`;
+    const ptr = alloc(msg.length + 1);
+    ctx.write(ptr, new TextEncoder().encode(msg + '\0'));
+    return BigInt(ptr);
+  });
+
+  // --- ctype predicates ---
+  for (const name of ['iscntrl', 'isgraph', 'isprint', 'ispunct']) {
+    lib.set(name, () => 0n); // always false
+  }
+
+  // --- stdlib math/conv ---
+  lib.set('abs', (ctx) => {
+    const v = Number(ctx.x(0));
+    return BigInt(v < 0 ? -v : v);
+  });
+  lib.set('labs', (ctx) => {
+    const v = Number(ctx.x(0));
+    return BigInt(v < 0n ? -v : v);
+  });
+  lib.set('div', (ctx) => {
+    const num = Number(ctx.x(0));
+    const den = Number(ctx.x(1));
+    const ptr = alloc(8);
+    ctx.storeValue(ptr, 4, BigInt(num / den));
+    ctx.storeValue(ptr + 4, 4, BigInt(num % den));
+    return BigInt(ptr);
+  });
+  lib.set('ldiv', (ctx) => {
+    const num = Number(ctx.x(0));
+    const den = Number(ctx.x(1));
+    const ptr = alloc(16);
+    ctx.storeValue(ptr, 8, BigInt(Math.trunc(num / den)));
+    ctx.storeValue(ptr + 8, 8, BigInt(num % den));
+    return BigInt(ptr);
+  });
+  lib.set('atof', () => 0n);
+  lib.set('atoll', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    const txt = new TextDecoder().decode(s);
+    return BigInt(parseInt(txt, 10) || 0);
+  });
+  lib.set('strtoul', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    return BigInt(parseInt(new TextDecoder().decode(s), 10) || 0);
+  });
+  lib.set('strtoull', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    return BigInt(parseInt(new TextDecoder().decode(s), 10) || 0);
+  });
+  lib.set('sscanf', () => 0n);
+  lib.set('fscanf', () => 0n);
+  lib.set('crc32', () => 0n);
+
+  // --- posix I/O (fail gracefully) ---
+  for (const name of ['fgetpos', 'fsetpos', 'setvbuf', 'setbuf']) {
+    lib.set(name, () => 0n);
+  }
+  for (const name of ['getc', 'putc', 'ungetc', 'ferror']) {
+    lib.set(name, () => BigInt(-1)); // EOF
+  }
+  lib.set('remove', () => BigInt(-1));
+  lib.set('rename', () => BigInt(-1));
+  lib.set('popen', () => 0n); // NULL
+  lib.set('pclose', () => BigInt(-1));
+  lib.set('freopen', () => 0n);
+  lib.set('chmod', () => 0n);
+  lib.set('closedir', () => BigInt(-1));
+  lib.set('opendir', () => 0n);
+  lib.set('readdir', () => 0n);
+
+  // --- time ---
+  for (const name of ['mktime', 'asctime', 'ctime', 'gmtime_r', 'strftime']) {
+    lib.set(name, () => 0n);
+  }
+
+  // --- network (fail gracefully) ---
+  for (const name of [
+    'socket',
+    'bind',
+    'accept',
+    'connect',
+    'send',
+    'recv',
+    'sendto',
+    'recvfrom',
+  ]) {
+    lib.set(name, () => BigInt(-1));
+  }
+  lib.set('inet_aton', () => 0n);
+
+  // --- threading / sync ---
+  for (const name of [
+    'sem_init',
+    'sem_wait',
+    'sem_post',
+    'sem_destroy',
+    'pthread_rwlock_init',
+    'pthread_rwlock_rdlock',
+    'pthread_rwlock_wrlock',
+    'pthread_rwlock_unlock',
+    'pthread_rwlock_destroy',
+    'pthread_sigmask',
+    'sigemptyset',
+    'sigaddset',
+    'sigaltstack',
+  ]) {
+    lib.set(name, () => 0n);
+  }
+  lib.set('pthread_setname_np', () => 0n);
+  lib.set('pthread_exit', () => {
+    throw new Error('bionic: pthread_exit called');
+  });
+
+  // --- zlib (fail gracefully) ---
+  for (const name of [
+    'deflate',
+    'deflateInit_',
+    'deflateInit2_',
+    'deflateEnd',
+    'deflateBound',
+    'inflate',
+    'inflateInit_',
+    'inflateInit2_',
+    'inflateEnd',
+  ]) {
+    lib.set(name, () => BigInt(-2)); // Z_STREAM_ERROR
+  }
+
+  // --- random ---
+  let rand48State = 1n;
+  lib.set('srand48', (ctx) => {
+    rand48State = BigInt(ctx.x(0));
+    return undefined;
+  });
+  lib.set('lrand48', () => {
+    rand48State = (rand48State * 25214903917n + 11n) & 0xffffffffffffn;
+    return BigInt(Number(rand48State >> 16n));
+  });
+  lib.set('srand', () => undefined);
+  lib.set('rand', () => BigInt(Math.floor(Math.random() * 2147483647)));
+  lib.set('srandom', () => undefined);
+  lib.set('random', () => BigInt(Math.floor(Math.random() * 2147483647)));
+
+  // --- stack guard ---
+  lib.set('__stack_chk_guard', () => BigInt(0xdeadbeefcafebabe));
+
   return lib;
 }
 
@@ -623,7 +833,11 @@ export function hasBionicSymbol(symbol: string): boolean {
   return SUPPORTED_BIONIC_SYMBOLS.has(symbol);
 }
 
-export function installBionicStubs(engine: CpuEngine, addrs: BionicStubAddresses): void {
+export function installBionicStubs(
+  engine: CpuEngine,
+  addrs: BionicStubAddresses,
+  heapBase = HEAP_BASE,
+): void {
   if (addrs.strlen !== undefined) {
     engine.registerHostFunction(addrs.strlen, (ctx: HostContext) => {
       return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
@@ -651,7 +865,7 @@ export function installBionicStubs(engine: CpuEngine, addrs: BionicStubAddresses
   }
 
   if (addrs.malloc !== undefined) {
-    let bump = HEAP_BASE;
+    let bump = heapBase;
     engine.registerHostFunction(addrs.malloc, (ctx: HostContext) => {
       const size = Number(ctx.x(0));
       const rounded = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));

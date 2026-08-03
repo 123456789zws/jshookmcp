@@ -180,12 +180,21 @@ export class ElfLoader {
 
     const dynsymOffset = Number(this.view.getBigUint64(dynsymSh + 0x18, le));
     const dynsymSize = Number(this.view.getBigUint64(dynsymSh + 0x20, le));
+    // Guard against corrupted section headers (anti-RE technique):
+    // offset past EOF or size unreasonably small → fall back to PT_DYNAMIC.
+    if (dynsymOffset > this.bytes.length || dynsymSize < SYM_SIZE * 2) {
+      return this.exportedSymbolsFromDynamic();
+    }
     const strtabIdx = this.view.getUint32(dynsymSh + 0x28, le); // sh_link → .dynstr
 
     // Resolve the linked string table.
     const strSh = this.shoff + strtabIdx * this.shentsize;
     const strOffset = Number(this.view.getBigUint64(strSh + 0x18, le));
     const strSize = Number(this.view.getBigUint64(strSh + 0x20, le));
+    // Also guard the linked strtab section header.
+    if (strOffset > this.bytes.length || strSize === 0) {
+      return this.exportedSymbolsFromDynamic();
+    }
 
     const count = Math.floor(dynsymSize / SYM_SIZE);
     for (let i = 1; i < count; i++) {

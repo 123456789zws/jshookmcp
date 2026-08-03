@@ -96,7 +96,17 @@ export function execLoadStore(
       const option = (insn >>> 13) & 0b111;
       const s = (insn >>> 12) & 1;
       const shift = s === 1 ? size : 0;
-      const offset = ctx.extendReg(ctx.readGpr(rm), option, shift, 1);
+      let rmValue = ctx.readGpr(rm);
+      // BUGFIX: For uxtw (0b010), zero-extend the 32-bit W-register value to
+      // 64-bit by masking garbage in the upper 32 bits of the X-register.
+      // In ARM64, Wn aliases the low 32 bits of Xn, and a prior 64-bit write
+      // to Xn may leave stale data in the upper word that corrupts the
+      // effective address when the register is used with uxtw extension.
+      // Same class of bug as the previously-fixed LDRSW sign-extend issue.
+      if (option === 0b010) {
+        rmValue &= 0xffffffffn;
+      }
+      const offset = ctx.extendReg(rmValue, option, shift, 1);
       // BUGFIX: Do address arithmetic in bigint space. Offset is ALREADY
       // correctly extended by extendReg (sign or zero), so just add as-is.
       const base = ctx.readGprSp(rn);
@@ -130,17 +140,25 @@ export function execLoadStore(
     }
   }
 
-  // LDR (literal): opc(31:30) | 011 | V(26)=0 | 00 | imm19 | Rt
-  //   PC-relative load: Rt = *(PC + SignExtend(imm19 << 2)). opc 00 → 32-bit,
-  //   01 → 64-bit. Used for large constants the compiler pools after a function.
-  if (((insn >>> 24) & 0b111111) === 0b011000 && ((insn >>> 26) & 1) === 0) {
+  // LDR / LDRSW (literal): opc(31:30) | 011 | V(26)=0 | 00 | imm19 | Rt
+  //   PC-relative load: Rt = *(PC + SignExtend(imm19 << 2)).
+  //   opc 00 → 32-bit zero-extend,  01 → 64-bit,
+  //   10 → 32-bit sign-extend (LDRSW). Also matches the canonical LDRSW
+  //   encoding (bit 29 = 0, mask 0b_0011_0000 at bits [29:24]).
+  if (((insn >>> 24) & 0b111111) === 0b011000 || ((insn >>> 24) & 0b111111) === 0b001100) {
     const opc = insn >>> 30;
+    const signExtend = opc === 0b10; // LDRSW
     const bytes = opc === 0b01 ? 8 : 4;
     const rt = insn & 0b11111;
     const imm19 = (insn >>> 5) & 0x7ffff;
     const offset = (imm19 & 0x40000 ? imm19 - 0x80000 : imm19) * 4;
     const addr = ctx.pc + offset;
-    ctx.writeGpr(rt, ctx.loadValue(addr, bytes));
+    const raw = ctx.loadValue(addr, bytes);
+    if (signExtend && bytes === 4) {
+      ctx.writeGpr(rt, BigInt.asIntN(32, raw));
+    } else {
+      ctx.writeGpr(rt, raw);
+    }
     return true;
   }
 

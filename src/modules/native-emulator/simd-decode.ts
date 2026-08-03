@@ -263,6 +263,18 @@ export const isNeonModImm = (f: SimdFields): boolean =>
   ((f.insn >>> 31) & 1) === 0 && f.base28_19 === 0b0111100000 && ((f.insn >>> 10) & 1) === 1;
 
 /**
+ * Scalar FMOV (immediate): 1 0x 11110 0 type 1 imm5 opcode imm4 Rd.
+ * bit31=1 (scalar SIMD/FP half), bit29=0, bits28-24=11110, bit23=0,
+ * bit21=1.  Covers the scalar-half FMOV immediate (single/double).
+ */
+export const isScalarFmovImm = (f: SimdFields): boolean =>
+  ((f.insn >>> 31) & 1) === 1 &&
+  ((f.insn >>> 29) & 1) === 0 &&
+  (f.insn & 0x1f000000) === 0x1e000000 &&
+  ((f.insn >>> 23) & 1) === 0 &&
+  ((f.insn >>> 21) & 1) === 1;
+
+/**
  * NEON shift by immediate (SHL/SSHR/USHR/SLI/SRI/SRSHR/…): 0 Q U 011110 immh[22:19]
  * immb[18:16] opcode[15:11] 1 Rn Rd. immh!=0000; highest-set-bit of immh picks size.
  */

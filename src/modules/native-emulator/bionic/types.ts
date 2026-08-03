@@ -20,6 +20,8 @@ export interface BionicStubAddresses {
 }
 
 export interface BionicOptions {
+  /** Override the heap base for malloc/calloc/realloc (default 0x100000). */
+  heapBase?: number;
   files?: Map<string, Uint8Array>;
   onLog?: (priority: number, tag: string, message: string) => void;
   onStdout?: (text: string) => void;

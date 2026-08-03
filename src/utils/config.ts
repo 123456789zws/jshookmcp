@@ -159,6 +159,12 @@ const CONFIG_DEFAULTS = {
       dexDumpMaxBufferBytes: 16 * 1024 * 1024,
       dexDumpFileLimit: 500,
     },
+    jadx: {
+      decompileTimeoutMs: 1_800_000,
+      searchTimeoutMs: 600_000,
+      singleClassTimeoutMs: 120_000,
+      threadsCount: 4,
+    },
     androidRuntime: {
       mapsMaxBytes: 4 * 1024 * 1024,
       mapsModuleLimit: 1000,
@@ -425,6 +431,18 @@ const ConfigSchema = z.object({
   ).pipe(z.number().min(1)),
   FRIDA_DEX_DUMP_FILE_LIMIT: envInt(CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpFileLimit).pipe(
     z.number().min(1),
+  ),
+  JADX_DECOMPILE_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.jadx.decompileTimeoutMs,
+  ).pipe(z.number().min(1000)),
+  JADX_SEARCH_TIMEOUT_MS: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.searchTimeoutMs).pipe(
+    z.number().min(1000),
+  ),
+  JADX_SINGLE_CLASS_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.jadx.singleClassTimeoutMs,
+  ).pipe(z.number().min(1000)),
+  JADX_THREADS_COUNT: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.threadsCount).pipe(
+    z.number().min(1).max(64),
   ),
   ANDROID_RUNTIME_MAPS_MAX_BYTES: envInt(
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsMaxBytes,
@@ -886,6 +904,21 @@ function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEng
         env.FRIDA_DEX_DUMP_FILE_LIMIT,
         defaults.frida.dexDumpFileLimit,
       ),
+    },
+    jadx: {
+      decompileTimeoutMs: positiveIntegerEnv(
+        env.JADX_DECOMPILE_TIMEOUT_MS,
+        defaults.jadx.decompileTimeoutMs,
+      ),
+      searchTimeoutMs: positiveIntegerEnv(
+        env.JADX_SEARCH_TIMEOUT_MS,
+        defaults.jadx.searchTimeoutMs,
+      ),
+      singleClassTimeoutMs: positiveIntegerEnv(
+        env.JADX_SINGLE_CLASS_TIMEOUT_MS,
+        defaults.jadx.singleClassTimeoutMs,
+      ),
+      threadsCount: positiveIntegerEnv(env.JADX_THREADS_COUNT, defaults.jadx.threadsCount),
     },
     androidRuntime: {
       mapsMaxBytes: positiveIntegerEnv(

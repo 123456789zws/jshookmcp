@@ -5,7 +5,7 @@ import type { ToolArgs } from '@server/types';
 import { toUint8 } from './handler-memory';
 
 export interface JavaMockImpl {
-  kind: 'int' | 'string' | 'bytes' | 'void';
+  kind: 'int' | 'string' | 'bytes' | 'void' | 'conditional';
   fn: (call: JavaMethodCall) => bigint | number | void;
 }
 
@@ -14,15 +14,28 @@ export interface JavaFieldValue {
   value: bigint;
 }
 
+interface ConditionalEntry {
+  type: 'int' | 'string' | 'bytes' | 'boolean';
+  value: string; // raw: number string for int, "true"/"false" for boolean, plain string, or base64 for bytes
+}
+
 function providedKeys(args: ToolArgs, keys: string[]): string[] {
   return keys.filter((key) => args[key] !== undefined && args[key] !== null);
 }
 
 function assertSingleJavaMockReturn(args: ToolArgs): void {
-  const provided = providedKeys(args, ['returnInt', 'returnString', 'returnBytes']);
-  if (provided.length > 1) {
+  // returnMap pairs with an optional fallback (returnInt/returnString/returnBytes).
+  // Without returnMap, at most one return type is allowed.
+  const singles = providedKeys(args, [
+    'returnInt',
+    'returnString',
+    'returnBytes',
+    'returnObject',
+    'returnArray',
+  ]);
+  if (singles.length > 1) {
     throw new Error(
-      'returnInt, returnString, and returnBytes are mutually exclusive; provide only one return value.',
+      'returnInt, returnString, and returnBytes are mutually exclusive; provide at most one.',
     );
   }
 }
@@ -36,29 +49,134 @@ function assertSingleJavaFieldValue(args: ToolArgs): void {
   }
 }
 
+/** Resolve a jstring handle to its actual string value. */
+function resolveJString(jni: JavaMethodCall['jni'], handle: number): string {
+  const v = jni.handles.get(handle);
+  if (v && typeof v === 'object') {
+    const kind = (v as { kind?: string }).kind;
+    // Both 'string' (NewStringUTF) and 'mock-string' (returnString/returnMap) carry a value
+    if (kind === 'string' || kind === 'mock-string') {
+      return (v as { value: string }).value;
+    }
+  }
+  return '';
+}
+
+function buildConditionalDispatcher(
+  returnMap: Record<string, ConditionalEntry>,
+  defaultReturn: { kind: string; fn: (call: JavaMethodCall) => bigint | number | void },
+): (call: JavaMethodCall) => bigint | number | void {
+  // Pre-build the return functions for each conditional entry
+  const entryFns = new Map<string, (call: JavaMethodCall) => bigint | number | void>();
+  for (const [key, entry] of Object.entries(returnMap)) {
+    switch (entry.type) {
+      case 'int':
+        entryFns.set(key, (call) =>
+          // HashMap.get returns a jobject handle, not a raw int.
+          // Create a self-describing handle so intValue() can unbox it later.
+          BigInt(
+            call.jni.allocHandle({ kind: 'mock-int', value: Math.trunc(Number(entry.value)) }),
+          ),
+        );
+        break;
+      case 'boolean':
+        entryFns.set(key, (call) =>
+          BigInt(call.jni.allocHandle({ kind: 'mock-boolean', value: entry.value === 'true' })),
+        );
+        break;
+      case 'string':
+        entryFns.set(key, (call) =>
+          BigInt(
+            call.jni.allocHandle({
+              kind: 'mock-string',
+              value: entry.value,
+              cls: 'java/lang/String',
+            }),
+          ),
+        );
+        break;
+      case 'bytes': {
+        const entryBytes = toUint8(Buffer.from(entry.value, 'base64'));
+        entryFns.set(key, (call) =>
+          BigInt(call.jni.allocHandle({ kind: 'bytes', value: entryBytes })),
+        );
+        break;
+      }
+    }
+  }
+
+  return (call: JavaMethodCall) => {
+    // args[0] is the first Java argument (the key for HashMap.get)
+    const keyHandle = Number(call.args[0] ?? 0n);
+    const keyStr = resolveJString(call.jni, keyHandle);
+    const matchFn = entryFns.get(keyStr);
+    if (matchFn) return matchFn(call);
+    // Fall back to the default return (single-value constant or void)
+    return defaultReturn.fn(call);
+  };
+}
+
 export function buildJavaMockImpl(args: ToolArgs): JavaMockImpl {
   assertSingleJavaMockReturn(args);
   const returnInt = argNumber(args, 'returnInt');
   const returnString = argString(args, 'returnString');
   const returnBytes = argString(args, 'returnBytes');
+  const returnObject = argString(args, 'returnObject');
+  const returnArray = argString(args, 'returnArray');
+  const returnMapRaw = argString(args, 'returnMap');
+
+  // Build a base/default return fn (used for unmatched keys in conditional mode,
+  // or as the sole return in simple mode).
+  let defaultFn: (call: JavaMethodCall) => bigint | number | void;
+  let defaultKind: string;
 
   if (returnInt !== undefined) {
-    return { kind: 'int', fn: () => BigInt(Math.trunc(returnInt)) };
-  }
-  if (returnString !== undefined) {
-    return {
-      kind: 'string',
-      fn: (call) => BigInt(call.jni.allocHandle({ kind: 'string', value: returnString })),
-    };
-  }
-  if (returnBytes !== undefined) {
+    defaultFn = () => BigInt(Math.trunc(returnInt));
+    defaultKind = 'int';
+  } else if (returnString !== undefined) {
+    defaultFn = (call) =>
+      BigInt(
+        call.jni.allocHandle({ kind: 'mock-string', value: returnString, cls: 'java/lang/String' }),
+      );
+    defaultKind = 'string';
+  } else if (returnArray !== undefined) {
+    let arr: bigint[] = [];
+    try {
+      arr = JSON.parse(returnArray).map((n: number) => BigInt(Math.trunc(n)));
+    } catch {}
+    defaultFn = (call) =>
+      BigInt(call.jni.allocHandle({ kind: 'objarray', value: arr, cls: '[Ljava/lang/Object;' }));
+    defaultKind = 'array';
+  } else if (returnObject !== undefined) {
+    defaultFn = (call) =>
+      BigInt(call.jni.allocHandle({ kind: 'auto-object', desc: returnObject, cls: returnObject }));
+    defaultKind = 'object';
+  } else if (returnBytes !== undefined) {
     const bytes = toUint8(Buffer.from(returnBytes, 'base64'));
+    defaultFn = (call) => BigInt(call.jni.allocHandle({ kind: 'bytes', value: bytes }));
+    defaultKind = 'bytes';
+  } else {
+    defaultFn = () => undefined;
+    defaultKind = 'void';
+  }
+
+  // If returnMap is provided, wrap in a conditional dispatcher.
+  if (returnMapRaw !== undefined) {
+    let returnMap: Record<string, ConditionalEntry>;
+    try {
+      returnMap = JSON.parse(returnMapRaw);
+    } catch {
+      throw new Error(
+        'returnMap must be a valid JSON string, e.g. {"mykey":{"type":"string","value":"hello"}}',
+      );
+    }
     return {
-      kind: 'bytes',
-      fn: (call) => BigInt(call.jni.allocHandle({ kind: 'bytes', value: bytes })),
+      kind: 'conditional',
+      fn: buildConditionalDispatcher(returnMap, { kind: defaultKind, fn: defaultFn }),
     };
   }
-  return { kind: 'void', fn: () => undefined };
+
+  return { kind: defaultKind as JavaMockImpl['kind'], fn: defaultFn };
 }
 
 export function buildJavaFieldValue(session: EmulatorSession, args: ToolArgs): JavaFieldValue {
@@ -71,7 +189,11 @@ export function buildJavaFieldValue(session: EmulatorSession, args: ToolArgs): J
     return { kind: 'int', value: BigInt(Math.trunc(valueInt)) };
   }
   if (valueString !== undefined) {
-    const handle = session.emulator.jni.allocHandle({ kind: 'string', value: valueString });
+    const handle = session.emulator.jni.allocHandle({
+      kind: 'mock-string',
+      value: valueString,
+      cls: 'java/lang/String',
+    });
     return { kind: 'string', value: BigInt(handle) };
   }
   if (valueBytes !== undefined) {

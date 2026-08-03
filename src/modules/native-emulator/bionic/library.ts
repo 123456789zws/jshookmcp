@@ -5,6 +5,8 @@ import type { GuestSymbolResolver, ResolvedGuestSymbol } from '../symbol-resolve
 export class BionicLibrary implements GuestSymbolResolver<HostFunction> {
   private readonly functions = new Map<string, HostFunction>();
   readonly dataSymbols = new Map<string, number>();
+  /** Diagnostic log of dlsym lookups (both hits and misses). */
+  readonly dlsymLog: string[] = [];
 
   set(name: string, fn: HostFunction): this {
     this.functions.set(name, fn);

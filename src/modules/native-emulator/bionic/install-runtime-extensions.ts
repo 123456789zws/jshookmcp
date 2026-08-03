@@ -85,7 +85,111 @@ export function installSystemExtensionStubs(lib: BionicLibrary, options: BionicO
     );
   });
 
-  for (const name of ['__open_2', 'openat', 'faccessat', 'fstatat']) {
+  // Virtual file system: maps fd (starting at 3) → { path, data, offset }.
+  const fdTable = new Map<number, { data: Uint8Array; offset: number }>();
+  let vfsNextFd = 3;
+
+  const vfsOpen = (path: string): number => {
+    const fileMap = options.files;
+    if (!fileMap) return -1;
+    for (const [key, data] of fileMap) {
+      if (path === key || path.endsWith('/' + key) || path.includes(key)) {
+        const fd = vfsNextFd++;
+        fdTable.set(fd, { data: new Uint8Array(data), offset: 0 });
+        return fd;
+      }
+    }
+    return -1;
+  };
+
+  lib.set('open', (ctx) => {
+    const path = readGuestCString(ctx, Number(ctx.x(0)));
+    const fd = vfsOpen(path);
+    return BigInt(fd);
+  });
+
+  lib.set('openat', (ctx) => {
+    const path = readGuestCString(ctx, Number(ctx.x(1)));
+    const fd = vfsOpen(path);
+    return BigInt(fd);
+  });
+
+  lib.set('read', (ctx) => {
+    const fd = Number(ctx.x(0));
+    const buf = Number(ctx.x(1));
+    const count = Number(ctx.x(2));
+    const entry = fdTable.get(fd);
+    if (!entry) return BigInt(-1);
+    const toRead = Math.min(count, entry.data.length - entry.offset);
+    if (toRead <= 0) return 0n;
+    for (let i = 0; i < toRead; i++) ctx.write(buf + i, entry.data[entry.offset + i]!);
+    entry.offset += toRead;
+    return BigInt(toRead);
+  });
+
+  lib.set('close', (ctx) => {
+    const fd = Number(ctx.x(0));
+    return BigInt(fdTable.delete(fd) ? 0 : -1);
+  });
+
+  lib.set('fstat', (ctx) => {
+    const fd = Number(ctx.x(0));
+    const statbuf = Number(ctx.x(1));
+    const entry = fdTable.get(fd);
+    if (!entry) return BigInt(-1);
+    // Write a minimal struct stat64: st_size at offset 48, st_mode at offset 16
+    const buf = new Uint8Array(128);
+    new DataView(buf.buffer).setBigUint64(48, BigInt(entry.data.length), true); // st_size
+    new DataView(buf.buffer).setUint32(16, 0x81a4, true); // st_mode = S_IFREG | 0644
+    ctx.write(statbuf, buf);
+    return 0n;
+  });
+
+  lib.set('access', (ctx) => {
+    const path = readGuestCString(ctx, Number(ctx.x(0)));
+    const fileMap = options.files;
+    if (fileMap) {
+      for (const key of fileMap.keys()) {
+        if (path === key || path.endsWith('/' + key) || path.includes(key)) return 0n;
+      }
+    }
+    return BigInt(-1);
+  });
+
+  lib.set('stat', (ctx) => {
+    const path = readGuestCString(ctx, Number(ctx.x(0)));
+    const statbuf = Number(ctx.x(1));
+    const fileMap = options.files;
+    if (fileMap) {
+      for (const [key, data] of fileMap) {
+        if (path === key || path.endsWith('/' + key) || path.includes(key)) {
+          const buf = new Uint8Array(128);
+          new DataView(buf.buffer).setBigUint64(48, BigInt(data.length), true); // st_size
+          new DataView(buf.buffer).setUint32(16, 0x81a4, true); // st_mode
+          ctx.write(statbuf, buf);
+          return 0n;
+        }
+      }
+    }
+    return BigInt(-1);
+  });
+
+  lib.set('lseek', (ctx) => {
+    const fd = Number(ctx.x(0));
+    const offset = Number(ctx.x(1));
+    const whence = Number(ctx.x(2));
+    const entry = fdTable.get(fd);
+    if (!entry) return BigInt(-1);
+    let newOffset: number;
+    if (whence === 0) newOffset = offset;
+    else if (whence === 1) newOffset = entry.offset + offset;
+    else if (whence === 2) newOffset = entry.data.length + offset;
+    else return BigInt(-1);
+    entry.offset = Math.max(0, newOffset);
+    return BigInt(entry.offset);
+  });
+
+  for (const name of ['__open_2', 'faccessat', 'fstatat']) {
     lib.set(name, () => BigInt(-1));
   }
   lib.set('__system_property_get', (ctx) => {

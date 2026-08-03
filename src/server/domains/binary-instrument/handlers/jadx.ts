@@ -6,7 +6,7 @@
 import { mkdtemp, readFile, rm, mkdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, exec } from 'node:child_process';
 import { probeCommand } from '@modules/external/ToolProbe';
 import { JadxSearchEngine } from '@modules/jadx-search';
 import type { JadxSearchOptions } from '@modules/jadx-search';
@@ -145,12 +145,16 @@ export class JadxHandlers {
     }
     await mkdir(decompileDir, { recursive: true });
 
-    const jadxArgs = ['--no-debug-info'];
+    const jadxConfig = getReverseEngineeringConfig().jadx;
+    const userTimeout = readOptionalNumber(args, 'timeoutMs');
+    const timeoutMs = userTimeout ?? jadxConfig.decompileTimeoutMs;
+    const threads = readOptionalNumber(args, 'threadsCount') ?? jadxConfig.threadsCount;
+    const jadxArgs = ['--no-debug-info', '-j', String(threads)];
     if (noResources) jadxArgs.push('--no-res');
     jadxArgs.push('-d', decompileDir, apkPath);
 
     try {
-      await this.runJadx(jadxProbe.path ?? 'jadx', jadxArgs, 300_000);
+      await this.runJadx(jadxProbe.path ?? 'jadx', jadxArgs, timeoutMs);
       const sourcesDir = join(decompileDir, 'sources');
       const sourcesAvailable = await stat(sourcesDir)
         .then((s) => s.isDirectory())
@@ -182,6 +186,10 @@ export class JadxHandlers {
     let decompileDir = readOptionalString(args, 'decompileDir');
     const apkPath = readOptionalString(args, 'apkPath');
     const query = readRequiredString(args, 'query');
+    const jadxConfig = getReverseEngineeringConfig().jadx;
+    const userTimeout = readOptionalNumber(args, 'timeoutMs');
+    const searchTimeoutMs = userTimeout ?? jadxConfig.searchTimeoutMs;
+    const threads = readOptionalNumber(args, 'threadsCount') ?? jadxConfig.threadsCount;
 
     if (!decompileDir && !apkPath) {
       throw new ToolError(
@@ -205,8 +213,8 @@ export class JadxHandlers {
       const outDir = await mkdtemp(join(tmpdir(), `jshook-jadx-search-${basename(apkPath)}-`));
       await this.runJadx(
         jadxProbe.path ?? 'jadx',
-        ['--no-res', '--no-debug-info', '-d', outDir, apkPath],
-        300_000,
+        ['--no-res', '--no-debug-info', '-j', String(threads), '-d', outDir, apkPath],
+        searchTimeoutMs,
       );
       decompileDir = join(outDir, 'sources');
       autoDecompiled = true;
@@ -443,10 +451,19 @@ export class JadxHandlers {
     className: string,
     methodName?: string,
   ): Promise<unknown> {
+    const jadxConfig = getReverseEngineeringConfig().jadx;
     const outDir = await mkdtemp(join(tmpdir(), 'jshook-jadx-'));
     try {
-      const jadxArgs = ['--no-res', '--no-debug-info', '-d', outDir, apkPath];
-      await this.runJadx(jadx, jadxArgs);
+      const jadxArgs = [
+        '--no-res',
+        '--no-debug-info',
+        '-j',
+        String(jadxConfig.threadsCount),
+        '-d',
+        outDir,
+        apkPath,
+      ];
+      await this.runJadx(jadx, jadxArgs, jadxConfig.singleClassTimeoutMs);
 
       const sourcesDir = join(outDir, 'sources');
       const resolvedClass = await resolveDecompiledClassFile(sourcesDir, className);
@@ -565,7 +582,8 @@ export class JadxHandlers {
 
   private async runJadx(jadx: string, args: string[], timeoutMs = 120_000): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      execFile(jadx, args, { encoding: 'utf8', windowsHide: true, timeout: timeoutMs }, (error) => {
+      const child = execFile(jadx, args, { encoding: 'utf8', windowsHide: true }, (error) => {
+        clearTimeout(timer);
         // JADX exits with code 1 on partial decompilation errors but still produces usable output.
         if (error && (error as { code?: number }).code !== 1) {
           reject(error);
@@ -573,6 +591,15 @@ export class JadxHandlers {
         }
         resolve();
       });
+
+      const timer = setTimeout(() => {
+        // Force-kill: Node's built-in timeout sends SIGTERM which Java ignores on Windows.
+        child.kill('SIGKILL');
+        if (child.pid) {
+          exec(`taskkill /F /T /PID ${child.pid}`, () => {});
+        }
+        reject(new Error(`JADX timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
     });
   }
 }

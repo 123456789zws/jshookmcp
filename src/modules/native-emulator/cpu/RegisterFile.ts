@@ -34,14 +34,29 @@ export class RegisterFile {
 
   // ── GPR access with XZR semantics (encoding 31 = zero register) ──
 
+  private framePtr = 0n; // x31 override (0=normal XZR, setFrame→non-zero=writable FP)
+
   readGpr(index: number): bigint {
-    if (index === 31) return 0n; // XZR
+    if (index === 31) return this.framePtr;
     return this.gpr[index] ?? 0n;
   }
 
   writeGpr(index: number, value: bigint): void {
-    if (index === 31) return; // writes to XZR are discarded
+    if (index === 31) {
+      // Only write to x31 if framePtr was explicitly enabled (non-zero).
+      // Otherwise discard (XZR semantics for backward compat).
+      if (this.framePtr !== 0n) this.framePtr = BigInt.asUintN(64, value);
+      return;
+    }
     this.gpr[index] = BigInt.asUintN(64, value);
+  }
+
+  /** Enable x31 as frame pointer. Set to non-zero to allow x31 writes. */
+  setFrame(value: bigint): void {
+    this.framePtr = BigInt.asUintN(64, value);
+  }
+  getFrame(): bigint {
+    return this.framePtr;
   }
 
   /** Register access where encoding 31 means SP (used by ADD/SUB immediate). */

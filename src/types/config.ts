@@ -106,6 +106,7 @@ export interface ReverseEngineeringConfig {
   binaryMagic: BinaryMagicConfig;
   nativeEmulator: NativeEmulatorConfig;
   apk: ApkAnalysisConfig;
+  jadx: JadxConfig;
   dex: DexAnalysisConfig;
   frida: FridaAnalysisConfig;
   androidRuntime: AndroidRuntimeConfig;
@@ -140,6 +141,17 @@ export interface NativeEmulatorConfig {
   syscallCStringLimitBytes: number;
   rawMemoryMaxBytes: number;
   rawMemoryPreviewBytes: number;
+}
+
+export interface JadxConfig {
+  /** Timeout for full APK decompile (jadx_decompile_apk), ms. */
+  decompileTimeoutMs: number;
+  /** Timeout for search-targeted decompile (jadx_search_code), ms. */
+  searchTimeoutMs: number;
+  /** Timeout for single-class decompile (jadx_decompile), ms. */
+  singleClassTimeoutMs: number;
+  /** JADX thread count (--threads-count / -j). */
+  threadsCount: number;
 }
 
 export interface ApkAnalysisConfig {

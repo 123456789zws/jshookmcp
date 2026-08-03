@@ -6,8 +6,8 @@ describe('registry/SearchCatalog', () => {
   it('loads the generated full catalog with stable domain metadata', async () => {
     const catalog = await loadSearchCatalog();
 
-    expect(catalog.tools).toHaveLength(636);
-    expect(Object.values(DOMAIN_TOOL_COUNT_MAP).reduce((sum, count) => sum + count, 0)).toBe(636);
+    expect(catalog.tools).toHaveLength(638);
+    expect(Object.values(DOMAIN_TOOL_COUNT_MAP).reduce((sum, count) => sum + count, 0)).toBe(638);
     expect(catalog.domainByToolName.get('browser_launch')).toBe('browser');
     expect(catalog.domainByToolName.get('wasm_optimize')).toBe('wasm');
     expect(catalog.toolByName.get('browser_launch')?.inputSchema).toMatchObject({ type: 'object' });

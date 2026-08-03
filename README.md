@@ -90,9 +90,8 @@ The built-in surface below is generated from the runtime registry and checked in
 
 <!-- metadata-sync:start -->
 - Package version: `0.3.4`
-- Built-in Tools: `636`
-- Domains: `adb-bridge`, `binary-instrument`, `boringssl-inspector`, `browser`, `canvas`, `coordination`, `core`, `cross-domain`, `dart-inspector`, `debugger`, `encoding`, `exploit-dev`, `extension-registry`, `graphql`, `instrumentation`, `maintenance`, `memory`, `mojo-ipc`, `native-bridge`, `native-emulator`, `network`, `platform`, `process`, `protocol-analysis`, `proxy`, `sourcemap`, `streaming`, `syscall-hook`, `trace`, `transform`, `v8-inspector`, `wasm`, `webgpu`, `workflow`
-- Note: this snapshot is generated from the runtime registry; do not edit the counts by hand.
+- Domains: 
+- Note: counts are generated from domain manifests on the current build platform; platform-filtered tools can change the total.
 <!-- metadata-sync:end -->
 
 > **[View the complete Tool Reference ↗](https://vmoranv.github.io/jshookmcp/reference/)**
