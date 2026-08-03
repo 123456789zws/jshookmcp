@@ -53,7 +53,6 @@ const registrations = defineMethodRegistrations<H, (typeof nativeEmulatorTools)[
     { tool: 'nemu_jni_handles', method: 'handleJniHandles' },
     // Code discovery
     { tool: 'nemu_dlsym_diag', method: 'handleDlsymDiag' },
-    { tool: 'nemu_find_functions', method: 'handleFindFunctions' },
     // VM state bridge
     { tool: 'nemu_vm_state_dump', method: 'handleVmStateDump' },
     { tool: 'nemu_vm_state_load', method: 'handleVmStateLoad' },
@@ -114,7 +113,6 @@ const manifest = {
       'nemu_jni_diag',
       'nemu_jni_handles',
       'nemu_dlsym_diag',
-      'nemu_find_functions',
       'nemu_vm_state_dump',
       'nemu_vm_state_load',
       'nemu_vm_state_compare',

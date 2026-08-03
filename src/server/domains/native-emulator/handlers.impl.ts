@@ -1541,28 +1541,6 @@ export class NativeEmulatorHandlers {
     });
   }
 
-  /** nemu_find_functions — scan mapped memory for AArch64 STP prologues. */
-  async handleFindFunctions(args: ToolArgs): Promise<ToolResponse> {
-    return handleSafe(async () => {
-      const session = this.requireSession(args);
-      const startAddr = argNumber(args, 'startAddr', 0x0);
-      const endAddr = argNumber(args, 'endAddr');
-      const maxResults = Math.min(argNumber(args, 'maxResults', 200), 1000);
-      const results = session.emulator.findFunctionPrologues(startAddr, endAddr, maxResults);
-      return {
-        sessionId: session.id,
-        startAddr: `0x${startAddr.toString(16)}`,
-        endAddr: endAddr !== undefined ? `0x${endAddr.toString(16)}` : 'auto',
-        functions: results.map((r) => ({
-          vaddr: r.vaddr,
-          vaddrHex: `0x${r.vaddr.toString(16)}`,
-          frameSize: r.frameSize,
-        })),
-        count: results.length,
-      };
-    });
-  }
-
   // ── VM State Bridge (Python ↔ Native) ────────────────────────────
 
   /** nemu_vm_state_dump — read LiteVM state from guest memory. */

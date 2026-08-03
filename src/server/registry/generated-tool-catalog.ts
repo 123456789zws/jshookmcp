@@ -16198,43 +16198,6 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
-      "name": "nemu_find_functions",
-      "description": "Scan mapped guest memory for AArch64 function prologues (STP x29,x30,[sp,#-N]!). Returns sorted list of {vaddr, frameSize}. Use on stripped/obfuscated SOs where .dynsym exports few symbols — the real code entry points are discovered by scanning for standard ARM64 function preambles. Default scans [0x0, 0x400000).",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "sessionId": {
-            "type": "string",
-            "description": "Session id to scan"
-          },
-          "startAddr": {
-            "type": "number",
-            "description": "Start address for scan (default 0x0)"
-          },
-          "endAddr": {
-            "type": "number",
-            "description": "End address (default 0x400000)"
-          },
-          "maxResults": {
-            "type": "number",
-            "description": "Max results (default 200, max 1000)"
-          }
-        },
-        "required": [
-          "sessionId"
-        ]
-      },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
-    },
-    "domain": "native-emulator"
-  },
-  {
-    "tool": {
       "name": "nemu_inspect_imports",
       "description": "Inspect an AArch64 ELF .so before emulation and list imported symbols from dynamic relocations, including GOT offsets and whether each import is backed by the built-in bionic stubs. Use this to diagnose PLT/GOT NULL indirect-call failures without writing ad-hoc readelf/Capstone scripts.",
       "inputSchema": {
