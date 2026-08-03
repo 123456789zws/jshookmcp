@@ -411,6 +411,13 @@ export function createBionicLibrary(
       lib.dlsymLog.push(`dlsym: ${symbol} → stub @0x${stub.toString(16)}`);
       return BigInt(stub);
     }
+    // Optional extra symbol table (caller-provided, e.g. VM handler addresses).
+    const extraAddr = options.extraSymbols?.get(symbol);
+    if (extraAddr !== undefined) {
+      lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${extraAddr.toString(16)} (extra)`);
+      return BigInt(extraAddr);
+    }
     lastDlError = `dlsym: symbol not found: ${symbol}`;
     lib.dlsymLog.push(`dlsym: ${symbol} → NULL (NOT FOUND)`);
     return 0n;

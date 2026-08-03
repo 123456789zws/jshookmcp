@@ -131,7 +131,7 @@ export class NativeEmulatorHandlers {
   handleCreateSession(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => {
       const installSyscalls = argBool(args, 'installSyscalls', true);
-      const bionic = decodeBionicOptions(args['files']);
+      const bionic = decodeBionicOptions(args['files'], args['extraSymbols']);
       const session = this.sessions.createSession({
         ...(installSyscalls ? {} : { syscalls: false }),
         ...(bionic ? { bionic } : {}),
@@ -2285,11 +2285,25 @@ export class NativeEmulatorHandlers {
   }
 }
 
-function decodeBionicOptions(value: unknown): BionicOptions | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+function decodeBionicOptions(
+  filesValue: unknown,
+  extraSymbolsValue?: unknown,
+): BionicOptions | undefined {
   const files = new Map<string, Uint8Array>();
-  for (const [path, encoded] of Object.entries(value)) {
-    if (typeof encoded === 'string') files.set(path, toUint8(Buffer.from(encoded, 'base64')));
+  if (typeof filesValue === 'object' && filesValue !== null && !Array.isArray(filesValue)) {
+    for (const [path, encoded] of Object.entries(filesValue)) {
+      if (typeof encoded === 'string') files.set(path, toUint8(Buffer.from(encoded, 'base64')));
+    }
   }
-  return files.size > 0 ? { files } : undefined;
+  const extraSymbols = new Map<string, number>();
+  if (typeof extraSymbolsValue === 'object' && extraSymbolsValue !== null && !Array.isArray(extraSymbolsValue)) {
+    for (const [name, addr] of Object.entries(extraSymbolsValue)) {
+      if (typeof addr === 'number') extraSymbols.set(name, addr);
+    }
+  }
+  if (files.size === 0 && extraSymbols.size === 0) return undefined;
+  const opts: BionicOptions = {};
+  if (files.size > 0) opts.files = files;
+  if (extraSymbols.size > 0) opts.extraSymbols = extraSymbols;
+  return opts;
 }

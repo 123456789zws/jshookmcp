@@ -34,6 +34,12 @@ export const nativeEmulatorTools: Tool[] = [
         type: 'object',
         additionalProperties: { type: 'string' },
         description: 'Virtual filesystem: path→base64 content for fopen/fread',
+      })
+      .prop('extraSymbols', {
+        type: 'object',
+        additionalProperties: { type: 'number' },
+        description:
+          'Extra symbol→address mappings for dlsym resolution (e.g. VM handler addresses not exported in .dynsym). Keys are symbol names, values are vaddrs.',
       }),
   ),
   tool('nemu_destroy_session', (t) =>

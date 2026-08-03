@@ -37,6 +37,8 @@ export interface BionicOptions {
     arg4: bigint,
     arg5: bigint,
   ) => bigint | undefined;
+  /** Extra symbol→address mappings for dlsym resolution (e.g. VM handler addresses not in .dynsym). */
+  extraSymbols?: Map<string, number>;
 }
 
 export type BionicAllocator = (size: number) => number;
