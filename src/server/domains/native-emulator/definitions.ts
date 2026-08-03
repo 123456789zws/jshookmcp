@@ -792,4 +792,36 @@ export const nativeEmulatorTools: Tool[] = [
       )
       .required('sessionId', 'snapshotId'),
   ),
+  // ── Memory scanning ────────────────────────────────────────────
+  tool('nemu_scan_memory', (t) =>
+    t
+      .desc(
+        'Scan emulated memory for a byte pattern (like Volatility). Searches a guest address range for an exact byte match using Boyer-Moore-Horspool. Returns a list of matched addresses. Skips unmapped regions silently — use nemu_mem_map to extend the scan range if needed.',
+      )
+      .string('sessionId', 'Session id to scan')
+      .string('pattern', 'Byte pattern to search for, as a base64 string')
+      .number('startAddr', 'Starting guest address of the scan range')
+      .number('endAddr', 'Ending guest address of the scan range (exclusive)')
+      .number('maxResults', 'Maximum number of results to return (default: 100, max: 1000)', {
+        default: 100,
+      })
+      .required('sessionId', 'pattern', 'startAddr', 'endAddr'),
+  ),
+  // ── Memory XOR ─────────────────────────────────────────────────
+  tool('nemu_xor_region', (t) =>
+    t
+      .desc(
+        'XOR a region of emulated memory with a single-byte key. Returns the XOR result as base64. Use for quick decryption testing — XOR a buffer with a candidate key byte and inspect the preview without modifying guest state. Set dryRun=false to write the XOR result back into guest memory.',
+      )
+      .string('sessionId', 'Session id')
+      .number('address', 'Starting guest address to XOR')
+      .number('key', 'Single-byte XOR key (0-255)')
+      .number('length', 'Number of bytes to XOR')
+      .boolean(
+        'dryRun',
+        'If true (default), return XOR result without modifying memory. Set false to write back.',
+        { default: true },
+      )
+      .required('sessionId', 'address', 'key', 'length'),
+  ),
 ];

@@ -16805,6 +16805,51 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_scan_memory",
+      "description": "Scan emulated memory for a byte pattern (like Volatility). Searches a guest address range for an exact byte match using Boyer-Moore-Horspool. Returns a list of matched addresses. Skips unmapped regions silently — use nemu_mem_map to extend the scan range if needed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to scan"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Byte pattern to search for, as a base64 string"
+          },
+          "startAddr": {
+            "type": "number",
+            "description": "Starting guest address of the scan range"
+          },
+          "endAddr": {
+            "type": "number",
+            "description": "Ending guest address of the scan range (exclusive)"
+          },
+          "maxResults": {
+            "type": "number",
+            "description": "Maximum number of results to return (default: 100, max: 1000)",
+            "default": 100
+          }
+        },
+        "required": [
+          "sessionId",
+          "pattern",
+          "startAddr",
+          "endAddr"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_session_info",
       "description": "Inspect one emulator session without executing native code. Returns timestamps, exported symbols, unresolved imports, constructor faults, and active session count.",
       "inputSchema": {
@@ -17517,6 +17562,51 @@ export const GENERATED_TOOL_CATALOG = [
         "required": [
           "sessionId",
           "regions"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_xor_region",
+      "description": "XOR a region of emulated memory with a single-byte key. Returns the XOR result as base64. Use for quick decryption testing — XOR a buffer with a candidate key byte and inspect the preview without modifying guest state. Set dryRun=false to write the XOR result back into guest memory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "address": {
+            "type": "number",
+            "description": "Starting guest address to XOR"
+          },
+          "key": {
+            "type": "number",
+            "description": "Single-byte XOR key (0-255)"
+          },
+          "length": {
+            "type": "number",
+            "description": "Number of bytes to XOR"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "If true (default), return XOR result without modifying memory. Set false to write back.",
+            "default": true
+          }
+        },
+        "required": [
+          "sessionId",
+          "address",
+          "key",
+          "length"
         ]
       },
       "annotations": {

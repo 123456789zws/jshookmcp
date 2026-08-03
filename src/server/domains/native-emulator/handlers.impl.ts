@@ -2303,6 +2303,73 @@ export class NativeEmulatorHandlers {
     });
   }
 
+  // ── Memory scanning ────────────────────────────────────────────
+
+  /** nemu_scan_memory — scan guest memory for a byte pattern. */
+  async handleScanMemory(args: ToolArgs): Promise<ToolResponse> {
+    return handleSafe(async () => {
+      const session = this.requireSession(args);
+      const patternB64 = argStringRequired(args, 'pattern');
+      const startAddr = argNumber(args, 'startAddr');
+      const endAddr = argNumber(args, 'endAddr');
+      const maxResults = Math.min(argNumber(args, 'maxResults', 100), 1000);
+      if (startAddr === undefined || endAddr === undefined) {
+        throw new Error('startAddr and endAddr are required');
+      }
+      const pattern = toUint8(Buffer.from(patternB64, 'base64'));
+      if (pattern.length === 0) throw new Error('pattern must be non-empty');
+      const addresses = session.emulator.scanMemory(pattern, startAddr, endAddr, maxResults);
+      return {
+        sessionId: session.id,
+        patternLength: pattern.length,
+        range: { startAddr: `0x${startAddr.toString(16)}`, endAddr: `0x${endAddr.toString(16)}` },
+        matches: addresses.map((a) => `0x${a.toString(16)}`),
+        count: addresses.length,
+        truncated: addresses.length >= maxResults,
+      };
+    });
+  }
+
+  // ── Memory XOR ─────────────────────────────────────────────────
+
+  /** nemu_xor_region — XOR a memory region with a single-byte key. */
+  async handleXorRegion(args: ToolArgs): Promise<ToolResponse> {
+    return handleSafe(async () => {
+      const session = this.requireSession(args);
+      const address = argNumber(args, 'address');
+      const key = argNumber(args, 'key');
+      const length = argNumber(args, 'length');
+      const dryRun = argBool(args, 'dryRun', true);
+      if (address === undefined || key === undefined || length === undefined || length <= 0) {
+        throw new Error('address, key, and positive length are required');
+      }
+      if (key < 0 || key > 255 || !Number.isInteger(key)) {
+        throw new Error('key must be a byte value (0-255)');
+      }
+      const maxBytes = rawMemoryLimit(args);
+      ensureRawMemorySize(length, maxBytes, 'xor region');
+      const result = session.emulator.xorMemory(address, key, length, dryRun);
+      const previewLen = Math.min(
+        256,
+        getReverseEngineeringConfig().nativeEmulator.rawMemoryPreviewBytes,
+        result.length,
+      );
+      return {
+        sessionId: session.id,
+        address: `0x${address.toString(16)}`,
+        key,
+        length: result.length,
+        dryRun,
+        previewBase64: Buffer.from(result.subarray(0, previewLen)).toString('base64'),
+        previewHex: Buffer.from(result.subarray(0, previewLen)).toString('hex').toUpperCase(),
+        ...(result.length > previewLen
+          ? { previewTruncated: true, previewLength: previewLen }
+          : {}),
+        dataBase64: Buffer.from(result).toString('base64'),
+      };
+    });
+  }
+
   private requireSession(args: ToolArgs): EmulatorSession {
     return this.sessions.requireSession(argStringRequired(args, 'sessionId'));
   }

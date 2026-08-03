@@ -443,6 +443,102 @@ export class NativeEmulator {
     this.nextAllocAddr = 0x4000_0000;
   }
 
+  /**
+   * Scan emulated memory for a byte pattern (like Volatility's memory scanning).
+   * Reads memory in page-sized chunks and searches for exact byte matches.
+   *
+   * @param pattern  Byte pattern to search for.
+   * @param startAddr Starting address of the scan range.
+   * @param endAddr   Ending address of the scan range (exclusive).
+   * @param maxResults Maximum number of results to return (default: 100).
+   * @returns Array of matched addresses.
+   */
+  scanMemory(
+    pattern: Uint8Array,
+    startAddr: number,
+    endAddr: number,
+    maxResults: number = 100,
+  ): number[] {
+    this.checkNotDisposed();
+    if (pattern.length === 0) {
+      throw new Error('Pattern must be non-empty');
+    }
+    if (startAddr >= endAddr) {
+      throw new Error('startAddr must be less than endAddr');
+    }
+    const results: number[] = [];
+    const pageSize = 4096;
+    const patternLen = pattern.length;
+
+    // Build bad-character skip table for fast scanning
+    const skip = new Int32Array(256);
+    skip.fill(patternLen);
+    for (let i = 0; i < patternLen - 1; i++) {
+      skip[pattern[i]] = patternLen - 1 - i;
+    }
+
+    for (let chunkStart = startAddr; chunkStart < endAddr; chunkStart += pageSize) {
+      if (results.length >= maxResults) break;
+      const chunkEnd = Math.min(chunkStart + pageSize + patternLen - 1, endAddr);
+      let chunk: Uint8Array;
+      try {
+        chunk = this.readGuestMemory(chunkStart, chunkEnd - chunkStart);
+      } catch {
+        // Skip unmapped regions
+        continue;
+      }
+
+      // Boyer-Moore-Horspool search
+      let i = 0;
+      while (i <= chunk.length - patternLen && results.length < maxResults) {
+        let j = patternLen - 1;
+        while (j >= 0 && chunk[i + j] === pattern[j]) j--;
+        if (j < 0) {
+          results.push(chunkStart + i);
+          i++;
+        } else {
+          const badChar = chunk[i + patternLen - 1];
+          i += skip[badChar] ?? patternLen;
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * XOR a region of emulated memory with a single-byte key.
+   * Used for quick decryption testing without writing custom tooling.
+   *
+   * @param address  Starting guest address.
+   * @param key      Single-byte XOR key (0-255).
+   * @param length   Number of bytes to XOR.
+   * @param dryRun   If true, return XOR'd result without modifying memory.
+   * @returns The XOR'd bytes.
+   */
+  xorMemory(
+    address: number,
+    key: number,
+    length: number,
+    dryRun: boolean = true,
+  ): Uint8Array {
+    this.checkNotDisposed();
+    if (key < 0 || key > 255 || !Number.isInteger(key)) {
+      throw new Error('Key must be a byte value (0-255)');
+    }
+    if (length <= 0) {
+      throw new Error('Length must be positive');
+    }
+    const original = this.readGuestMemory(address, length);
+    const result = new Uint8Array(original.length);
+    for (let i = 0; i < original.length; i++) {
+      result[i] = original[i] ^ key;
+    }
+    if (!dryRun) {
+      this.writeGuestMemory(address, result);
+    }
+    return result;
+  }
+
   /** Throw if dispose() has been called. */
   private checkNotDisposed(): void {
     if (this.disposed) {

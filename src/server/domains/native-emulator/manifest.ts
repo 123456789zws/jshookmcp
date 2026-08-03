@@ -69,6 +69,8 @@ const registrations = defineMethodRegistrations<H, (typeof nativeEmulatorTools)[
     { tool: 'nemu_patch_apply', method: 'handlePatchApply' },
     { tool: 'nemu_regs_save', method: 'handleRegsSave' },
     { tool: 'nemu_regs_restore', method: 'handleRegsRestore' },
+    { tool: 'nemu_scan_memory', method: 'handleScanMemory' },
+    { tool: 'nemu_xor_region', method: 'handleXorRegion' },
   ],
 });
 
