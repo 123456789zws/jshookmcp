@@ -12,6 +12,8 @@ function tryDisassemble(insn: number, pc: bigint): DisasmResult | null {
   // ── Special cases first ──────────────────────────────────────────
   if (insn === 0xd65f03c0) return { mnemonic: 'ret', operands: '' };
   if (insn === 0xd503201f) return { mnemonic: 'nop', operands: '' };
+  // BTI (Branch Target Identification) hints
+  if (m(insn, 0xffffff1f, 0xd503241f)) return decodeBti(insn);
 
   // ── PAC HINT forms (NOP-space, check before generic NOP mask) ────
   const pacHint = decodePacHint(insn);
@@ -42,6 +44,7 @@ function tryDisassemble(insn: number, pc: bigint): DisasmResult | null {
   if (m(insn, 0x7c000000, 0x14000000)) return decodeBranch(insn, pc); // B and BL share bits 30-26
   if (m(insn, 0xff000010, 0x54000000)) return decodeBranchCond(insn, pc);
   if (m(insn, 0x7e000000, 0x34000000)) return decodeCBZ(insn, pc);
+  if (m(insn, 0x7e000000, 0x36000000)) return decodeTBZ(insn, pc);
   // BLR / BR
   if (m(insn, 0xfffffc1f, 0xd63f0000)) {
     const rn = (insn >> 5) & 0x1f;
@@ -311,6 +314,34 @@ function decodeCBZ(insn: number, pc: bigint): DisasmResult {
     mnemonic: op ? 'cbnz' : 'cbz',
     operands: `${reg}${rt}, 0x${target.toString(16)}`,
   };
+}
+
+function decodeTBZ(insn: number, pc: bigint): DisasmResult {
+  const op = (insn >> 24) & 1;
+  const b5 = insn >>> 31;
+  const b40 = (insn >>> 19) & 0x1f;
+  const bitPos = (b5 << 5) | b40;
+  const rt = insn & 0x1f;
+  const imm14 = (insn >>> 5) & 0x3fff;
+  const offset = (BigInt(imm14) << 48n) >> 46n;
+  const target = pc + offset;
+  return {
+    mnemonic: op ? 'tbnz' : 'tbz',
+    operands: `x${rt}, #${bitPos}, 0x${target.toString(16)}`,
+  };
+}
+
+function decodeBti(insn: number): DisasmResult {
+  const CRm = (insn >> 8) & 0xf;
+  const op2 = (insn >> 5) & 0x7;
+  if (op2 !== 0) return { mnemonic: 'hint', operands: `#0x${(insn & 0x7f).toString(16)}` };
+  const targets: Record<number, string> = {
+    0b0100: 'bti c',
+    0b0101: 'bti j',
+    0b0110: 'bti jc',
+    0b0000: 'bti',
+  };
+  return { mnemonic: targets[CRm] ?? `hint`, operands: targets[CRm] ? '' : `#${CRm}` };
 }
 
 // ─── Loads and stores ──────────────────────────────────────────────

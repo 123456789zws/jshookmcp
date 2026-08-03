@@ -169,7 +169,13 @@ export function execBranchSystem(
   //   check before the blanket NOP handler so PAC sign/auth is observable.
   if (execHintPac(ctx, insn)) return true;
 
-  // HINT space (NOP, PACIASP/AUTIASP, BTI, YIELD, …): 1101010100 0 00 011 0010 …
+  // BTI (Branch Target Identification): PAC landing pad, no-op in emulator.
+  //   0xD503241F (BTI), 0xD503245F (BTI c), 0xD503249F (BTI j), 0xD50324DF (BTI jc)
+  if ((insn & 0xffffff1f) >>> 0 === 0xd503241f) {
+    return true;
+  }
+
+  // HINT space (NOP, PACIASP/AUTIASP, YIELD, …): 1101010100 0 00 011 0010 …
   //   Treat the whole hint space as a no-op so compiler-emitted prologue/landing
   //   pads (PAC/BTI) don't fault. NOP itself is 0xD503201F.
   if ((insn & 0xfffff01f) >>> 0 === 0xd503201f) {
