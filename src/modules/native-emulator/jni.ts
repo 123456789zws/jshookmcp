@@ -479,12 +479,15 @@ export class JniEnvironment {
     // ── Extended index stubs (280+) — return identifiable values per slot ────
     // Each returns its own index so native callers get a distinguishable signal.
     // Later these will be replaced with real JNI impls (FindClass, GetMethodID, etc.).
-    b(JNI_INDEX.ExtFunc_280, () => 280n);
-    b(JNI_INDEX.ExtFunc_300, () => 300n);
-    b(JNI_INDEX.ExtFunc_316, () => 316n);
-    b(JNI_INDEX.ExtFunc_322, () => 322n);
-    b(JNI_INDEX.ExtFunc_326, () => 326n);
-    b(JNI_INDEX.ExtFunc_336, () => 336n);
+    // Extended slots for metasec_ml dispatcher (JNI cache entries 280-336).
+    // Map guesses based on observed JNI call patterns (CallBooleanMethodV in diag).
+    // If mapping is wrong, JNI diag will show the actual call; swap to match.
+    b(JNI_INDEX.ExtFunc_280, (ctx) => this.jniFindClass(ctx));       // FindClass
+    b(JNI_INDEX.ExtFunc_300, (ctx) => this.jniGetMethodID(ctx));      // GetMethodID
+    b(JNI_INDEX.ExtFunc_316, (ctx) => this.jniGetStringUTFChars(ctx)); // GetStringUTFChars
+    b(JNI_INDEX.ExtFunc_322, (ctx) => this.jniCallMethod(ctx));        // CallObjectMethod
+    b(JNI_INDEX.ExtFunc_326, (ctx) => this.jniNewStringUTF(ctx));      // NewStringUTF
+    b(JNI_INDEX.ExtFunc_336, (ctx) => this.jniCallMethod(ctx));        // CallBooleanMethodV
 
     // ── Auto-fill every remaining NULL slot with a diagnostic stub ──────────
     // Instead of pre-baking every JNI function, we fill unfilled table entries
