@@ -41,6 +41,13 @@ const SESSION_TTL_MS = 10 * 60 * 1000;
 /** Allows one offline DOM workspace per member of a typical 10-agent fan-out. */
 const MAX_SESSIONS = 20;
 
+/**
+ * Default storage quota for JSDOM sessions. Must match the tool schema default
+ * (definitions.tools.jsdom.ts `storageQuotaBytes` default: 5_000_000) and
+ * jsdom's own default, so an omitted arg behaves as the schema documents.
+ */
+const STORAGE_QUOTA_BYTES_DEFAULT = 5_000_000;
+
 interface JsdomSession {
   dom: JSDOMType;
   url: string;
@@ -117,7 +124,7 @@ export class JsdomHandlers {
       const includeNodeLocations = argBool(args, 'includeNodeLocations', false);
       const pretendToBeVisual = argBool(args, 'pretendToBeVisual', false);
       const referrer = argString(args, 'referrer', '');
-      const storageQuotaBytes = argNumber(args, 'storageQuotaBytes', 1_000_000);
+      const storageQuotaBytes = argNumber(args, 'storageQuotaBytes', STORAGE_QUOTA_BYTES_DEFAULT);
 
       if (this.sessions.size >= MAX_SESSIONS) {
         return R.fail(

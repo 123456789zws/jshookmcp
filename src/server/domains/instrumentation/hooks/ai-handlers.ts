@@ -19,6 +19,44 @@ export interface UnhookGuardOptions {
 }
 
 /**
+ * Serialize hook records to CSV text. Accepts the two exportData shapes:
+ * `{ records: HookRecord[] }` (single-hook export) and
+ * `{ records: Record<hookId, HookRecord[]> }` (all-hooks export). Each record
+ * row is prefixed with its `hookId` column when the all-hooks shape is used.
+ * Cell values are JSON-serialized; quotes are escaped per RFC 4180.
+ */
+function escapeCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+export function toCsvRows(
+  records: Array<Record<string, unknown>> | Record<string, Array<Record<string, unknown>>>,
+): string {
+  const rows: Array<Record<string, unknown>> = [];
+  const collect = (list: Array<Record<string, unknown>>, hookId?: string): void => {
+    for (const item of list) {
+      if (item !== null && typeof item === 'object') {
+        rows.push({ ...(hookId !== undefined ? { hookId } : {}), ...item });
+      }
+    }
+  };
+  if (Array.isArray(records)) {
+    collect(records);
+  } else if (records !== null && typeof records === 'object') {
+    for (const [hookId, list] of Object.entries(records)) {
+      collect(Array.isArray(list) ? list : [], hookId);
+    }
+  }
+  if (rows.length === 0) return '';
+  const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+  const header = columns.join(',');
+  const body = rows.map((row) => columns.map((col) => escapeCell(row[col])).join(',')).join('\n');
+  return `${header}\n${body}`;
+}
+
+/**
  * Build the in-page bootstrap that initialises `__aiHookMetadata[hookId]` with
  * match tracking + installs a global `__aiHookUnhookGuard(hookId, value)`
  * helper. Returns '' when neither option is supplied (byte-identical inject).
@@ -137,7 +175,7 @@ export class AIHookToolHandlers {
               {
                 success: true,
                 hookId,
-                message: `Hook (: ${method})`,
+                message: `Hook injected via ${method}`,
                 unhookGuard:
                   guardBootstrap !== '' ? { maxMatches: maxMatches ?? null, enabled: true } : null,
                 injectionTime: new Date().toISOString(),
@@ -448,7 +486,7 @@ export class AIHookToolHandlers {
                 success: true,
                 hookId,
                 enabled,
-                message: `Hook${enabled ? '' : ''}`,
+                message: `Hook ${enabled ? 'enabled' : 'disabled'}`,
               },
               null,
               2,
@@ -514,6 +552,19 @@ export class AIHookToolHandlers {
             hookId,
           );
 
+      // `format: 'csv'` is honored here — the schema advertises json|csv, so the
+      // raw object shape must not leak through when csv was requested. Both
+      // export shapes carry the records under `records`: an array for a single
+      // hook, a hookId→array map when exporting everything.
+      const csvText =
+        format === 'csv'
+          ? toCsvRows(
+              ((exportData as { records?: unknown } | null)?.records ?? []) as
+                | Array<Record<string, unknown>>
+                | Record<string, Array<Record<string, unknown>>>,
+            )
+          : null;
+
       return {
         content: [
           {
@@ -522,7 +573,7 @@ export class AIHookToolHandlers {
               {
                 success: true,
                 format,
-                data: exportData,
+                data: csvText !== null ? csvText : exportData,
                 exportTime: new Date().toISOString(),
               },
               null,
