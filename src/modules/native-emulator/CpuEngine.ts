@@ -215,6 +215,8 @@ export class CpuEngine implements ExecutionContext {
   private readonly constructorFaults: string[] = [];
   /** NULL indirect calls auto-patched to RET during execution. */
   readonly nullCallPatches: string[] = [];
+  /** True while running a constructor — NULL calls propagate to the ctor handler. */
+  private runningConstructor = false;
   /** Undefined dynamic imports that could not be resolved to built-in stubs. */
   private readonly unresolvedImportDiagnostics: NativeRuntimeImportDiagnostic[] = [];
 
@@ -419,7 +421,7 @@ export class CpuEngine implements ExecutionContext {
     // Load segments sorted by vaddr; auto-fill gaps between them with zero pages.
     // Some obfuscated SOs (e.g. Douyin sgmain) have data fields referenced at
     // addresses that fall between PT_LOAD mappings.
-    const segments = [...elf.loadableSegments()].sort((a, b) => a.vaddr - b.vaddr);
+    const segments = [...elf.loadableSegments()].toSorted((a, b) => a.vaddr - b.vaddr);
     let prevEnd = 0;
     for (const seg of segments) {
       if (bias === 0 && seg.vaddr > prevEnd) {
@@ -529,6 +531,7 @@ export class CpuEngine implements ExecutionContext {
    * that ctor. Other faults still propagate.
    */
   private runConstructor(addr: number): void {
+    this.runningConstructor = true;
     try {
       this.invokeGuest(addr, [0n, 0n, 0n], {
         preserveControlState: false,
@@ -552,6 +555,8 @@ export class CpuEngine implements ExecutionContext {
         return;
       }
       throw e;
+    } finally {
+      this.runningConstructor = false;
     }
   }
 
@@ -1216,9 +1221,11 @@ export class CpuEngine implements ExecutionContext {
       try {
         this.execute(insn);
       } catch (e) {
-        if (e instanceof NullIndirectCallError) {
+        if (e instanceof NullIndirectCallError && !this.runningConstructor) {
           // Auto-NOP: patch the BR/BLR to RET so subsequent calls skip the
           // NULL indirect branch instead of faulting again.
+          // During constructor execution, let the exception propagate so
+          // runConstructor can record it in the fault log.
           const pc = this.registerFile.pc;
           const retInsn = 0xd65f03c0; // RET
           const retBytes = new Uint8Array([
@@ -1239,10 +1246,11 @@ export class CpuEngine implements ExecutionContext {
             this.registerFile.writeGpr(0, 0n);
             // Discard the pending callee-save snapshot — we're not calling anything.
             this.pendingSaveRegs = null;
-          } else {
-            // BR → RET: skip the branch, advance PC normally.
           }
-          this.branched = false; // fall through to the +4 advance below
+          // Re-execute at the same PC so the patched RET instruction runs
+          // and returns to the caller (LR=0 sentinel).  Do NOT advance PC here
+          // — that would skip the RET and fault on whatever follows the function.
+          continue;
         } else {
           throw e;
         }

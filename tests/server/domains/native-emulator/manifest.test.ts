@@ -35,7 +35,7 @@ describe('native-emulator manifest', () => {
     expect(manifest.kind).toBe('domain-manifest');
     expect(manifest.domain).toBe('native-emulator');
     expect(manifest.depKey).toBe('nativeEmulatorHandlers');
-    expect(manifest.profiles).toEqual(['full']);
+    expect(manifest.profiles).toEqual(['workflow', 'full']);
   });
 
   it('registers one binding per defined tool', () => {

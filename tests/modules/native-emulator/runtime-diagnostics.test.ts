@@ -119,7 +119,7 @@ function buildSoWithUnresolvedImport(): Uint8Array {
 }
 
 describe('CpuEngine runtime diagnostics', () => {
-  it('records unresolved import relocations and includes them in NULL-call failures', () => {
+  it('records unresolved import relocations; NULL calls are auto-NOPed', () => {
     const engine = new CpuEngine();
     engine.loadElf(buildSoWithUnresolvedImport());
 
@@ -130,7 +130,10 @@ describe('CpuEngine runtime diagnostics', () => {
         resolution: 'unresolved',
       }),
     ]);
-    expect(() => engine.callSymbol('call_missing', [])).toThrow(/mystery_func/);
-    expect(() => engine.callSymbol('call_missing', [])).toThrow(/GOT/i);
+    // With auto-NOP, the NULL call through the unresolved GOT entry is
+    // patched to RET instead of throwing. The result is 0 (clean return).
+    expect(() => engine.callSymbol('call_missing', [])).not.toThrow();
+    // The auto-patched address is recorded for diagnostics.
+    expect(engine.nullCallPatches.length).toBeGreaterThan(0);
   });
 });
