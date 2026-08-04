@@ -633,17 +633,17 @@ export function createBionicLibrary(
     const sptr = Number(ctx.x(0));
     const delim = Number(ctx.x(1));
     if (sptr === 0) return 0n;
-    const strPtrVal = Number(ctx.loadValue(sptr, 8));
+    const strPtrVal = Number(ctx.loadValue!(sptr, 8));
     if (strPtrVal === 0) return 0n;
     const s = readGuestCStringBytes(ctx, strPtrVal);
     const d = ctx.read(delim, 1)[0]!;
     const idx = s.indexOf(d);
     if (idx < 0) {
-      ctx.storeValue(sptr, 8, 0n);
+      ctx.storeValue!(sptr, 8, 0n);
       return BigInt(strPtrVal);
     }
     ctx.write(strPtrVal + idx, new Uint8Array([0]));
-    ctx.storeValue(sptr, 8, BigInt(strPtrVal + idx + 1));
+    ctx.storeValue!(sptr, 8, BigInt(strPtrVal + idx + 1));
     return BigInt(strPtrVal);
   });
   lib.set('strtok_r', (ctx) => {
@@ -692,16 +692,16 @@ export function createBionicLibrary(
     const num = Number(ctx.x(0));
     const den = Number(ctx.x(1));
     const ptr = alloc(8);
-    ctx.storeValue(ptr, 4, BigInt(num / den));
-    ctx.storeValue(ptr + 4, 4, BigInt(num % den));
+    ctx.storeValue!(ptr, 4, BigInt(num / den));
+    ctx.storeValue!(ptr + 4, 4, BigInt(num % den));
     return BigInt(ptr);
   });
   lib.set('ldiv', (ctx) => {
     const num = Number(ctx.x(0));
     const den = Number(ctx.x(1));
     const ptr = alloc(16);
-    ctx.storeValue(ptr, 8, BigInt(Math.trunc(num / den)));
-    ctx.storeValue(ptr + 8, 8, BigInt(num % den));
+    ctx.storeValue!(ptr, 8, BigInt(Math.trunc(num / den)));
+    ctx.storeValue!(ptr + 8, 8, BigInt(num % den));
     return BigInt(ptr);
   });
   lib.set('atof', () => 0n);
@@ -813,7 +813,7 @@ export function createBionicLibrary(
   lib.set('random', () => BigInt(Math.floor(Math.random() * 2147483647)));
 
   // --- stack guard ---
-  lib.set('__stack_chk_guard', () => BigInt(0xdeadbeefcafebabe));
+  lib.set('__stack_chk_guard', () => 0xdeadbeefcafebaben);
 
   return lib;
 }

@@ -382,7 +382,7 @@ export const nativeEmulatorTools: Tool[] = [
         'Set arbitrary CPU registers by index. Pass an object mapping register number to value (e.g. {0: 0x60000000, 10: 0, 11: 0x55150}). Supports x0-x30 and floating-point d0-d31. Use to fix up loop variables or inject context pointers before/after host function calls.',
       )
       .string('sessionId', 'Session id')
-      .object('registers', 'Map of register index → value. Integer for GPR, float for SIMD.')
+      .object('registers', {}, 'Map of register index → value. Integer for GPR, float for SIMD.')
       .required('sessionId', 'registers'),
   ),
   tool('nemu_set_pac_key', (t) =>

@@ -7,15 +7,10 @@ const VECTOR_RE = /^[vqdshb]\d{1,2}$/i;
 
 export type TraceMode = 'full' | 'calls' | 'branches' | 'memory';
 
-/** Group-bits[28:25] dispatch helpers for cheap filter classification. */
-const BRANCH_MASK_MAP = new Map<number, string>();
-// Populate via the standard group mask: bits[28:25] for Load/Store → x1x0
-//
-
 /** Return true if this instruction passes the `mode` filter, or if tableReg matches. */
 export function traceFilterMatch(
   insn: number,
-  asm: string,
+  _asm: string,
   mode: TraceMode,
   tableReg?: number,
 ): boolean {

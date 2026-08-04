@@ -40,14 +40,14 @@ export interface PacKeys {
 
 const SBOX = [0, 14, 2, 10, 9, 15, 8, 11, 6, 4, 3, 7, 13, 12, 1, 5];
 const SBOX_INV = (() => {
-  const inv = new Array<number>(16);
+  const inv = Array.from({ length: 16 }) as number[];
   for (let i = 0; i < 16; i++) inv[SBOX[i]!] = i;
   return inv;
 })();
 
 const STATE_PERM = [0, 11, 6, 13, 10, 1, 12, 7, 5, 14, 3, 8, 15, 4, 9, 2];
 const STATE_PERM_INV = (() => {
-  const inv = new Array<number>(16);
+  const inv = Array.from({ length: 16 }) as number[];
   for (let i = 0; i < 16; i++) inv[STATE_PERM[i]!] = i;
   return inv;
 })();
@@ -78,7 +78,7 @@ function hexToNibbles(hex: string): number[] {
 }
 
 function u64ToNibbles(v: bigint): number[] {
-  const nibbles = new Array<number>(16).fill(0);
+  const nibbles = Array.from({ length: 16 }, () => 0);
   for (let i = 0; i < 16; i++) {
     nibbles[15 - i] = Number((v >> BigInt(i * 4)) & 0xfn);
   }
@@ -87,7 +87,7 @@ function u64ToNibbles(v: bigint): number[] {
 
 function nibblesToU64(nibbles: number[]): bigint {
   let v = 0n;
-  for (let i = 0; i < 16; i++) v |= BigInt(nibbles[i] & 0xf) << BigInt((15 - i) * 4);
+  for (let i = 0; i < 16; i++) v |= BigInt(nibbles[i]! & 0xf) << BigInt((15 - i) * 4);
   return v & ((1n << 64n) - 1n);
 }
 
@@ -110,7 +110,7 @@ function rot4(b: number, r: number): number {
 
 /** MixColumns (M4,2) applied column-wise: incol = [state[i], state[4+i], state[8+i], state[12+i]]. */
 function mixColumns(state: number[]): number[] {
-  const out = new Array<number>(16).fill(0);
+  const out = Array.from({ length: 16 }, () => 0);
   for (let i = 0; i < 4; i++) {
     const c0 = state[0 + i]!;
     const c1 = state[4 + i]!;
@@ -142,19 +142,6 @@ function tweakLfsrForward(nibbles: number[]): number[] {
     const b1 = (t >> 1) & 1;
     const b0 = (t >> 0) & 1;
     nibbles[b] = ((b0 ^ b1) << 3) | (b3 << 2) | (b2 << 1) | b1;
-  }
-  return nibbles;
-}
-
-/** Inverse LFSR for the backward pass: (b3,b2,b1,b0) → (b0^b3, b0, b1, b2). */
-function tweakLfsrInverse(nibbles: number[]): number[] {
-  for (const b of [0, 1, 3, 4, 8, 11, 13]) {
-    const t = nibbles[b]!;
-    const b3 = (t >> 3) & 1;
-    const b2 = (t >> 2) & 1;
-    const b1 = (t >> 1) & 1;
-    const b0 = (t >> 0) & 1;
-    nibbles[b] = ((b3 ^ b0) << 0) | (b0 << 1) | (b1 << 2) | (b2 << 3);
   }
   return nibbles;
 }

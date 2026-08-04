@@ -138,7 +138,7 @@ export function dumpGot(bytes: Uint8Array): GotDump[] {
     const unmatched: number[] = [];
 
     for (let i = 0; i < addrs.length; i++) {
-      const trampAddr = addrs[i];
+      const trampAddr = addrs[i]!;
       const ldrInsn = dataView.getUint32(trampAddr + 4, le);
       const gotAddr = pageBase + decodeLdrImm12(ldrInsn);
       const rel = relocMap.get(gotAddr);
@@ -161,7 +161,7 @@ export function dumpGot(bytes: Uint8Array): GotDump[] {
 
     results.push({
       pageBase,
-      tableStart: addrs[0],
+      tableStart: addrs[0]!,
       entryCount: entries.length,
       entries,
       unmatched,

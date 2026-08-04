@@ -484,7 +484,7 @@ export class NativeEmulator {
     const skip = new Int32Array(256);
     skip.fill(patternLen);
     for (let i = 0; i < patternLen - 1; i++) {
-      skip[pattern[i]] = patternLen - 1 - i;
+      skip[pattern[i]!] = patternLen - 1 - i;
     }
 
     for (let chunkStart = startAddr; chunkStart < endAddr; chunkStart += pageSize) {
@@ -507,7 +507,7 @@ export class NativeEmulator {
           results.push(chunkStart + i);
           i++;
         } else {
-          const badChar = chunk[i + patternLen - 1];
+          const badChar = chunk[i + patternLen - 1]!;
           i += skip[badChar] ?? patternLen;
         }
       }
@@ -525,12 +525,7 @@ export class NativeEmulator {
    * @param dryRun   If true, return XOR'd result without modifying memory.
    * @returns The XOR'd bytes.
    */
-  xorMemory(
-    address: number,
-    key: number,
-    length: number,
-    dryRun: boolean = true,
-  ): Uint8Array {
+  xorMemory(address: number, key: number, length: number, dryRun: boolean = true): Uint8Array {
     this.checkNotDisposed();
     if (key < 0 || key > 255 || !Number.isInteger(key)) {
       throw new Error('Key must be a byte value (0-255)');
@@ -541,7 +536,7 @@ export class NativeEmulator {
     const original = this.readGuestMemory(address, length);
     const result = new Uint8Array(original.length);
     for (let i = 0; i < original.length; i++) {
-      result[i] = original[i] ^ key;
+      result[i] = original[i]! ^ key;
     }
     if (!dryRun) {
       this.writeGuestMemory(address, result);

@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { CpuEngine, DEFAULT_PAC_KEYS } from '@modules/native-emulator/CpuEngine';
+import { CpuEngine } from '@modules/native-emulator/CpuEngine';
 import { qarma5Encrypt } from '@modules/native-emulator/decoder/PointerAuth';
 
 const BASE = 0x10000;
@@ -35,7 +35,7 @@ describe('QARMA5 cipher', () => {
 
 /** Build a 3-source PAC instruction word. Field layout matches PointerAuth.ts decode:
  *  bits[31:24]=0xDA, bits[23:21]=op31, bits[20:16]=Rm, bit15=o0, bits[14:10]=Ra, bits[9:5]=Rn, bits[4:0]=Rd. */
-function buildPac3(sf: number, op31: number, rm: number, rn: number, rd: number, o0 = 0): number {
+function buildPac3(_sf: number, op31: number, rm: number, rn: number, rd: number, o0 = 0): number {
   return (
     (0xda000000 |
       ((op31 & 0b111) << 21) |

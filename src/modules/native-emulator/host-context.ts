@@ -17,6 +17,10 @@ export interface HostContext {
   saveRegs?(): number;
   /** Restore registers from a snapshot handle previously returned by saveRegs(). */
   restoreRegs?(handle: number): void;
+  /** Read a multi-byte value from guest memory (LE). */
+  loadValue?(address: number, bytes: number): bigint;
+  /** Write a multi-byte value to guest memory (LE). */
+  storeValue?(address: number, bytes: number, value: bigint): void;
 }
 
 export type HostFunction = (ctx: HostContext) => bigint | number | void;

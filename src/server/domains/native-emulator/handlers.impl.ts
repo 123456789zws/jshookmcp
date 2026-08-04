@@ -584,7 +584,7 @@ export class NativeEmulatorHandlers {
         } else if (rn >= 32 && rn <= 63) {
           // d-register: write 128-bit vector with upper 64 bits zeroed (ARM64 ABI)
           const bytes = new Uint8Array(16); // zero-initialized → upper half = 0
-          new DataView(bytes.buffer).setFloat64(0, val, true);
+          new DataView(bytes.buffer).setFloat64(0, Number(val), true);
           engine['registerFile'].writeVector(rn - 32, bytes);
           set.push(`d${rn - 32}=${val}`);
         }
@@ -1225,10 +1225,10 @@ export class NativeEmulatorHandlers {
           const off = i * wordSize;
           if (off + wordSize > bytes.length) break; // truncated read
           const word =
-            (bytes[off] |
-              (bytes[off + 1] << 8) |
-              (bytes[off + 2] << 16) |
-              (bytes[off + 3] << 24)) >>>
+            (bytes[off]! |
+              (bytes[off + 1]! << 8) |
+              (bytes[off + 2]! << 16) |
+              (bytes[off + 3]! << 24)) >>>
             0;
           const pc = pcStart + BigInt(i * wordSize);
           let asm: string;
@@ -1461,7 +1461,12 @@ export class NativeEmulatorHandlers {
       if (index !== undefined) {
         // Single index lookup
         const addr = session.emulator.getJniStubAddress(index);
-        return { sessionId: session.id, index, stubAddress: `0x${addr.toString(16)}`, bound: addr !== 0 };
+        return {
+          sessionId: session.id,
+          index,
+          stubAddress: `0x${addr.toString(16)}`,
+          bound: addr !== 0,
+        };
       }
       // Return all bound stub addresses
       const all = session.emulator.getJniStubAddresses();
@@ -1549,12 +1554,12 @@ export class NativeEmulatorHandlers {
           entries = session.emulator.bionicDlsymDiagnostics();
           break;
         case 'snapshot': {
-          const copy = [...session.emulator.bionic.dlsymLog];
+          const copy = [...(session.emulator as any).bionic.dlsymLog];
           entries = copy;
           break;
         }
         case 'clear':
-          session.emulator.bionic.dlsymLog.length = 0;
+          (session.emulator as any).bionic.dlsymLog.length = 0;
           break;
       }
       return { sessionId: session.id, action, entries, count: entries.length };
@@ -1667,13 +1672,13 @@ export class NativeEmulatorHandlers {
       // Write ctx
       const ctxLimit = Math.min(ctxVals.length, ctxCount);
       for (let i = 0; i < ctxLimit; i++) {
-        writeU64(ctxBase + i * 8, parseVal(ctxVals[i]));
+        writeU64(ctxBase + i * 8, parseVal(ctxVals[i]!));
       }
 
       // Write table
       const tableLimit = Math.min(tableVals.length, tableCount);
       for (let i = 0; i < tableLimit; i++) {
-        writeU64(tableBase + i * 8, parseVal(tableVals[i]));
+        writeU64(tableBase + i * 8, parseVal(tableVals[i]!));
       }
 
       // Write output buffer
@@ -1739,7 +1744,7 @@ export class NativeEmulatorHandlers {
       const ctxLimit = Math.min(expectedCtx.length, 32);
       for (let i = 0; i < ctxLimit; i++) {
         const native = readU64(ctxBase + i * 8);
-        const expected = parseVal(expectedCtx[i]);
+        const expected = parseVal(expectedCtx[i]!);
         if (native !== expected) {
           ctxDiffs.push({ index: i, native: fmtHex(native), expected: fmtHex(expected) });
         }
@@ -1750,7 +1755,7 @@ export class NativeEmulatorHandlers {
       const tableLimit = Math.min(expectedTable.length, 32);
       for (let i = 0; i < tableLimit; i++) {
         const native = readU64(tableBase + i * 8);
-        const expected = parseVal(expectedTable[i]);
+        const expected = parseVal(expectedTable[i]!);
         if (native !== expected) {
           tableDiffs.push({ index: i, native: fmtHex(native), expected: fmtHex(expected) });
         }
@@ -1824,7 +1829,7 @@ export class NativeEmulatorHandlers {
       const group = w & 0x1f;
       const sub = (w >>> 5) & 0xf;
       const a1 = (w >>> 9) & 0x1f;
-      let rawImm = (w >>> 14) & 0x1fff;
+      const rawImm = (w >>> 14) & 0x1fff;
       const imm = rawImm < 0x1000 ? rawImm : rawImm - 0x2000; // sign-extend 13-bit
       const fl = (w >>> 27) & 0x1f;
 
@@ -1835,12 +1840,12 @@ export class NativeEmulatorHandlers {
       const g3_f3 = (w >>> 19) & 0x1f;
       const g4_lsr = (w >>> 9) & 0x1f;
       const g4_ctx4 = (w >>> 22) & 0x1f;
-      let rawG5 = (w >>> 5) & 0x3fffff;
+      const rawG5 = (w >>> 5) & 0x3fffff;
       const g5_imm = rawG5 < 0x200000 ? rawG5 : rawG5 - 0x400000;
       const g6_a1 = (w >>> 5) & 0x1f;
       const g6_sub = (w >>> 10) & 0x1f;
       const g7_operand = (w >>> 5) & 0x1f;
-      let rawOff = (w >>> 10) & 0x1fff;
+      const rawOff = (w >>> 10) & 0x1fff;
       const g7_offset = rawOff < 0x1000 ? rawOff : rawOff - 0x2000;
 
       // ASCII check — if all 4 bytes are printable ASCII, it's data not an opcode
@@ -1911,7 +1916,7 @@ export class NativeEmulatorHandlers {
         const group = w & 0x1f;
         const sub = (w >>> 5) & 0xf;
         const a1 = (w >>> 9) & 0x1f;
-        let rawImm = (w >>> 14) & 0x1fff;
+        const rawImm = (w >>> 14) & 0x1fff;
         const imm = rawImm < 0x1000 ? rawImm : rawImm - 0x2000;
         const fl = (w >>> 27) & 0x1f;
         const b0 = w & 0xff,
@@ -1946,10 +1951,10 @@ export class NativeEmulatorHandlers {
       const words: number[] = [];
       for (let i = 0; i < count && i * 4 + 4 <= bytes.length; i++) {
         words.push(
-          (bytes[i * 4] |
-            (bytes[i * 4 + 1] << 8) |
-            (bytes[i * 4 + 2] << 16) |
-            (bytes[i * 4 + 3] << 24)) >>>
+          (bytes[i * 4]! |
+            (bytes[i * 4 + 1]! << 8) |
+            (bytes[i * 4 + 2]! << 16) |
+            (bytes[i * 4 + 3]! << 24)) >>>
             0,
         );
       }
@@ -2081,7 +2086,6 @@ export class NativeEmulatorHandlers {
       const addr = argNumber(args, 'address');
       const count = Math.min(argNumber(args, 'count', 64), 256);
       const wordSize = argString(args, 'wordSize', 'u64') as 'u32' | 'u64';
-      const cols = argNumber(args, 'columns', 4);
       if (addr === undefined) throw new Error('address is required');
 
       const bytesPerWord = wordSize === 'u32' ? 4 : 8;
@@ -2096,7 +2100,7 @@ export class NativeEmulatorHandlers {
         const g = w & 0x1f;
         const s = (w >>> 5) & 0xf;
         const a = (w >>> 9) & 0x1f;
-        let ri = (w >>> 14) & 0x1fff;
+        const ri = (w >>> 14) & 0x1fff;
         const imm = ri < 0x1000 ? ri : ri - 0x2000;
         const fl = (w >>> 27) & 0x1f;
         const b0 = w & 0xff,
@@ -2137,10 +2141,10 @@ export class NativeEmulatorHandlers {
           valHex = `0x${val.toString(16).toUpperCase().padStart(16, '0')}`;
         } else {
           val = BigInt(
-            (bytes[off] |
-              (bytes[off + 1] << 8) |
-              (bytes[off + 2] << 16) |
-              (bytes[off + 3] << 24)) >>>
+            (bytes[off]! |
+              (bytes[off + 1]! << 8) |
+              (bytes[off + 2]! << 16) |
+              (bytes[off + 3]! << 24)) >>>
               0,
           );
           valHex = `0x${val.toString(16).toUpperCase().padStart(8, '0')}`;
@@ -2199,7 +2203,10 @@ export class NativeEmulatorHandlers {
       const readU64 = (off: number) =>
         new DataView(bytes.buffer, bytes.byteOffset + off, 8).getBigUint64(0, true);
       const readU32 = (off: number) =>
-        (bytes[off] | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>>
+        (bytes[off]! |
+          (bytes[off + 1]! << 8) |
+          (bytes[off + 2]! << 16) |
+          (bytes[off + 3]! << 24)) >>>
         0;
       const fmt = (v: bigint | number) =>
         `0x${BigInt(v).toString(16).toUpperCase().padStart(16, '0')}`;
@@ -2406,7 +2413,11 @@ function decodeBionicOptions(
     }
   }
   const extraSymbols = new Map<string, number>();
-  if (typeof extraSymbolsValue === 'object' && extraSymbolsValue !== null && !Array.isArray(extraSymbolsValue)) {
+  if (
+    typeof extraSymbolsValue === 'object' &&
+    extraSymbolsValue !== null &&
+    !Array.isArray(extraSymbolsValue)
+  ) {
     for (const [name, addr] of Object.entries(extraSymbolsValue)) {
       if (typeof addr === 'number') extraSymbols.set(name, addr);
     }

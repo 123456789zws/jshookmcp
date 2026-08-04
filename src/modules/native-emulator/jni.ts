@@ -439,7 +439,7 @@ export class JniEnvironment {
     b(JNI_INDEX.SetStaticIntField, () => undefined);
 
     // Object creation
-    b(JNI_INDEX.NewObject, (ctx) => {
+    b(JNI_INDEX.NewObject, (_ctx) => {
       // jobject NewObject(JNIEnv*, jclass, jmethodID, ...)
       // Return a non-NULL auto-object handle so null-checks pass.
       return BigInt(this.allocHandle({ kind: 'auto-object', desc: 'java/lang/Object' }));
@@ -487,12 +487,12 @@ export class JniEnvironment {
     // Extended slots for metasec_ml dispatcher (JNI cache entries 280-336).
     // Map guesses based on observed JNI call patterns (CallBooleanMethodV in diag).
     // If mapping is wrong, JNI diag will show the actual call; swap to match.
-    b(JNI_INDEX.ExtFunc_280, (ctx) => this.jniFindClass(ctx));       // FindClass
-    b(JNI_INDEX.ExtFunc_300, (ctx) => this.jniGetMethodID(ctx));      // GetMethodID
+    b(JNI_INDEX.ExtFunc_280, (ctx) => this.jniFindClass(ctx)); // FindClass
+    b(JNI_INDEX.ExtFunc_300, (ctx) => this.jniGetMethodID(ctx)); // GetMethodID
     b(JNI_INDEX.ExtFunc_316, (ctx) => this.jniGetStringUTFChars(ctx)); // GetStringUTFChars
-    b(JNI_INDEX.ExtFunc_322, (ctx) => this.jniCallMethod(ctx));        // CallObjectMethod
-    b(JNI_INDEX.ExtFunc_326, (ctx) => this.jniNewStringUTF(ctx));      // NewStringUTF
-    b(JNI_INDEX.ExtFunc_336, (ctx) => this.jniCallMethod(ctx));        // CallBooleanMethodV
+    b(JNI_INDEX.ExtFunc_322, (ctx) => this.jniCallMethod(ctx)); // CallObjectMethod
+    b(JNI_INDEX.ExtFunc_326, (ctx) => this.jniNewStringUTF(ctx)); // NewStringUTF
+    b(JNI_INDEX.ExtFunc_336, (ctx) => this.jniCallMethod(ctx)); // CallBooleanMethodV
 
     // ── Auto-fill every remaining NULL slot with a diagnostic stub ──────────
     // Instead of pre-baking every JNI function, we fill unfilled table entries

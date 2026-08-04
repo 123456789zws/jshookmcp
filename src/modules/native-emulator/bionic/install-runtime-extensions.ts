@@ -122,7 +122,8 @@ export function installSystemExtensionStubs(lib: BionicLibrary, options: BionicO
     if (!entry) return BigInt(-1);
     const toRead = Math.min(count, entry.data.length - entry.offset);
     if (toRead <= 0) return 0n;
-    for (let i = 0; i < toRead; i++) ctx.write(buf + i, entry.data[entry.offset + i]!);
+    for (let i = 0; i < toRead; i++)
+      ctx.write(buf + i, new Uint8Array([entry.data[entry.offset + i]!]));
     entry.offset += toRead;
     return BigInt(toRead);
   });
