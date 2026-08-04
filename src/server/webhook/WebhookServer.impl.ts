@@ -2,6 +2,11 @@ import { timingSafeEqual } from 'node:crypto';
 import { createHmac } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
+import {
+  WEBHOOK_QUEUE_MAX_RETRIES,
+  WEBHOOK_QUEUE_MAX_SIZE,
+  WEBHOOK_QUEUE_RETRY_DELAY_MS,
+} from '@src/constants';
 import { CommandQueueImpl } from './CommandQueue.impl.js';
 
 export type WebhookEvent =
@@ -103,7 +108,7 @@ export class WebhookServerImpl extends EventEmitter {
   private readonly endpoints = new Map<string, RegisteredEndpoint>();
   private readonly eventHandlers = new Map<WebhookEvent, WebhookHandler[]>();
   private readonly port: number;
-  private readonly commandQueue?: CommandQueueImpl;
+  private readonly commandQueue: CommandQueueImpl;
   private readonly stats: WebhookStats = {
     eventsRegistered: 0,
     webhooksSent: 0,
@@ -115,7 +120,22 @@ export class WebhookServerImpl extends EventEmitter {
   constructor(options: WebhookServerOptions = {}) {
     super();
     this.port = typeof options.port === 'number' ? options.port : 18_789;
-    this.commandQueue = options.commandQueue;
+    // The queue is owned by the server (created here when not injected), so
+    // its lifecycle always matches the server's: stopping the server releases
+    // the queue, and any code that enqueues through getCommandQueue() talks to
+    // the SAME instance the HTTP handler drains.
+    this.commandQueue =
+      options.commandQueue ??
+      new CommandQueueImpl({
+        maxQueueSize: WEBHOOK_QUEUE_MAX_SIZE,
+        maxRetries: WEBHOOK_QUEUE_MAX_RETRIES,
+        retryDelay: WEBHOOK_QUEUE_RETRY_DELAY_MS,
+      });
+  }
+
+  /** The command queue the HTTP handler drains — shared with enqueue callers. */
+  getCommandQueue(): CommandQueueImpl {
+    return this.commandQueue;
   }
 
   registerEndpoint(config: RegisteredEndpointInput): string {

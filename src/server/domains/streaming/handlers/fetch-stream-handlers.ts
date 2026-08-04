@@ -23,6 +23,11 @@ import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
 } from '@modules/collector/PageController';
+import {
+  SSE_BUFFER_MAX_BYTES,
+  STREAMING_MAX_EVENTS,
+  WS_PAYLOAD_PREVIEW_LIMIT,
+} from '@src/constants/streaming';
 
 type ExportFormat = 'json' | 'ndjson';
 
@@ -30,11 +35,29 @@ const parseExportFormat = (value: unknown): ExportFormat =>
   value === 'ndjson' ? 'ndjson' : 'json';
 
 /**
+ * localStorage marker key for the fetch-stream persistent-disable switch.
+ * The marker survives navigations, so the evaluateOnNewDocument injection
+ * script can come up disabled on fresh pages after a disable() call. The key
+ * lives once here and is passed into every browser-serialized script as an
+ * argument (module scope is unreachable inside String(fn)-serialized code).
+ */
+const FETCH_STREAM_DISABLED_MARKER = '__jshookFetchStreamMonitorDisabled';
+
+/**
  * Runs in the browser. Wraps window.fetch; for text/event-stream responses it
  * clones the body and parses SSE frames. Events land in window.__jshookFetchStreamMonitor.
  * Self-contained (no closure over module scope) so it survives serialization.
  */
-function fetchStreamInjectionFn(config: { maxEvents: number; urlFilterRaw?: string }): unknown {
+function fetchStreamInjectionFn(config: {
+  maxEvents: number;
+  urlFilterRaw?: string;
+  /** Reassembly buffer cap (bytes); canonical value SSE_BUFFER_MAX_BYTES. */
+  maxBufferBytes?: number;
+  /** Data preview truncation limit; canonical value WS_PAYLOAD_PREVIEW_LIMIT. */
+  previewLimit?: number;
+  /** Persistent-disable localStorage key; canonical value FETCH_STREAM_DISABLED_MARKER. */
+  disableMarkerKey?: string;
+}): unknown {
   type FsEvent = {
     sourceUrl: string;
     eventType: string;
@@ -66,9 +89,31 @@ function fetchStreamInjectionFn(config: { maxEvents: number; urlFilterRaw?: stri
       fetch: typeof fetch;
     };
 
+  // Persistent-disable marker: `fetch_stream_monitor(disable)` writes it to
+  // localStorage, which survives navigations. This script re-runs on every
+  // page load (evaluateOnNewDocument) and MUST come up disabled while the
+  // marker is set — otherwise disable has no effect on new pages. The key is
+  // passed via config (the handler supplies FETCH_STREAM_DISABLED_MARKER);
+  // the fallback literal covers standalone invocation of this serialized
+  // script, which cannot see module scope.
+  const disableMarkerKey = config.disableMarkerKey ?? '__jshookFetchStreamMonitorDisabled';
+  let persistentlyDisabled = false;
+  try {
+    persistentlyDisabled =
+      typeof localStorage !== 'undefined' && localStorage.getItem(disableMarkerKey) === '1';
+  } catch {
+    // localStorage can throw in sandboxed iframes — treat as enabled.
+  }
+
+  // Truncation + buffer caps, supplied by the handler from the streaming
+  // constants module (WS_PAYLOAD_PREVIEW_LIMIT / SSE_BUFFER_MAX_BYTES); the
+  // fallbacks keep the serialized script self-contained.
+  const previewLimit = config.previewLimit ?? 200;
+  const bufferCapBytes = config.maxBufferBytes ?? 1024 * 1024;
+
   if (!gw.__jshookFetchStreamMonitor) {
     gw.__jshookFetchStreamMonitor = {
-      enabled: true,
+      enabled: !persistentlyDisabled,
       patched: false,
       maxEvents: config.maxEvents,
       urlFilterRaw: config.urlFilterRaw,
@@ -77,7 +122,10 @@ function fetchStreamInjectionFn(config: { maxEvents: number; urlFilterRaw?: stri
     };
   }
   const state = gw.__jshookFetchStreamMonitor;
-  state.enabled = true;
+  // NOTE: the marker is only READ here — clearing it is the enable handler's
+  // job (this script cannot distinguish a browser-driven re-injection after
+  // disable from an explicit enable() call).
+  state.enabled = !persistentlyDisabled;
   state.maxEvents = config.maxEvents;
   state.urlFilterRaw = config.urlFilterRaw;
   if (state.events.length > state.maxEvents) state.events = state.events.slice(-state.maxEvents);
@@ -113,7 +161,8 @@ function fetchStreamInjectionFn(config: { maxEvents: number; urlFilterRaw?: stri
   ): void => {
     if (!state.enabled || !shouldCapture(sourceUrl)) return;
     const dataString = safeString(rawData);
-    const preview = dataString.length > 200 ? `${dataString.slice(0, 200)}…` : dataString;
+    const preview =
+      dataString.length > previewLimit ? `${dataString.slice(0, previewLimit)}…` : dataString;
     const record: FsEvent = {
       sourceUrl,
       eventType,
@@ -192,6 +241,9 @@ function fetchStreamInjectionFn(config: { maxEvents: number; urlFilterRaw?: stri
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > bufferCapBytes) {
+          buffer = buffer.slice(-bufferCapBytes);
+        }
         let sep = findSep(buffer);
         while (sep) {
           const block = buffer.slice(0, sep.offset);
@@ -266,11 +318,29 @@ export class FetchStreamHandlers {
     options?: { persistent?: boolean },
   ): Promise<unknown> {
     const page = await this.s.collector.getActivePage();
+    // An explicit enable() clears the persistent-disable marker first — the
+    // injection script honours the marker and cannot distinguish a browser-
+    // driven re-injection (after disable) from this explicit call.
+    await evaluateWithTimeout(
+      page,
+      (args: { markerKey: string }) => {
+        try {
+          localStorage.removeItem(args.markerKey);
+        } catch {
+          /* sandboxed iframe — marker cannot be cleared */
+        }
+      },
+      { markerKey: FETCH_STREAM_DISABLED_MARKER },
+    );
+    const injectionConfig = {
+      maxEvents,
+      urlFilterRaw,
+      maxBufferBytes: SSE_BUFFER_MAX_BYTES,
+      previewLimit: WS_PAYLOAD_PREVIEW_LIMIT,
+      disableMarkerKey: FETCH_STREAM_DISABLED_MARKER,
+    };
     if (options?.persistent) {
-      await evaluateOnNewDocumentWithTimeout(page, fetchStreamInjectionFn, {
-        maxEvents,
-        urlFilterRaw,
-      });
+      await evaluateOnNewDocumentWithTimeout(page, fetchStreamInjectionFn, injectionConfig);
       return {
         success: true,
         message: 'fetch-stream monitor enabled (persistent — survives navigations)',
@@ -280,15 +350,12 @@ export class FetchStreamHandlers {
         existingEvents: 0,
       };
     }
-    return (await evaluateWithTimeout(page, fetchStreamInjectionFn, {
-      maxEvents,
-      urlFilterRaw,
-    })) as unknown;
+    return (await evaluateWithTimeout(page, fetchStreamInjectionFn, injectionConfig)) as unknown;
   }
 
   async handleFetchStreamMonitorEnable(args: Record<string, unknown>): Promise<TextToolResponse> {
     const maxEvents = parseNumberArg(args.maxEvents, {
-      defaultValue: 2000,
+      defaultValue: STREAMING_MAX_EVENTS,
       min: 1,
       max: 50000,
       integer: true,
@@ -314,11 +381,23 @@ export class FetchStreamHandlers {
 
   async handleFetchStreamMonitorDisable(_args: Record<string, unknown>): Promise<TextToolResponse> {
     const page = await this.s.collector.getActivePage();
-    await evaluateWithTimeout(page, () => {
-      const gw = window as Window &
-        typeof globalThis & { __jshookFetchStreamMonitor?: { enabled: boolean } };
-      if (gw.__jshookFetchStreamMonitor) gw.__jshookFetchStreamMonitor.enabled = false;
-    });
+    await evaluateWithTimeout(
+      page,
+      (args: { markerKey: string }) => {
+        // Persistent marker: without it, the evaluateOnNewDocument script that
+        // re-runs on every page load would flip `enabled` back to true on the
+        // next navigation, making disable a no-op for persistent monitors.
+        try {
+          localStorage.setItem(args.markerKey, '1');
+        } catch {
+          /* sandboxed iframe — current page still pauses below */
+        }
+        const gw = window as Window &
+          typeof globalThis & { __jshookFetchStreamMonitor?: { enabled: boolean } };
+        if (gw.__jshookFetchStreamMonitor) gw.__jshookFetchStreamMonitor.enabled = false;
+      },
+      { markerKey: FETCH_STREAM_DISABLED_MARKER },
+    );
     return asJson({
       success: true,
       message: 'fetch-stream monitor disabled (wrapper remains installed; capture paused)',

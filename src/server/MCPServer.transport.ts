@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
+  HTTP_CAPACITY_RETRY_AFTER_MS,
   MCP_HTTP_REQUEST_TIMEOUT_MS,
   MCP_HTTP_HEADERS_TIMEOUT_MS,
   MCP_HTTP_KEEPALIVE_TIMEOUT_MS,
@@ -86,7 +87,7 @@ export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
 
   const transport = new MultiplexedStreamableHttpTransport({
     maxSessions: ctx.config?.mcp?.browserFleetMaxLocalLeases ?? 4096,
-    capacityRetryAfterMs: 1_000,
+    capacityRetryAfterMs: HTTP_CAPACITY_RETRY_AFTER_MS,
     sessionIdleTtlMs: ctx.config?.mcp?.browserFleetLeaseTtlMs ?? 600_000,
     onSessionOpened: async (sessionId) => {
       const fleetRouter = getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter');

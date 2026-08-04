@@ -33,6 +33,19 @@ export const PCAPNG_BLOCK_TYPE = {
 /** Byte-Order Magic inside every Section Header Block. */
 export const PCAPNG_BYTE_ORDER_MAGIC = 0x1a2b3c4d;
 
+/**
+ * 32-bit word encoding the 64-bit "section length unspecified" marker
+ * (0xFFFFFFFFFFFFFFFF written as two words). A section with this marker
+ * extends to the end of the file.
+ */
+export const PCAPNG_SECTION_LENGTH_UNSPECIFIED = 0xffffffff;
+
+/**
+ * Default snaplen written into Interface Description Blocks when the caller
+ * does not supply one (262144 bytes — the value used by tcpdump/tshark).
+ */
+export const PCAPNG_DEFAULT_SNAPLEN = 0x00040000;
+
 const BLOCK_TYPE_NAMES: Record<number, string> = {
   [PCAPNG_BLOCK_TYPE.SECTION_HEADER]: 'SectionHeader',
   [PCAPNG_BLOCK_TYPE.INTERFACE_DESCRIPTION]: 'InterfaceDescription',
@@ -158,6 +171,10 @@ export interface PcapngWriteInterface {
   linkType: number;
   snapLen?: number;
   name?: string;
+  /** Timestamp resolution power: 6 = 10^-6 (micro, default), 9 = 10^-9 (nano). */
+  tsresol?: number;
+  /** When true, `tsresol` is the exponent of 2 (2^-tsresol) instead of 10. */
+  tsresolBase2?: boolean;
 }
 
 export interface PcapngWritePacket {

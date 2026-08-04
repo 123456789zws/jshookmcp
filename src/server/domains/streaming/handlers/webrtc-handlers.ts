@@ -22,6 +22,7 @@ import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
 } from '@modules/collector/PageController';
+import { STREAMING_MAX_EVENTS } from '@src/constants/streaming';
 
 type ExportFormat = 'json' | 'ndjson';
 
@@ -29,11 +30,25 @@ const parseExportFormat = (value: unknown): ExportFormat =>
   value === 'ndjson' ? 'ndjson' : 'json';
 
 /**
+ * localStorage marker key for the WebRTC persistent-disable switch — mirrors
+ * the fetch-stream monitor's marker (`__jshookFetchStreamMonitorDisabled`) so
+ * a persistent monitor can be turned off across navigations. The key lives
+ * once here and is passed into every browser-serialized script as an argument
+ * (module scope is unreachable inside String(fn)-serialized code).
+ */
+const WEBRTC_DISABLED_MARKER = '__jshookWebRtcMonitorDisabled';
+
+/**
  * Runs in the browser. Wraps window.RTCPeerConnection; for every data channel it
  * captures outbound send() and inbound message events into window.__jshookWebRtcMonitor.
  * Self-contained (no closure over module scope) so it survives serialization.
  */
-function webrtcInjectionFn(config: { maxEvents: number; urlFilterRaw?: string }): unknown {
+function webrtcInjectionFn(config: {
+  maxEvents: number;
+  urlFilterRaw?: string;
+  /** Persistent-disable localStorage key; canonical value WEBRTC_DISABLED_MARKER. */
+  disableMarkerKey?: string;
+}): unknown {
   type WEvent = {
     pcId: number;
     label: string;
@@ -52,7 +67,26 @@ function webrtcInjectionFn(config: { maxEvents: number; urlFilterRaw?: string })
     events: WEvent[];
     nextPcId: number;
     channels: number;
+    /** wrapped listener → original listener, so the app's
+     * removeEventListener('datachannel', original) finds the wrapper. */
+    wrappedListeners: WeakMap<object, object>;
   };
+
+  // Persistent-disable marker: `webrtc_monitor(disable)` writes it to
+  // localStorage, which survives navigations. This script re-runs on every
+  // page load (evaluateOnNewDocument) and MUST come up disabled while the
+  // marker is set — otherwise disable has no effect on new pages. The key is
+  // passed via config (the handler supplies WEBRTC_DISABLED_MARKER); the
+  // fallback literal covers standalone invocation of this serialized script,
+  // which cannot see module scope.
+  const disableMarkerKey = config.disableMarkerKey ?? '__jshookWebRtcMonitorDisabled';
+  let persistentlyDisabled = false;
+  try {
+    persistentlyDisabled =
+      typeof localStorage !== 'undefined' && localStorage.getItem(disableMarkerKey) === '1';
+  } catch {
+    // localStorage can throw in sandboxed iframes — treat as enabled.
+  }
 
   const gw = window as Window &
     typeof globalThis & {
@@ -61,17 +95,21 @@ function webrtcInjectionFn(config: { maxEvents: number; urlFilterRaw?: string })
 
   if (!gw.__jshookWebRtcMonitor) {
     gw.__jshookWebRtcMonitor = {
-      enabled: true,
+      enabled: !persistentlyDisabled,
       patched: false,
       maxEvents: config.maxEvents,
       urlFilterRaw: config.urlFilterRaw,
       events: [],
       nextPcId: 1,
       channels: 0,
+      wrappedListeners: new WeakMap(),
     };
   }
   const state = gw.__jshookWebRtcMonitor;
-  state.enabled = true;
+  // NOTE: the marker is only READ here — clearing it is the enable handler's
+  // job (this script cannot distinguish a browser-driven re-injection after
+  // disable from an explicit enable() call).
+  state.enabled = !persistentlyDisabled;
   state.maxEvents = config.maxEvents;
   state.urlFilterRaw = config.urlFilterRaw;
   if (state.events.length > state.maxEvents) state.events = state.events.slice(-state.maxEvents);
@@ -197,6 +235,7 @@ function webrtcInjectionFn(config: { maxEvents: number; urlFilterRaw?: string })
             if (typeof listener === 'function') listener.call(pc, ev);
             else listener.handleEvent(ev);
           };
+          state.wrappedListeners.set(listener, wrapped);
           return origAddEventListener(
             type as Parameters<RTCPeerConnection['addEventListener']>[0],
             wrapped as Parameters<RTCPeerConnection['addEventListener']>[1],
@@ -209,6 +248,32 @@ function webrtcInjectionFn(config: { maxEvents: number; urlFilterRaw?: string })
           opts as Parameters<RTCPeerConnection['addEventListener']>[2],
         );
       } as RTCPeerConnection['addEventListener'];
+
+      // removeEventListener must resolve the app's ORIGINAL listener to the
+      // wrapped one — the app never saw the wrapper, so a direct lookup would
+      // silently fail to remove the listener (and the capture stays active).
+      const origRemoveEventListener = pc.removeEventListener.bind(
+        pc,
+      ) as RTCPeerConnection['removeEventListener'];
+      pc.removeEventListener = function (
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        opts?: boolean | EventListenerOptions,
+      ) {
+        let target = listener;
+        if (listener) {
+          const wrapped = state.wrappedListeners.get(listener);
+          if (wrapped) {
+            target = wrapped as EventListenerOrEventListenerObject;
+            state.wrappedListeners.delete(listener);
+          }
+        }
+        return origRemoveEventListener(
+          type as Parameters<RTCPeerConnection['removeEventListener']>[0],
+          target as Parameters<RTCPeerConnection['removeEventListener']>[1],
+          opts as Parameters<RTCPeerConnection['removeEventListener']>[2],
+        );
+      } as RTCPeerConnection['removeEventListener'];
 
       return pc;
     } as unknown as {
@@ -248,8 +313,27 @@ export class WebRtcHandlers {
     options?: { persistent?: boolean },
   ): Promise<unknown> {
     const page = await this.s.collector.getActivePage();
+    // An explicit enable() clears the persistent-disable marker first — the
+    // injection script honours the marker and cannot distinguish a browser-
+    // driven re-injection (after disable) from this explicit call.
+    await evaluateWithTimeout(
+      page,
+      (args: { markerKey: string }) => {
+        try {
+          localStorage.removeItem(args.markerKey);
+        } catch {
+          /* sandboxed iframe — marker cannot be cleared */
+        }
+      },
+      { markerKey: WEBRTC_DISABLED_MARKER },
+    );
+    const injectionConfig = {
+      maxEvents,
+      urlFilterRaw,
+      disableMarkerKey: WEBRTC_DISABLED_MARKER,
+    };
     if (options?.persistent) {
-      await evaluateOnNewDocumentWithTimeout(page, webrtcInjectionFn, { maxEvents, urlFilterRaw });
+      await evaluateOnNewDocumentWithTimeout(page, webrtcInjectionFn, injectionConfig);
       return {
         success: true,
         message: 'WebRTC monitor enabled (persistent — survives navigations)',
@@ -259,15 +343,12 @@ export class WebRtcHandlers {
         existingEvents: 0,
       };
     }
-    return (await evaluateWithTimeout(page, webrtcInjectionFn, {
-      maxEvents,
-      urlFilterRaw,
-    })) as unknown;
+    return (await evaluateWithTimeout(page, webrtcInjectionFn, injectionConfig)) as unknown;
   }
 
   async handleWebRtcMonitorEnable(args: Record<string, unknown>): Promise<TextToolResponse> {
     const maxEvents = parseNumberArg(args.maxEvents, {
-      defaultValue: 2000,
+      defaultValue: STREAMING_MAX_EVENTS,
       min: 1,
       max: 50000,
       integer: true,
@@ -293,11 +374,23 @@ export class WebRtcHandlers {
 
   async handleWebRtcMonitorDisable(_args: Record<string, unknown>): Promise<TextToolResponse> {
     const page = await this.s.collector.getActivePage();
-    await evaluateWithTimeout(page, () => {
-      const gw = window as Window &
-        typeof globalThis & { __jshookWebRtcMonitor?: { enabled: boolean } };
-      if (gw.__jshookWebRtcMonitor) gw.__jshookWebRtcMonitor.enabled = false;
-    });
+    await evaluateWithTimeout(
+      page,
+      (args: { markerKey: string }) => {
+        // Persistent marker: without it, the evaluateOnNewDocument script that
+        // re-runs on every page load would flip `enabled` back to true on the
+        // next navigation, making disable a no-op for persistent monitors.
+        try {
+          localStorage.setItem(args.markerKey, '1');
+        } catch {
+          /* sandboxed iframe — current page still pauses below */
+        }
+        const gw = window as Window &
+          typeof globalThis & { __jshookWebRtcMonitor?: { enabled: boolean } };
+        if (gw.__jshookWebRtcMonitor) gw.__jshookWebRtcMonitor.enabled = false;
+      },
+      { markerKey: WEBRTC_DISABLED_MARKER },
+    );
     return asJson({
       success: true,
       message: 'WebRTC monitor disabled (wrapper remains installed; capture paused)',

@@ -7,11 +7,20 @@
  *  - `createDomainProxy`: generic lazy-init proxy (supports sync and async factories)
  *  - `resolveEnabledDomains`: derive enabled domain set from tools
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from '@utils/logger';
 import { getToolDomain } from '@server/ToolCatalog';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { ToolError } from '@errors/ToolError';
 import type { MCPServerContext } from '@server/MCPServer.context';
+
+/**
+ * Tracks whether code is executing inside any domain factory. AsyncLocalStorage
+ * propagates across await points, so an async factory that re-enters a proxy
+ * after suspending is still detected — while concurrent external access (a
+ * different task waiting on the in-flight init) is not misclassified.
+ */
+const activeFactoryContext = new AsyncLocalStorage<boolean>();
 
 function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
   return (
@@ -53,7 +62,12 @@ export function createDomainProxy<T extends object>(
   let initPromise: Promise<T> | undefined;
   let instance: T | undefined;
   let factoryKind: 'unknown' | 'sync' | 'async' = 'unknown';
-  let factoryDepth = 0; // Tracks nested factory calls for circular init detection
+  /**
+   * True while the factory is executing — for async factories this stays true
+   * while the factory is suspended on an await, unlike a plain depth counter
+   * whose finally block resets it synchronously.
+   */
+  let initializing = false;
 
   function bindPropertyValue(targetInstance: T, prop: PropertyKey): unknown {
     const value = (targetInstance as Record<PropertyKey, unknown>)[prop];
@@ -62,38 +76,55 @@ export function createDomainProxy<T extends object>(
 
   function initialize(): T | Promise<T> {
     if (instance) return instance;
+
+    if (initializing) {
+      if (activeFactoryContext.getStore() === true) {
+        // The factory itself (sync body, or async continuation after an await)
+        // re-entered this proxy before init finished — circular dependency.
+        // Fail fast instead of dead-locking on a promise that can only resolve
+        // once this access returns.
+        throw new ToolError(
+          'RUNTIME',
+          `${label}: circular initialization detected for domain "${domain}"`,
+          { details: errorDetails },
+        );
+      }
+      // Concurrent access from OUTSIDE the factory: wait for the in-flight init.
+      return initPromise!;
+    }
     if (initPromise) return initPromise;
 
-    // Circular init guard: if the factory itself tries to access this proxy
-    // before it returns an instance or promise, fail fast.
-    if (factoryDepth > 0) {
-      throw new ToolError(
-        'RUNTIME',
-        `${label}: circular initialization detected for domain "${domain}"`,
-        { details: errorDetails },
-      );
+    logger.info(`Lazy-initializing ${label} for domain "${domain}"`);
+    initializing = true;
+    let created: T | Promise<T>;
+    try {
+      created = activeFactoryContext.run(true, () => factory());
+    } catch (error) {
+      initializing = false;
+      throw error;
     }
 
-    logger.info(`Lazy-initializing ${label} for domain "${domain}"`);
-    factoryDepth++;
-    try {
-      const created = factory();
-      if (isPromiseLike(created)) {
-        factoryKind = 'async';
-        initPromise = Promise.resolve(created).then((resolvedInstance) => {
+    if (isPromiseLike(created)) {
+      factoryKind = 'async';
+      initPromise = Promise.resolve(created).then(
+        (resolvedInstance) => {
+          initializing = false;
           instance = resolvedInstance;
           return resolvedInstance;
-        });
-        return initPromise;
-      }
-
-      factoryKind = 'sync';
-      instance = created;
-      initPromise = Promise.resolve(created);
-      return created;
-    } finally {
-      factoryDepth--;
+        },
+        (error: unknown) => {
+          initializing = false;
+          throw error;
+        },
+      );
+      return initPromise;
     }
+
+    initializing = false;
+    factoryKind = 'sync';
+    instance = created;
+    initPromise = Promise.resolve(created);
+    return created;
   }
 
   async function getOrCreateInstance(): Promise<T> {

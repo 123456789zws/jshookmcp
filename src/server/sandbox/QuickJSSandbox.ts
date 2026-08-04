@@ -22,15 +22,32 @@ import type {
 } from '@server/sandbox/types';
 import type { MCPBridge } from '@server/sandbox/MCPBridge';
 import { SANDBOX_HELPER_SOURCE } from '@server/sandbox/SandboxHelpers';
-import { SANDBOX_EXEC_TIMEOUT_MS, SANDBOX_MEMORY_LIMIT_MB } from '@src/constants';
+import {
+  SANDBOX_EXEC_TIMEOUT_MS,
+  SANDBOX_MEMORY_LIMIT_MB,
+  SANDBOX_MAX_BRIDGE_CALLS,
+} from '@src/constants';
 
 const DEFAULT_TIMEOUT_MS = SANDBOX_EXEC_TIMEOUT_MS;
 const DEFAULT_MEMORY_LIMIT_BYTES = SANDBOX_MEMORY_LIMIT_MB * 1024 * 1024;
-const DEFAULT_MAX_BRIDGE_CALLS = 10;
 
 type QuickJSModule = Awaited<ReturnType<typeof import('quickjs-emscripten').getQuickJS>>;
 
 let quickjsPromise: Promise<QuickJSModule> | null = null;
+
+/**
+ * Dispose every handle an evalCode result may carry.
+ *
+ * quickjs-emscripten's evalCode result is a union type that only exposes the
+ * `value` or the `error` side depending on the outcome, so the non-narrowed
+ * side needs an explicit cast to reach it. Disposing a missing handle is a
+ * no-op; disposing both when both exist prevents handle leaks.
+ */
+function disposeEvalResult(result: unknown): void {
+  const handles = result as { value?: QuickJSHandle; error?: QuickJSHandle };
+  handles.value?.dispose();
+  handles.error?.dispose();
+}
 
 function getQuickJS(): Promise<QuickJSModule> {
   if (!quickjsPromise) {
@@ -164,7 +181,9 @@ export class QuickJSSandbox {
 
       if (result.error) {
         const errorMsg = context.dump(result.error);
-        result.error.dispose();
+        // Disposes the error handle and any value handle the engine produced
+        // alongside it — otherwise the value leaks for the runtime's lifetime.
+        disposeEvalResult(result);
 
         if (timedOut) {
           return {
@@ -186,7 +205,7 @@ export class QuickJSSandbox {
       }
 
       const output = unmarshalFromQuickJS(context, result.value);
-      result.value.dispose();
+      disposeEvalResult(result);
 
       return {
         ok: true,
@@ -229,7 +248,7 @@ export class QuickJSSandbox {
     bridge: MCPBridge,
     options: OrchestrationOptions = {},
   ): Promise<OrchestrationResult> {
-    const maxBridgeCalls = options.maxBridgeCalls ?? DEFAULT_MAX_BRIDGE_CALLS;
+    const maxBridgeCalls = options.maxBridgeCalls ?? SANDBOX_MAX_BRIDGE_CALLS;
     const startTime = Date.now();
     const allLogs: string[] = [];
     const allBridgeCalls: BridgeCallRecord[] = [];
@@ -364,7 +383,7 @@ export class QuickJSSandbox {
 
       if (result.error) {
         const errorMsg = context.dump(result.error);
-        result.error.dispose();
+        disposeEvalResult(result);
 
         if (timedOut) {
           return {
@@ -386,7 +405,7 @@ export class QuickJSSandbox {
       }
 
       const output = unmarshalFromQuickJS(context, result.value);
-      result.value.dispose();
+      disposeEvalResult(result);
 
       return { ok: true, output, timedOut: false, durationMs: Date.now() - startTime, logs };
     } catch (err) {
@@ -444,11 +463,11 @@ export class QuickJSSandbox {
   private injectHelpers(ctx: QuickJSContext): void {
     const result = ctx.evalCode(SANDBOX_HELPER_SOURCE, 'sandbox-helpers.js');
     if (result.error) {
-      // Helpers failed to load — log but don't block execution
+      // Helpers failed to load — log but don't block execution.
       ctx.dump(result.error);
-      result.error.dispose();
+      disposeEvalResult(result);
     } else {
-      result.value.dispose();
+      disposeEvalResult(result);
     }
   }
 

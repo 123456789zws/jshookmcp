@@ -1,4 +1,9 @@
 import { V8InspectorClient } from '@modules/v8-inspector/V8InspectorClient';
+import {
+  MCP_V8_HEAP_SNAPSHOT_MAX_COUNT,
+  MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB,
+} from '@src/constants/server';
+import { isRecord } from '@utils/type-guards';
 import type { CDPSessionLike, TargetProvenance, TargetSessionResolver } from './cdp-session';
 import { enforceSnapshotRetention, persistSnapshot } from './snapshot-persistence';
 
@@ -52,19 +57,14 @@ export function getSnapshot(snapshotId: string): StoredHeapSnapshot | undefined 
 }
 
 /**
- * Read optional retention caps from the environment. Both default to 0
+ * Read optional retention caps from the constants layer. Both default to 0
  * (no eviction) so persistence never surprises the user with deletions; set
  * MCP_V8_HEAP_SNAPSHOT_MAX_COUNT / MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB to bound it.
  */
 function getRetentionConfig(): { maxCount: number; maxTotalBytes: number } {
-  const env = process.env;
-  const maxCount = Math.max(0, parseInt(env.MCP_V8_HEAP_SNAPSHOT_MAX_COUNT ?? '0', 10) || 0);
-  const maxTotalMb = Math.max(0, parseInt(env.MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB ?? '0', 10) || 0);
+  const maxCount = Math.max(0, MCP_V8_HEAP_SNAPSHOT_MAX_COUNT);
+  const maxTotalMb = Math.max(0, MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB);
   return { maxCount, maxTotalBytes: maxTotalMb * 1024 * 1024 };
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
 }
 
 function isCDPPageLike(v: unknown): v is {
@@ -94,6 +94,37 @@ function unwrapRuntimeValue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * In-page `performance.memory` read (Chromium-only): used/total/limit sizes,
+ * or null when the API is unavailable. Shared by the CDP-session fallback and
+ * the minimal page-evaluate fallback so both degrade identically.
+ */
+const PERFORMANCE_MEMORY_EXPRESSION = `(() => {
+  const m = performance.memory;
+  return m
+    ? {
+        jsHeapSizeUsed: m.usedJSHeapSize,
+        jsHeapSizeTotal: m.totalJSHeapSize,
+        jsHeapSizeLimit: m.jsHeapSizeLimit
+      }
+    : null;
+})()`;
+
+/** Extract the used heap size from a `performance.memory` evaluation result. */
+function extractUsedHeapSizeBytes(result: unknown): number {
+  if (typeof result === 'string') {
+    try {
+      result = JSON.parse(result) as unknown;
+    } catch {
+      return 0;
+    }
+  }
+  if (isRecord(result) && typeof result['jsHeapSizeUsed'] === 'number') {
+    return result['jsHeapSizeUsed'];
+  }
+  return 0;
+}
+
 interface CaptureReturn {
   success: boolean;
   snapshotId: string;
@@ -119,27 +150,33 @@ async function captureHeapSnapshotViaSession(
   onChunk: (chunk: string) => void,
 ): Promise<number> {
   await session.send('HeapProfiler.enable').catch(() => undefined);
-  return new Promise<number>((resolve, reject) => {
-    let totalSize = 0;
-    const chunkHandler = (data: unknown) => {
-      const chunk = (data as { chunk?: string } | null)?.chunk;
-      if (typeof chunk === 'string') {
-        totalSize += Buffer.byteLength(chunk, 'utf8');
-        onChunk(chunk);
-      }
-    };
-    session.on?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
-    session
-      .send('HeapProfiler.takeHeapSnapshot', { reportProgress: false })
-      .then(() => {
-        session.off?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
-        resolve(totalSize);
-      })
-      .catch((error: unknown) => {
-        session.off?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
-        reject(error);
-      });
-  });
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      let totalSize = 0;
+      const chunkHandler = (data: unknown) => {
+        const chunk = (data as { chunk?: string } | null)?.chunk;
+        if (typeof chunk === 'string') {
+          totalSize += Buffer.byteLength(chunk, 'utf8');
+          onChunk(chunk);
+        }
+      };
+      session.on?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
+      session
+        .send('HeapProfiler.takeHeapSnapshot', { reportProgress: false })
+        .then(() => {
+          session.off?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
+          resolve(totalSize);
+        })
+        .catch((error: unknown) => {
+          session.off?.('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
+          reject(error);
+        });
+    });
+  } finally {
+    // Every enable must be paired with a disable — even on the failure path —
+    // so the (collector-managed) attached session is left in its prior state.
+    await session.send('HeapProfiler.disable').catch(() => undefined);
+  }
 }
 
 export async function handleHeapSnapshotCapture(
@@ -292,38 +329,19 @@ export async function handleHeapSnapshotCapture(
       const sessionDetach = () => (session as { detach: () => Promise<void> }).detach();
 
       await sessionSend('HeapProfiler.enable');
-      const response = await sessionSend('Runtime.evaluate', {
-        expression: `
-          (() => {
-            const m = performance.memory;
-            return m
-              ? {
-                  jsHeapSizeUsed: m.usedJSHeapSize,
-                  jsHeapSizeTotal: m.totalJSHeapSize,
-                  jsHeapSizeLimit: m.jsHeapSizeLimit
-                }
-              : null;
-          })()
-        `,
-        returnByValue: true,
-      });
+      let response: unknown;
+      try {
+        response = await sessionSend('Runtime.evaluate', {
+          expression: PERFORMANCE_MEMORY_EXPRESSION,
+          returnByValue: true,
+        });
+      } finally {
+        // Pair the enable with a disable before the session is detached.
+        await sessionSend('HeapProfiler.disable').catch(() => undefined);
+      }
       await sessionDetach().catch(() => undefined);
 
-      const result = unwrapRuntimeValue(response);
-      const parsedResult =
-        typeof result === 'string'
-          ? (() => {
-              try {
-                return JSON.parse(result) as unknown;
-              } catch {
-                return null;
-              }
-            })()
-          : result;
-      let sizeBytes = 0;
-      if (isRecord(parsedResult) && typeof parsedResult['jsHeapSizeUsed'] === 'number') {
-        sizeBytes = parsedResult['jsHeapSizeUsed'];
-      }
+      const sizeBytes = extractUsedHeapSizeBytes(unwrapRuntimeValue(response));
 
       const stored = storeSnapshot({
         id: snapshotId,
@@ -339,25 +357,17 @@ export async function handleHeapSnapshotCapture(
     warnings.push(`Page-evaluate fallback failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  // Minimal fallback: attempt to get performance.memory via page.evaluate
+  // Minimal fallback: attempt to get performance.memory via page.evaluate.
+  // Runs the same shared expression as the CDP-session fallback above.
   let fallbackSizeBytes = 0;
   try {
     const page = await options.getPage();
-    const pageWithEvaluate = page as { evaluate?: (fn: () => unknown) => Promise<unknown> };
+    const pageWithEvaluate = page as {
+      evaluate?: (fn: string | (() => unknown)) => Promise<unknown>;
+    };
     if (pageWithEvaluate && typeof pageWithEvaluate.evaluate === 'function') {
-      const memInfo = (await pageWithEvaluate.evaluate(() => {
-        const m = (performance as any).memory;
-        return m
-          ? {
-              usedJSHeapSize: m.usedJSHeapSize ?? 0,
-              totalJSHeapSize: m.totalJSHeapSize ?? 0,
-              jsHeapSizeLimit: m.jsHeapSizeLimit ?? 0,
-            }
-          : null;
-      })) as { usedJSHeapSize?: number } | null;
-      if (memInfo && typeof memInfo.usedJSHeapSize === 'number') {
-        fallbackSizeBytes = memInfo.usedJSHeapSize;
-      }
+      const memInfo = await pageWithEvaluate.evaluate(PERFORMANCE_MEMORY_EXPRESSION);
+      fallbackSizeBytes = extractUsedHeapSizeBytes(memInfo);
     }
   } catch (e: unknown) {
     warnings.push(

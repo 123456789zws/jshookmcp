@@ -1,5 +1,10 @@
 import { EventEmitter } from 'node:events';
-import { WEBHOOK_PROCESS_TIMEOUT_MS } from '@src/constants';
+import {
+  WEBHOOK_PROCESS_TIMEOUT_MS,
+  WEBHOOK_QUEUE_MAX_RETRIES,
+  WEBHOOK_QUEUE_MAX_SIZE,
+  WEBHOOK_QUEUE_RETRY_DELAY_MS,
+} from '@src/constants';
 
 export type WebhookCommandStoredStatus = 'pending' | 'processing' | 'processed' | 'failed';
 export type WebhookCommandStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -52,13 +57,10 @@ export class CommandQueueImpl extends EventEmitter {
 
   constructor(options: CommandQueueOptions = {}) {
     super();
-    this.maxQueueSize = typeof options.maxQueueSize === 'number' ? options.maxQueueSize : 1000;
-    this.maxRetries = typeof options.maxRetries === 'number' ? options.maxRetries : 3;
-    this.retryDelay = typeof options.retryDelay === 'number' ? options.retryDelay : 0;
-    this.processTimeout =
-      typeof options.processTimeout === 'number'
-        ? options.processTimeout
-        : WEBHOOK_PROCESS_TIMEOUT_MS;
+    this.maxQueueSize = options.maxQueueSize ?? WEBHOOK_QUEUE_MAX_SIZE;
+    this.maxRetries = options.maxRetries ?? WEBHOOK_QUEUE_MAX_RETRIES;
+    this.retryDelay = options.retryDelay ?? WEBHOOK_QUEUE_RETRY_DELAY_MS;
+    this.processTimeout = options.processTimeout ?? WEBHOOK_PROCESS_TIMEOUT_MS;
   }
 
   enqueue(command: WebhookCommandInput): string {
@@ -216,15 +218,17 @@ export class CommandQueue extends CommandQueueImpl {
       }
     }
 
-    if (lastError !== undefined && this.retryDelay > 0) {
-      // Rate-limit: delay before the next retry attempt (fire-and-forget)
-      setTimeout(() => {}, this.retryDelay);
-    }
-
     if (finalStatus === 'processed') {
       const processed = this.updateStatus(id, 'processed');
       this.emit('processed', cloneCommand(processed));
     } else if (finalStatus === 'pending') {
+      // Rate-limit: actually wait retryDelay before handing the command back
+      // for another attempt — otherwise the next process() retries instantly.
+      if (this.retryDelay > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, this.retryDelay);
+        });
+      }
       command.retries += 1;
       const retried = this.updateStatus(id, 'pending', lastError);
       this.emit('retried', cloneCommand(retried));

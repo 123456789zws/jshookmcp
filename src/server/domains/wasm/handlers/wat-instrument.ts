@@ -32,7 +32,11 @@ export interface InstrumentWatResult {
 }
 
 const FUNC_RE = /^\s*\(func\b/;
-const FUNC_ATTR_RE = /^\(\s*(?:type|param|result|local|export)\b/;
+// Attribute sub-nodes of a function: (type ...), (param ...), (result ...),
+// (local ...), (export ...). NOTE: `local` must NOT match `(local.get` /
+// `(local.set` — those are body instructions. `\b` would match before the
+// `.`, so require whitespace or end-of-node after `local`.
+const FUNC_ATTR_RE = /^\(\s*(?:type|param|result|export)\b|^\(\s*local(?:\s|$)/;
 
 /**
  * Insert a `(call $traceFn (i32.const ordinal))` at the entry of a function
@@ -113,10 +117,11 @@ export function instrumentWat(wat: string, options?: InstrumentWatOptions): Inst
   }
 
   // Reassemble: splice instrumented nodes back inside the (module ...) wrapper.
+  // `slice(0, openParen + 1)` would drop the `module` keyword (leaving a bare
+  // `(`), so rebuild the wrapper explicitly.
   const moduleStart = wat.indexOf('(module');
-  const openParen = wat.indexOf('(', moduleStart);
   const closeParen = wat.lastIndexOf(')');
-  const prefix = wat.slice(0, openParen + 1);
+  const prefix = wat.slice(0, moduleStart) + '(module';
   const suffix = wat.slice(closeParen);
 
   const instrumented = `${prefix}\n  ${outNodes.join('\n')}\n${suffix}`;

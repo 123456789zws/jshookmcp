@@ -149,6 +149,9 @@ export function resolveInputFrom(
   const resolved: Record<string, unknown> = {};
 
   for (const [targetKey, sourceRef] of Object.entries(mapping)) {
+    // Untyped config (e.g. parsed JSON) may carry null/undefined sourceRefs —
+    // skip them instead of coercing to the strings "null"/"undefined".
+    if (typeof sourceRef !== 'string' || sourceRef.length === 0) continue;
     const template = sourceRef.startsWith('${') ? sourceRef : `\${${sourceRef}}`;
     resolved[targetKey] = dataBus.resolve(template);
   }

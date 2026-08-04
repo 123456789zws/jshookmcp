@@ -66,12 +66,16 @@ export class ElicitationBridge {
     }
 
     try {
+      // getToolRequestContext() returns null outside a tool-call execution
+      // (e.g. invoked from a background task) — resolve the request id
+      // defensively before deciding whether to route the reply back.
       const requestContext = getToolRequestContext();
+      const requestId = requestContext?.requestId ?? null;
       const result =
-        requestContext?.requestId === null || requestContext?.requestId === undefined
+        requestId === null
           ? await this.mcpServer.server.elicitInput(params)
           : await this.mcpServer.server.elicitInput(params, {
-              relatedRequestId: requestContext.requestId,
+              relatedRequestId: requestId,
             });
 
       return {

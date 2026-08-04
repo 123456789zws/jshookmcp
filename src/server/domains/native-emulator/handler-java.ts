@@ -1,8 +1,15 @@
 import type { EmulatorSession } from '@modules/native-emulator/SessionManager';
 import type { JavaMethodCall } from '@modules/native-emulator/jni';
 import { argNumber, argString } from '@server/domains/shared/parse-args';
+import { ToolError } from '@errors/ToolError';
 import type { ToolArgs } from '@server/types';
 import { toUint8 } from './handler-memory';
+
+/** JNI class descriptor for java.lang.String — used on every jstring mock handle. */
+const JNI_JAVA_LANG_STRING = 'java/lang/String';
+
+/** JNI class descriptor for a generic Object[] — used on objarray mock handles. */
+const JNI_JAVA_LANG_OBJECT_ARRAY = '[Ljava/lang/Object;';
 
 export interface JavaMockImpl {
   kind: 'int' | 'string' | 'bytes' | 'void' | 'conditional';
@@ -90,7 +97,7 @@ function buildConditionalDispatcher(
             call.jni.allocHandle({
               kind: 'mock-string',
               value: entry.value,
-              cls: 'java/lang/String',
+              cls: JNI_JAVA_LANG_STRING,
             }),
           ),
         );
@@ -136,16 +143,34 @@ export function buildJavaMockImpl(args: ToolArgs): JavaMockImpl {
   } else if (returnString !== undefined) {
     defaultFn = (call) =>
       BigInt(
-        call.jni.allocHandle({ kind: 'mock-string', value: returnString, cls: 'java/lang/String' }),
+        call.jni.allocHandle({
+          kind: 'mock-string',
+          value: returnString,
+          cls: JNI_JAVA_LANG_STRING,
+        }),
       );
     defaultKind = 'string';
   } else if (returnArray !== undefined) {
-    let arr: bigint[] = [];
+    let arr: bigint[];
     try {
-      arr = JSON.parse(returnArray).map((n: number) => BigInt(Math.trunc(n)));
-    } catch {}
+      const parsed: unknown = JSON.parse(returnArray);
+      if (!Array.isArray(parsed)) {
+        throw new Error(`expected a JSON array, got ${typeof parsed}`);
+      }
+      arr = parsed.map((n: unknown) => BigInt(Math.trunc(Number(n))));
+    } catch (error) {
+      // A malformed returnArray must NOT silently become an empty-array mock —
+      // that hides the error and produces a wrong native-call result.
+      throw new ToolError(
+        'VALIDATION',
+        `returnArray must be a JSON array of numbers: ${error instanceof Error ? error.message : String(error)}`,
+        { toolName: 'nemu_setup_java_mock' },
+      );
+    }
     defaultFn = (call) =>
-      BigInt(call.jni.allocHandle({ kind: 'objarray', value: arr, cls: '[Ljava/lang/Object;' }));
+      BigInt(
+        call.jni.allocHandle({ kind: 'objarray', value: arr, cls: JNI_JAVA_LANG_OBJECT_ARRAY }),
+      );
     defaultKind = 'array';
   } else if (returnObject !== undefined) {
     defaultFn = (call) =>
@@ -192,7 +217,7 @@ export function buildJavaFieldValue(session: EmulatorSession, args: ToolArgs): J
     const handle = session.emulator.jni.allocHandle({
       kind: 'mock-string',
       value: valueString,
-      cls: 'java/lang/String',
+      cls: JNI_JAVA_LANG_STRING,
     });
     return { kind: 'string', value: BigInt(handle) };
   }

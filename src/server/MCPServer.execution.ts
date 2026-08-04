@@ -19,6 +19,17 @@ import { refreshDomainTtlForTool } from '@server/MCPServer.activation.ttl';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { ToolArgs } from '@server/types';
 import {
+  ARGS_PREVIEW_MAX_CHARS,
+  COST_HINT_DEFAULT,
+  COST_HINT_FEEDBACK,
+  COST_HINT_MULTIPLIER,
+  COST_HINT_SEARCH,
+  COST_HINT_SECURITY,
+  COST_HINT_WORKFLOW,
+  DEFAULT_RETRY_AFTER_SEC,
+  TOOL_EXEC_HANG_WATCHDOG_MS,
+} from '@src/constants';
+import {
   BrowserSessionQueueError,
   parseBrowserSessionSnapshot,
   type BrowserSessionCoordinator,
@@ -60,17 +71,22 @@ export function estimateBrowserSessionToolCostMs(toolName: string, args: ToolArg
     if (value !== null) {
       // A timeout is an upper bound rather than an expected duration. The EWMA
       // replaces this conservative cold-start estimate after the first sample.
-      return Math.min(MAX_BROWSER_COST_HINT_MS, Math.max(MIN_BROWSER_COST_HINT_MS, value * 0.25));
+      return Math.min(
+        MAX_BROWSER_COST_HINT_MS,
+        Math.max(MIN_BROWSER_COST_HINT_MS, value * COST_HINT_MULTIPLIER),
+      );
     }
   }
 
   if (/captcha_(wait|solve)|widget_solve/.test(toolName)) return MAX_BROWSER_COST_HINT_MS;
   if (/page_(navigate|wait_for_selector)|debugger_.*wait|wait_for_debugger/.test(toolName)) {
-    return 7_500;
+    return COST_HINT_SEARCH;
   }
-  if (/human_mouse_move/.test(toolName)) return 600;
-  if (/human_scroll/.test(toolName)) return 1_500;
-  return /(^|_)(get|list|status|inspect|detect|stats|capabilities)(_|$)/.test(toolName) ? 50 : 250;
+  if (/human_mouse_move/.test(toolName)) return COST_HINT_FEEDBACK;
+  if (/human_scroll/.test(toolName)) return COST_HINT_SECURITY;
+  return /(^|_)(get|list|status|inspect|detect|stats|capabilities)(_|$)/.test(toolName)
+    ? COST_HINT_DEFAULT
+    : COST_HINT_WORKFLOW;
 }
 
 /**
@@ -81,7 +97,7 @@ export function estimateBrowserSessionToolCostMs(toolName: string, args: ToolArg
  */
 export async function executeToolWithTracking(ctx: MCPServerContext, name: string, args: ToolArgs) {
   let timeoutTimer: NodeJS.Timeout | undefined;
-  const timeoutMs = 30000;
+  const timeoutMs = TOOL_EXEC_HANG_WATCHDOG_MS;
   const collectExecutionMetrics = shouldCollectExecutionMetrics();
   const executionStartedAt = collectExecutionMetrics ? new Date().toISOString() : null;
   const executionStartTime = collectExecutionMetrics ? performance.now() : 0;
@@ -94,7 +110,7 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
         ? Math.ceil(
             (ctx.circuitBreaker.getRecoveryMs() - (Date.now() - state.lastFailureTime)) / 1000,
           )
-        : 30;
+        : DEFAULT_RETRY_AFTER_SEC;
       if (timeoutTimer) clearTimeout(timeoutTimer);
       return {
         content: [
@@ -134,7 +150,7 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
       const executeInContext = async () => {
         timeoutTimer = setTimeout(() => {
           try {
-            const safeArgs = JSON.stringify(args).slice(0, 500);
+            const safeArgs = JSON.stringify(args).slice(0, ARGS_PREVIEW_MAX_CHARS);
             logger.warn(
               `Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'. ` +
                 `Args preview: ${safeArgs}...`,
@@ -152,7 +168,7 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
             const response = await ctx.router.execute(name, args);
 
             // Keep browser-derived state reads inside the session AsyncLocalStorage scope.
-            ctx.largeDataOffloader.offload(name, response);
+            await ctx.largeDataOffloader.offload(name, response);
             if (toolDomain === 'browser') {
               browserCoordinator?.noteToolResult(
                 sessionId,
@@ -336,6 +352,10 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
       )
       ?.commit();
     if (admissionError) return errorResponse;
+    // Log the original error (including its stack) before re-throwing — the
+    // error response above only carries the message, and the throw would
+    // otherwise be the last trace of the failure.
+    logger.error(`Tool execution failed for '${name}':`, error);
     throw error;
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);

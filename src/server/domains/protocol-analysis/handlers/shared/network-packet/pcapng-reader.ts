@@ -18,6 +18,7 @@ import {
   OPT_IF_TSRESOL,
   PCAPNG_BLOCK_TYPE,
   PCAPNG_BYTE_ORDER_MAGIC,
+  PCAPNG_SECTION_LENGTH_UNSPECIFIED,
   blockTypeName,
   padTo4,
   type PcapngInterfaceInfo,
@@ -290,7 +291,8 @@ function parseSectionHeader(
   const sectionLengthHigh = readU32(buffer, block.bodyStart + 8, resolvedEndian);
   const sectionLengthLow = readU32(buffer, block.bodyStart + 12, resolvedEndian);
   const sectionLengthUnspecified =
-    sectionLengthHigh === 0xffffffff && sectionLengthLow === 0xffffffff;
+    sectionLengthHigh === PCAPNG_SECTION_LENGTH_UNSPECIFIED &&
+    sectionLengthLow === PCAPNG_SECTION_LENGTH_UNSPECIFIED;
   const sectionLengthHex = sectionLengthUnspecified
     ? 'unspecified'
     : (sectionLengthHigh >>> 0).toString(16).padStart(8, '0') +

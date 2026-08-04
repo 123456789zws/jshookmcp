@@ -229,14 +229,12 @@ export class MultiplexedStreamableHttpTransport implements Transport {
       try {
         await transport.handleRequest(req, res, parsedBody);
       } catch (error) {
-        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
         await transport.close().catch(() => undefined);
         throw error;
       }
 
       if (transport.sessionId) {
         if (transport.sessionId !== candidateSessionId) {
-          if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
           await transport.close().catch(() => undefined);
           throw new Error(
             `Inner HTTP transport changed its reserved session id from ` +
@@ -253,11 +251,16 @@ export class MultiplexedStreamableHttpTransport implements Transport {
           registered = true;
         }
       } else {
-        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
         await transport.close().catch(() => undefined);
       }
     } finally {
       this.pendingSessionAdmissions = Math.max(0, this.pendingSessionAdmissions - 1);
+      // Release the admission claim (fleet lease) on EVERY failure path —
+      // including createInnerTransport() throwing above, where the old code
+      // skipped the notification and leaked the lease.
+      if (!registered && admissionClaimed) {
+        this.notifySessionClosed(candidateSessionId);
+      }
       if (!registered && transport?.sessionId === candidateSessionId) {
         await transport.close().catch(() => undefined);
       }

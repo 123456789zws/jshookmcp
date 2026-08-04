@@ -8,6 +8,9 @@ import type {
   PcapPacketSummary,
 } from './types';
 
+/** Default snaplen for classic PCAP writes (libpcap's standard 65535). */
+export const PCAP_DEFAULT_SNAPLEN = 65535;
+
 export function writeUint32(
   buffer: Buffer,
   offset: number,

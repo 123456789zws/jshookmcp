@@ -12,7 +12,12 @@ import {
   ADB_COLD_START_WAIT_MS_DEFAULT,
   ADB_COLD_START_WAIT_MS_MAX,
   ADB_DEFAULT_TIMEOUT_MS,
+  ADB_DUMPSYS_SECTION_CAP,
   ADB_FILE_TRANSFER_TIMEOUT_MS,
+  ADB_SCREENRECORD_DURATION_CLAMP_MAX,
+  ADB_SCREENRECORD_DURATION_CLAMP_MIN,
+  ADB_SCREENRECORD_DURATION_DEFAULT,
+  ADB_UI_DUMP_CLEANUP_TIMEOUT_MS,
   ADB_LARGE_OUTPUT_MAX_BUFFER_BYTES,
   ADB_LOGCAT_MAX_LINES_DEFAULT,
   ADB_LOGCAT_MAX_LINES_MAX,
@@ -50,6 +55,13 @@ function serialArgs(serial: string): string[] {
   return serial ? ['-s', serial] : [];
 }
 
+interface AdbExecOptions {
+  allowNonZero?: boolean;
+  timeoutMs?: number;
+  maxBufferBytes?: number;
+}
+
+/** execAdb result when stdout is decoded as text (the default). */
 interface AdbExecResult {
   stdout: string;
   stderr: string;
@@ -57,73 +69,61 @@ interface AdbExecResult {
   signal?: string;
 }
 
-interface AdbExecOptions {
-  allowNonZero?: boolean;
-  timeoutMs?: number;
-  maxBufferBytes?: number;
+/** execAdb result when stdout is requested as raw bytes (`encoding: 'buffer'`). */
+interface AdbBufferResult {
+  stdout: Buffer;
+  stderr: string;
+  exitCode: number;
+  signal?: string;
 }
 
+/**
+ * Run an adb command via execFile. Defaults to text output; pass
+ * `encoding: 'buffer'` for binary stdout (e.g. `exec-out` captures).
+ */
 async function execAdb(
   adb: string,
   args: string[],
-  options: AdbExecOptions = {},
-): Promise<AdbExecResult> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      adb,
-      args,
-      {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: options.timeoutMs ?? ADB_DEFAULT_TIMEOUT_MS,
-        maxBuffer: options.maxBufferBytes ?? ADB_MAX_BUFFER_BYTES,
-      },
-      (err, out, errOut) => {
-        const result: AdbExecResult = {
-          stdout: out ?? '',
-          stderr: errOut ?? '',
-          exitCode:
-            typeof (err as { code?: unknown } | null)?.code === 'number'
-              ? ((err as { code: number }).code ?? 1)
-              : 0,
-          signal:
-            typeof (err as { signal?: unknown } | null)?.signal === 'string'
-              ? ((err as { signal: string }).signal ?? undefined)
-              : undefined,
-        };
-        if (err && !options.allowNonZero) {
-          reject(err);
-          return;
-        }
-        resolve(result);
-      },
-    );
-  });
-}
-
-async function execAdbBuffer(
+  options?: AdbExecOptions,
+): Promise<AdbExecResult>;
+async function execAdb(
   adb: string,
   args: string[],
-  options: AdbExecOptions = {},
-): Promise<{ stdout: Buffer; stderr: string; exitCode: number; signal?: string }> {
+  options: AdbExecOptions & { encoding: 'buffer' },
+): Promise<AdbBufferResult>;
+async function execAdb(
+  adb: string,
+  args: string[],
+  options: AdbExecOptions & { encoding?: BufferEncoding | 'buffer' } = {},
+): Promise<AdbExecResult | AdbBufferResult> {
+  const encoding = options.encoding ?? 'utf8';
   return new Promise((resolve, reject) => {
     execFile(
       adb,
       args,
       {
-        encoding: 'buffer',
+        encoding,
         windowsHide: true,
         timeout: options.timeoutMs ?? ADB_DEFAULT_TIMEOUT_MS,
         maxBuffer: options.maxBufferBytes ?? ADB_MAX_BUFFER_BYTES,
       },
       (err, out, errOut) => {
+        const bufferMode = encoding === 'buffer';
+        const stdout = bufferMode
+          ? Buffer.isBuffer(out)
+            ? out
+            : Buffer.from(out ?? '')
+          : Buffer.isBuffer(out)
+            ? out.toString('utf8')
+            : (out ?? '');
+        const stderr = Buffer.isBuffer(errOut)
+          ? errOut.toString('utf8')
+          : typeof errOut === 'string'
+            ? errOut
+            : '';
         const result = {
-          stdout: Buffer.isBuffer(out) ? out : Buffer.from(out ?? ''),
-          stderr: Buffer.isBuffer(errOut)
-            ? errOut.toString('utf8')
-            : typeof errOut === 'string'
-              ? errOut
-              : '',
+          stdout,
+          stderr,
           exitCode:
             typeof (err as { code?: unknown } | null)?.code === 'number'
               ? ((err as { code: number }).code ?? 1)
@@ -137,7 +137,7 @@ async function execAdbBuffer(
           reject(err);
           return;
         }
-        resolve(result);
+        resolve(result as AdbExecResult | AdbBufferResult);
       },
     );
   });
@@ -808,15 +808,12 @@ export class ADBBridgeHandlers {
         argString(args, 'localPath') ??
         join(tmpdir(), `jshook-adb-screenshot-${sanitizeLocalName(serial)}-${Date.now()}.png`);
       const adb = await this.resolveAdb();
-      const result = await execAdbBuffer(
-        adb,
-        [...serialArgs(serial), 'exec-out', 'screencap', '-p'],
-        {
-          allowNonZero: true,
-          timeoutMs: ADB_SHELL_TIMEOUT_MS,
-          maxBufferBytes: ADB_LARGE_OUTPUT_MAX_BUFFER_BYTES,
-        },
-      );
+      const result = await execAdb(adb, [...serialArgs(serial), 'exec-out', 'screencap', '-p'], {
+        allowNonZero: true,
+        timeoutMs: ADB_SHELL_TIMEOUT_MS,
+        maxBufferBytes: ADB_LARGE_OUTPUT_MAX_BUFFER_BYTES,
+        encoding: 'buffer',
+      });
       if (result.exitCode !== 0) {
         return {
           success: false,
@@ -851,8 +848,11 @@ export class ADBBridgeHandlers {
         argString(args, 'remotePath') ??
         `/sdcard/Download/jshook-screenrecord-${sanitizeLocalName(serial)}-${Date.now()}.mp4`;
       const durationSec = Math.max(
-        1,
-        Math.min(180, Math.floor(argNumber(args, 'durationSec') ?? 10)),
+        ADB_SCREENRECORD_DURATION_CLAMP_MIN,
+        Math.min(
+          ADB_SCREENRECORD_DURATION_CLAMP_MAX,
+          Math.floor(argNumber(args, 'durationSec') ?? ADB_SCREENRECORD_DURATION_DEFAULT),
+        ),
       );
       const bitRateMbps = argNumber(args, 'bitRateMbps');
       const size = argString(args, 'size');
@@ -891,23 +891,32 @@ export class ADBBridgeHandlers {
       }
 
       await mkdir(dirname(localPath), { recursive: true });
-      const pullResult = await execAdb(
-        adb,
-        [...serialArgs(serial), 'pull', remotePath, localPath],
-        {
+
+      let pullResult: AdbExecResult;
+      let cleanupExitCode: number | undefined;
+      try {
+        pullResult = await execAdb(adb, [...serialArgs(serial), 'pull', remotePath, localPath], {
           allowNonZero: true,
           timeoutMs: ADB_FILE_TRANSFER_TIMEOUT_MS,
           maxBufferBytes: ADB_MAX_BUFFER_BYTES,
-        },
-      );
-      const cleanupResult = await execAdb(
-        adb,
-        [...serialArgs(serial), 'shell', 'rm', '-f', remotePath],
-        {
-          allowNonZero: true,
-          timeoutMs: ADB_SHELL_TIMEOUT_MS,
-        },
-      );
+        });
+      } finally {
+        // Always remove the remote temp file — also when the pull times out or
+        // the local stat() below fails, otherwise the device keeps the
+        // recording. (A pull timeout surfaces as an execFile error that
+        // resolves with exitCode 0, then the missing local file makes stat()
+        // throw — without this finally the rm -f was skipped entirely.)
+        const cleanup = await execAdb(
+          adb,
+          [...serialArgs(serial), 'shell', 'rm', '-f', remotePath],
+          {
+            allowNonZero: true,
+            timeoutMs: ADB_SHELL_TIMEOUT_MS,
+          },
+        );
+        cleanupExitCode = cleanup.exitCode;
+      }
+
       if (pullResult.exitCode !== 0) {
         return {
           success: false,
@@ -917,7 +926,7 @@ export class ADBBridgeHandlers {
           durationSec,
           record: recordResult,
           pull: pullResult,
-          cleanupExitCode: cleanupResult.exitCode,
+          cleanupExitCode,
         };
       }
 
@@ -931,7 +940,7 @@ export class ADBBridgeHandlers {
         size: localStat.size,
         record: recordResult,
         pull: pullResult,
-        cleanupExitCode: cleanupResult.exitCode,
+        cleanupExitCode,
       };
     });
   }
@@ -1708,8 +1717,8 @@ export class ADBBridgeHandlers {
       return {
         service,
         sectionCount: parsed.sectionCount,
-        sections: parsed.sections.slice(0, 50), // cap for response size
-        truncated: parsed.sectionCount > 50,
+        sections: parsed.sections.slice(0, ADB_DUMPSYS_SECTION_CAP), // cap for response size
+        truncated: parsed.sectionCount > ADB_DUMPSYS_SECTION_CAP,
         stderr: stderr || undefined,
         ...(includeRaw ? { raw: stdout } : {}),
       };
@@ -1752,7 +1761,7 @@ export class ADBBridgeHandlers {
       // Clean up remote file
       await execAdb(adb, [...serialArgs(serial), 'shell', 'rm', remoteXmlPath], {
         allowNonZero: true,
-        timeoutMs: 5000,
+        timeoutMs: ADB_UI_DUMP_CLEANUP_TIMEOUT_MS,
       });
 
       // Read XML content
