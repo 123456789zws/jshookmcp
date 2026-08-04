@@ -8,6 +8,7 @@ import { DEFAULT_SEARCH_CONFIG } from '@src/config/search-defaults';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '@src/constants/search-model';
 import { logger } from './logger';
 import { getPackageVersion } from './packageVersion';
+import { isRecord } from './type-guards';
 import type {
   BrowserFleetWorkerConfig,
   Config,
@@ -100,6 +101,12 @@ const CONFIG_DEFAULTS = {
     maxConcurrentAnalysis: 3,
     maxCodeSizeMB: 10,
   },
+  offloader: {
+    detailThreshold: 512 * 1024, // 512KB
+    fileThreshold: 4 * 1024 * 1024, // 4MB
+    outputDir: 'artifacts/offloaded',
+    excludeTools: [],
+  },
   reverseEngineering: {
     transformWorkbench: {
       defaultPreviewBytes: 128,
@@ -108,6 +115,10 @@ const CONFIG_DEFAULTS = {
       maxInputBytes: 16 * 1024 * 1024,
       maxOutputBytes: 32 * 1024 * 1024,
       maxSteps: 32,
+    },
+    collector: {
+      defaultTimeoutMs: 30_000,
+      dynamicScriptWaitMs: 3_000,
     },
     reverseSession: {
       maxInlineTransformInputBytes: 16 * 1024 * 1024,
@@ -297,7 +308,21 @@ const ConfigSchema = z.object({
     z.number().min(1).max(500),
   ),
 
+  // Response offloading
+  OFFLOADER_DETAIL_THRESHOLD: envInt(CONFIG_DEFAULTS.offloader.detailThreshold).pipe(
+    z.number().min(1),
+  ),
+  OFFLOADER_FILE_THRESHOLD: envInt(CONFIG_DEFAULTS.offloader.fileThreshold).pipe(z.number().min(1)),
+  OFFLOADER_OUTPUT_DIR: z.string().optional().default(CONFIG_DEFAULTS.offloader.outputDir),
+  OFFLOADER_EXCLUDE_TOOLS: z.string().optional().default(''),
+
   // Reverse engineering runtime limits
+  COLLECTOR_DEFAULT_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.defaultTimeoutMs,
+  ).pipe(z.number().min(1)),
+  COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.dynamicScriptWaitMs,
+  ).pipe(z.number().min(1)),
   TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES: envInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.defaultPreviewBytes,
   ).pipe(z.number().min(1)),
@@ -451,10 +476,6 @@ const ConfigSchema = z.object({
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsModuleLimit,
   ).pipe(z.number().min(1)),
 });
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function parseJsonArrayEnv(key: string): unknown[] | undefined {
   const raw = process.env[key];
@@ -620,6 +641,16 @@ function ratioEnv(value: unknown, fallback: number): number {
 
 function stringEnv(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
+}
+
+function parseCsvList(value: unknown): string[] {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return [];
+  }
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function coerceBooleanEnv(value: unknown, fallback: boolean): boolean {
@@ -930,6 +961,16 @@ function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEng
         defaults.androidRuntime.mapsModuleLimit,
       ),
     },
+    collector: {
+      defaultTimeoutMs: positiveIntegerEnv(
+        env.COLLECTOR_DEFAULT_TIMEOUT_MS,
+        defaults.collector.defaultTimeoutMs,
+      ),
+      dynamicScriptWaitMs: positiveIntegerEnv(
+        env.COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS,
+        defaults.collector.dynamicScriptWaitMs,
+      ),
+    },
   };
 }
 
@@ -1065,6 +1106,18 @@ export function getConfig(): Config {
         env.MAX_CODE_SIZE_MB,
         CONFIG_DEFAULTS.performance.maxCodeSizeMB,
       ),
+    },
+    offloader: {
+      detailThreshold: coerceIntegerEnv(
+        env.OFFLOADER_DETAIL_THRESHOLD,
+        CONFIG_DEFAULTS.offloader.detailThreshold,
+      ),
+      fileThreshold: coerceIntegerEnv(
+        env.OFFLOADER_FILE_THRESHOLD,
+        CONFIG_DEFAULTS.offloader.fileThreshold,
+      ),
+      outputDir: stringEnv(env.OFFLOADER_OUTPUT_DIR, CONFIG_DEFAULTS.offloader.outputDir),
+      excludeTools: parseCsvList(env.OFFLOADER_EXCLUDE_TOOLS),
     },
     reverseEngineering: buildReverseEngineeringConfig(env),
     search,

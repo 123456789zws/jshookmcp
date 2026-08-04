@@ -6,6 +6,24 @@ export interface Config {
   performance: PerformanceConfig;
   search: SearchConfig;
   reverseEngineering: ReverseEngineeringConfig;
+  /** Large-data response offloading (LargeDataOffloader). Optional — omitted in tests. */
+  offloader?: OffloaderConfig;
+}
+
+/**
+ * Response-offloader tuning. Mirrors the OffloaderConfig accepted by
+ * LargeDataOffloader (@server/ToolResponseOffloader); excludeTools is
+ * expressed as a string[] here because it originates from a CSV env var.
+ */
+export interface OffloaderConfig {
+  /** Strings larger than this (bytes) go to DetailedDataManager. */
+  detailThreshold?: number;
+  /** Strings larger than this (bytes) go directly to a file. */
+  fileThreshold?: number;
+  /** Subdirectory under project root for offloaded files. */
+  outputDir?: string;
+  /** Tools excluded from offloading (comma-separated env). */
+  excludeTools?: string[];
 }
 
 export interface PuppeteerConfig {
@@ -110,6 +128,15 @@ export interface ReverseEngineeringConfig {
   dex: DexAnalysisConfig;
   frida: FridaAnalysisConfig;
   androidRuntime: AndroidRuntimeConfig;
+  collector: CollectorConfig;
+}
+
+/** Code-collection tuning used by the collector when options omit values. */
+export interface CollectorConfig {
+  /** Default navigation/collection timeout (ms) when not otherwise configured. */
+  defaultTimeoutMs: number;
+  /** How long to wait after navigation for late-loading dynamic scripts (ms). */
+  dynamicScriptWaitMs: number;
 }
 
 export interface TransformWorkbenchConfig {

@@ -41,6 +41,21 @@ export const APK_ZIP_MAGIC_HEX_HEADERS = csv('APK_ZIP_MAGIC_HEX_HEADERS', [
 ]);
 
 /* ================================================================== */
+/*  ADB dumpsys / UI dump / screenrecord                              */
+/* ================================================================== */
+
+/** Maximum dumpsys sections returned by adb_dumpsys (cap for response size). */
+export const ADB_DUMPSYS_SECTION_CAP = int('ADB_DUMPSYS_SECTION_CAP', 50);
+
+/** Timeout for the adb_ui_dump remote temp-file cleanup (`rm` on device). */
+export const ADB_UI_DUMP_CLEANUP_TIMEOUT_MS = int('ADB_UI_DUMP_CLEANUP_TIMEOUT_MS', 5_000);
+
+/** adb_screenrecord --time-limit clamp (seconds): min, max, and default. */
+export const ADB_SCREENRECORD_DURATION_CLAMP_MIN = int('ADB_SCREENRECORD_DURATION_CLAMP_MIN', 1);
+export const ADB_SCREENRECORD_DURATION_CLAMP_MAX = int('ADB_SCREENRECORD_DURATION_CLAMP_MAX', 180);
+export const ADB_SCREENRECORD_DURATION_DEFAULT = int('ADB_SCREENRECORD_DURATION_DEFAULT', 10);
+
+/* ================================================================== */
 /*  ADB logcat                                                         */
 /* ================================================================== */
 

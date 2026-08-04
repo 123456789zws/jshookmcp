@@ -158,6 +158,9 @@ export const HTTP_CLEANUP_INTERVAL_MS = int('HTTP_CLEANUP_INTERVAL_MS', 5 * 60_0
 /** Default SSE heartbeat interval (comment frames to keep the stream open). */
 export const SSE_HEARTBEAT_MS = int('SSE_HEARTBEAT_MS', 30_000);
 
+/** Retry-After (ms) returned by the HTTP transport when at session capacity. */
+export const HTTP_CAPACITY_RETRY_AFTER_MS = int('HTTP_CAPACITY_RETRY_AFTER_MS', 1_000);
+
 /* ================================================================== */
 /*  MCP structured logging                                             */
 /* ================================================================== */
@@ -170,6 +173,19 @@ export const MCP_LOG_LEVEL = str('MCP_LOG_LEVEL', 'info');
 
 /** Directory for file-based MCP log persistence. Empty = disabled. */
 export const MCP_LOG_FILE_DIR = str('MCP_LOG_FILE_DIR', '');
+
+/* ================================================================== */
+/*  V8 heap snapshot retention                                         */
+/* ================================================================== */
+
+/**
+ * Retention caps for persisted v8_inspector heap snapshots. Both default to 0
+ * (no eviction) so persistence never surprises the user with deletions; set
+ * MCP_V8_HEAP_SNAPSHOT_MAX_COUNT / MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB to bound
+ * the on-disk and in-memory snapshot store.
+ */
+export const MCP_V8_HEAP_SNAPSHOT_MAX_COUNT = int('MCP_V8_HEAP_SNAPSHOT_MAX_COUNT', 0);
+export const MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB = int('MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB', 0);
 
 /* ================================================================== */
 /*  Concurrency & resource limits                                      */
@@ -209,3 +225,40 @@ export const OFFLOAD_FIELD_SANITIZE_THRESHOLD_BYTES = int(
 /* ================================================================== */
 
 export const PROCESS_LIST_MAX_BUFFER_BYTES = int('PROCESS_LIST_MAX_BUFFER_BYTES', 1024 * 1024 * 10);
+
+/* ================================================================== */
+/*  Tool execution pipeline                                            */
+/* ================================================================== */
+
+/** Watchdog: warn when a tool execution exceeds this duration (ms). */
+export const TOOL_EXEC_HANG_WATCHDOG_MS = int('TOOL_EXEC_HANG_WATCHDOG_MS', 30_000);
+
+/** Circuit-breaker retry-after (seconds) fallback when no breaker state exists. */
+export const DEFAULT_RETRY_AFTER_SEC = int('RETRY_AFTER_SEC', 30);
+
+/**
+ * Browser session cost-hint table (EWMA cold-start estimates, ms).
+ * Estimated durations for tool classes without an explicit duration arg:
+ *   - COST_HINT_SEARCH     navigation / wait-heavy tools
+ *   - COST_HINT_FEEDBACK   human-mouse motion
+ *   - COST_HINT_SECURITY   human scroll
+ *   - COST_HINT_DEFAULT    quick read-only tools (get/list/status/...)
+ *   - COST_HINT_WORKFLOW   everything else
+ *   - COST_HINT_MULTIPLIER timeout args are upper bounds; scale them down
+ */
+export const COST_HINT_SEARCH = int('COST_HINT_SEARCH', 7_500);
+export const COST_HINT_FEEDBACK = int('COST_HINT_FEEDBACK', 600);
+export const COST_HINT_SECURITY = int('COST_HINT_SECURITY', 1_500);
+export const COST_HINT_DEFAULT = int('COST_HINT_DEFAULT', 50);
+export const COST_HINT_WORKFLOW = int('COST_HINT_WORKFLOW', 250);
+export const COST_HINT_MULTIPLIER = float('COST_HINT_MULTIPLIER', 0.25);
+
+/** Preview length (chars) for the args payload in hung-tool watchdog logs. */
+export const ARGS_PREVIEW_MAX_CHARS = int('ARGS_PREVIEW_MAX_CHARS', 500);
+
+/* ================================================================== */
+/*  Time units                                                         */
+/* ================================================================== */
+
+/** Milliseconds in one minute (pure unit constant, not env-configurable). */
+export const MS_PER_MINUTE = 60_000;

@@ -1,6 +1,6 @@
 /**
- * Streaming protocols: WebSocket, SSE.
- * Prefixes: WS_*, SSE_*
+ * Streaming protocols: WebSocket, SSE, fetch()-based streams.
+ * Prefixes: WS_*, SSE_*, STREAMING_*
  */
 
 import { int } from './helpers.js';
@@ -11,3 +11,18 @@ import { int } from './helpers.js';
 
 export const WS_PAYLOAD_PREVIEW_LIMIT = int('WS_PAYLOAD_PREVIEW_LIMIT', 200);
 export const WS_PAYLOAD_SAMPLE_LIMIT = int('WS_PAYLOAD_SAMPLE_LIMIT', 2_000);
+
+/* ================================================================== */
+/*  Generic stream monitors                                            */
+/* ================================================================== */
+
+/** Default event/message cap for the fetch-stream and WebRTC monitors. */
+export const STREAMING_MAX_EVENTS = int('STREAMING_MAX_EVENTS', 2_000);
+
+/**
+ * Cap on the fetch-stream reassembly buffer. A stream that never emits an SSE
+ * dispatch separator would otherwise grow its buffer without bound; on
+ * overflow the TAIL is kept so a separator arriving later still yields the
+ * newest events. Passed into the in-page injection script via config.
+ */
+export const SSE_BUFFER_MAX_BYTES = int('SSE_BUFFER_MAX_BYTES', 1 * 1024 * 1024);

@@ -14,6 +14,9 @@ export const NETWORK_REPLAY_MAX_BODY_BYTES = int('NETWORK_REPLAY_MAX_BODY_BYTES'
 export const NETWORK_REPLAY_MAX_REDIRECTS = int('NETWORK_REPLAY_MAX_REDIRECTS', 5);
 export const NETWORK_HAR_BODY_CONCURRENCY = int('NETWORK_HAR_BODY_CONCURRENCY', 4);
 
+/** Cap on in-memory request/response records kept by the Playwright monitor. */
+export const NETWORK_MAX_RECORDS = int('NETWORK_MAX_RECORDS', 500);
+
 /** Response-body cache budgets shared by CDP and Playwright monitors. */
 export const NETWORK_BODY_CACHE_MAX_ENTRIES = int('NETWORK_BODY_CACHE_MAX_ENTRIES', 200);
 export const NETWORK_BODY_CACHE_MAX_BODY_BYTES = int(
@@ -37,6 +40,9 @@ export const ICMP_TRACEROUTE_MAX_HOPS = int('ICMP_TRACEROUTE_MAX_HOPS', 30);
 
 /** Default ICMP packet payload size in bytes. */
 export const ICMP_DEFAULT_PACKET_SIZE = int('ICMP_DEFAULT_PACKET_SIZE', 32);
+
+/** Default IP TTL used by ICMP echo probes when the caller does not override. */
+export const ICMP_DEFAULT_TTL = int('ICMP_DEFAULT_TTL', 128);
 
 /* ================================================================== */
 /*  Protocol fingerprint detection                                     */

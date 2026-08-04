@@ -19,6 +19,9 @@ export const SANDBOX_MAX_MEMORY_LIMIT_MB = int('SANDBOX_MAX_MEMORY_LIMIT_MB', 51
 /** Hard ceiling applied to user-supplied sandbox exec timeouts. */
 export const SANDBOX_MAX_TIMEOUT_MS = int('SANDBOX_MAX_TIMEOUT_MS', 30_000);
 
+/** Default cap on bridge tool calls per orchestrated sandbox run. */
+export const SANDBOX_MAX_BRIDGE_CALLS = int('SANDBOX_MAX_BRIDGE_CALLS', 10);
+
 /* ================================================================== */
 /*  Symbolic execution                                                 */
 /* ================================================================== */
@@ -26,6 +29,8 @@ export const SANDBOX_MAX_TIMEOUT_MS = int('SANDBOX_MAX_TIMEOUT_MS', 30_000);
 export const SYMBOLIC_EXEC_MAX_PATHS = int('SYMBOLIC_EXEC_MAX_PATHS', 100);
 export const SYMBOLIC_EXEC_MAX_DEPTH = int('SYMBOLIC_EXEC_MAX_DEPTH', 50);
 export const SYMBOLIC_EXEC_TIMEOUT_MS = int('SYMBOLIC_EXEC_TIMEOUT_MS', 30_000);
+/** Per-path Z3 solver timeout (distinct from the overall exec timeout). */
+export const SYMBOLIC_EXEC_Z3_TIMEOUT_MS = int('SYMBOLIC_EXEC_Z3_TIMEOUT_MS', 5_000);
 
 /* ================================================================== */
 /*  JSVMP deobfuscation                                                */
@@ -75,6 +80,26 @@ export const Z3_SOLVE_TIMEOUT_MS = int('Z3_SOLVE_TIMEOUT_MS', 10_000);
  * @default 12
  */
 export const Z3_BMC_MAX_GADGETS = int('Z3_BMC_MAX_GADGETS', 12);
+
+/* ================================================================== */
+/*  ROP gadget search                                                  */
+/* ================================================================== */
+
+/**
+ * Gadget-search limits used by the ROP chain builder (`exploit_build_rop_chain`):
+ * maxDepth is the number of instructions a candidate gadget may span,
+ * maxGadgets caps the returned candidate set per architecture.
+ *
+ * @env ROP_GADGET_SEARCH_MAX_DEPTH
+ * @default 6
+ */
+export const ROP_GADGET_SEARCH_MAX_DEPTH = int('ROP_GADGET_SEARCH_MAX_DEPTH', 6);
+
+/**
+ * @env ROP_GADGET_SEARCH_MAX_GADGETS
+ * @default 5000
+ */
+export const ROP_GADGET_SEARCH_MAX_GADGETS = int('ROP_GADGET_SEARCH_MAX_GADGETS', 5_000);
 
 /* ================================================================== */
 /*  Packer sandbox                                                     */
