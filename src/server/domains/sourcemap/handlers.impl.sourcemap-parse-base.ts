@@ -159,15 +159,9 @@ export class SourcemapToolHandlersParseBase {
 
     let sourcesContent: Array<string | null> | undefined;
     if (Array.isArray(record.sourcesContent)) {
-      sourcesContent = record.sourcesContent.map((item) => {
-        if (typeof item === 'string') {
-          return item;
-        }
-        if (item === null) {
-          return null;
-        }
-        return null;
-      });
+      sourcesContent = record.sourcesContent.map((item) =>
+        typeof item === 'string' ? item : null,
+      );
     }
 
     return {

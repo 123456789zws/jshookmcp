@@ -15,6 +15,7 @@ import {
   MEMORY_SCAN_MAX_REGIONS,
   MEMORY_VMMAP_ENUM_TIMEOUT_MS,
   MEMORY_VMMAP_MAX_BUFFER_BYTES,
+  USERSPACE_MAX_ADDRESS,
 } from '@src/constants';
 import { parseProcMaps, formatLinuxProtection } from './linux/mapsParser';
 
@@ -110,7 +111,7 @@ public class RegionEnumerator {
                 long nextAddr = baseAddr + regionSize;
                 if (nextAddr <= baseAddr) break;
                 addr = new IntPtr(nextAddr);
-                if (addr.ToInt64() >= 0x7FFFFFFF0000) break;
+                if (addr.ToInt64() >= 0x${USERSPACE_MAX_ADDRESS.toString(16)}) break;
             }
 
             return regions;

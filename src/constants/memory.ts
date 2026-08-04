@@ -28,6 +28,12 @@ export const MEMORY_SCAN_MAX_BUFFER_BYTES = int('MEMORY_SCAN_MAX_BUFFER_BYTES', 
 export const MEMORY_SCAN_MAX_RESULTS = int('MEMORY_SCAN_MAX_RESULTS', 10_000);
 export const MEMORY_SCAN_MAX_REGIONS = int('MEMORY_SCAN_MAX_REGIONS', 50_000);
 export const MEMORY_SCAN_REGION_MAX_BYTES = int('MEMORY_SCAN_REGION_MAX_BYTES', 16_777_216);
+/** Regions larger than this (bytes) are skipped by the PowerShell scan fallback (1 GiB).
+ *  Oversized regions are usually shared/system mappings; scanning them wastes time. */
+export const MEMORY_SCAN_REGION_GUARD_BYTES = int(
+  'MEMORY_SCAN_REGION_GUARD_BYTES',
+  1024 * 1024 * 1024,
+);
 export const MEMORY_ENUM_REGIONS_RETURN_LIMIT = int('MEMORY_ENUM_REGIONS_RETURN_LIMIT', 10_000);
 export const MEMORY_ENUM_REGIONS_MAX_BUFFER_BYTES = int(
   'MEMORY_ENUM_REGIONS_MAX_BUFFER_BYTES',

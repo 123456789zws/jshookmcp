@@ -87,7 +87,9 @@ import {
 import {
   MEMORY_SCAN_MAX_REGIONS,
   MEMORY_SCAN_MAX_RESULTS,
+  MEMORY_SCAN_REGION_GUARD_BYTES,
   MEMORY_SCAN_REGION_MAX_BYTES,
+  USERSPACE_MAX_ADDRESS,
 } from '@src/constants';
 
 describe('memory/scanner', () => {
@@ -133,6 +135,8 @@ describe('memory/scanner', () => {
     expect(result.stats?.resultsFound).toBe(2);
     const script = state.executePowerShellScript.mock.calls[0]?.[0] as string;
     expect(script).toContain(`regionSize > ${MEMORY_SCAN_REGION_MAX_BYTES}`);
+    expect(script).toContain(`info.RegionSize.ToInt64() < ${MEMORY_SCAN_REGION_GUARD_BYTES}`);
+    expect(script).toContain(`>= 0x${USERSPACE_MAX_ADDRESS.toString(16)}`);
     expect(script).toContain(`scannedRegions >= ${MEMORY_SCAN_MAX_REGIONS}`);
     expect(script).toContain(
       `ScanMemory(2, $patternBytes, $maskBytes, ${MEMORY_SCAN_MAX_RESULTS})`,
