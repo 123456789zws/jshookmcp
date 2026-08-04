@@ -478,7 +478,10 @@ export class NativeEmulator {
       throw new Error('startAddr must be less than endAddr');
     }
     const results: number[] = [];
-    const pageSize = 4096;
+    // Use the configured guest page size (same source as allocGuestMemory,
+    // bionic.ts, and syscalls.ts) so a non-default guestPageSizeBytes config
+    // keeps chunk stepping consistent with the rest of the emulator.
+    const pageSize = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;
     const patternLen = pattern.length;
 
     // Build bad-character skip table for fast scanning

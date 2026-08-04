@@ -42,13 +42,16 @@ export function execLoadStore(
   // reports status 0 in Rs. This is what lets a stdlib guarding shared state
   // with LDAXR/STLXR (or a refcount) run to completion here.
   //
-  // o2 (bit23) and o1 (bit21) must both be clear: the v8.1 atomics (CAS/CASP,
-  // LDADD/SWP/…) set o2 and share the same 001000 prefix, and silently running
-  // one as an ordinary exclusive load/store would drop its atomic semantics.
+  // o1 (bit21) must be clear and Rt2 (bits[14:10]) must be 0b11111: the
+  // v8.1 atomics (CAS/CASP set o1; LDADD/STADD/… leave o1 clear but use Rt2 as
+  // a real register) share the same 001000 prefix, and silently running one as
+  // an ordinary exclusive load/store would drop its atomic semantics. o2
+  // (bit23) is deliberately NOT checked — it distinguishes LDAXR/STLXR from
+  // LDXR/STXR, and in the single-threaded model both behave identically.
   if (
     ((insn >>> 24) & 0b111111) === 0b001000 &&
-    ((insn >>> 23) & 1) === 0 &&
-    ((insn >>> 21) & 1) === 0
+    ((insn >>> 21) & 1) === 0 &&
+    ((insn >>> 14) & 0b11111) === 0b11111
   ) {
     const size = insn >>> 30;
     const bytes = 1 << size;
@@ -156,6 +159,10 @@ export function execLoadStore(
   //   encoding (bit 29 = 0, mask 0b_0011_0000 at bits [29:24]).
   if (((insn >>> 24) & 0b111111) === 0b011000 || ((insn >>> 24) & 0b111111) === 0b001100) {
     const opc = insn >>> 30;
+    // opc=11 encodes PRFM (literal) — a prefetch hint with no architectural
+    // effect on GPRs or memory. Consume it as a no-op instead of executing a
+    // bogus 4-byte load into Rt (which would fault on unmapped addresses).
+    if (opc === 0b11) return true;
     const signExtend = opc === 0b10; // LDRSW
     const bytes = opc === 0b01 ? 8 : 4;
     const rt = insn & 0b11111;
@@ -172,12 +179,14 @@ export function execLoadStore(
   }
 
   // LDP/STP (load/store pair): opc | 101 | V(0) | idx(24:23) | L | imm7 | Rt2 | Rn | Rt
-  //   bits 29:25 === 0b10100 (V=0, integer); opc(31:30): 0b00 = 32-bit, 0b10 = 64-bit.
-  //   idx(24:23): 0b01 post-index, 0b11 pre-index, 0b10 signed offset.
+  //   bits 29:25 === 0b10100 (V=0, integer); opc(31:30): 0b00 = STP 32-bit,
+  //   0b01 = LDP 32-bit, 0b10 = STP 64-bit, 0b11 = LDP 64-bit.
+  //   idx(24:23): 0b00 non-temporal (LDNP/STNP, signed offset, no writeback),
+  //   0b01 post-index, 0b11 pre-index, 0b10 signed offset.
   //   L(bit22): 0 store, 1 load. imm7 signed, scaled by access size.
   if (((insn >>> 25) & 0b11111) === 0b10100) {
     const opc = insn >>> 30;
-    const is64 = opc === 0b10;
+    const is64 = opc === 0b10 || opc === 0b11; // 64-bit LDP is opc=11, not just STP's 10
     const bytes = is64 ? 8 : 4;
     const idx = (insn >>> 23) & 0b11;
     const isLoad = ((insn >>> 22) & 1) === 1;
@@ -196,8 +205,9 @@ export function execLoadStore(
       ctx.storeValue(addr, bytes, ctx.readGpr(rt));
       ctx.storeValue(addr + bytes, bytes, ctx.readGpr(rt2));
     }
-    if (idx !== 0b10) {
-      // pre/post-index write the updated base back; signed-offset (0b10) does not.
+    // Only pre/post-index (0b01/0b11) write the updated base back; signed
+    // offset (0b10) and non-temporal LDNP/STNP (0b00) do not.
+    if (idx === 0b01 || idx === 0b11) {
       ctx.writeGprSp(rn, BigInt.asUintN(64, base + BigInt(imm7)));
     }
     return true;
