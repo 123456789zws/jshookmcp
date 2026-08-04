@@ -126,6 +126,23 @@ describe('ElicitationBridge', () => {
       expect(result).toBeNull();
     });
 
+    it('calls elicitInput without relatedRequestId when no request context exists', async () => {
+      const server = createMockServer({ elicitation: {} });
+      (server.server.elicitInput as ReturnType<typeof vi.fn>).mockResolvedValue({
+        action: 'accept',
+        content: {},
+      });
+      const bridge = new ElicitationBridge(server);
+
+      // No runWithToolRequestContext wrapper → getToolRequestContext() returns null.
+      await bridge.requestFormInput({
+        message: 'test',
+        requestedSchema: { type: 'object', properties: {} },
+      });
+
+      expect(server.server.elicitInput).toHaveBeenCalledWith(expect.any(Object));
+    });
+
     it('routes elicitation back to the agent that initiated the tool call', async () => {
       const server = createMockServer({ elicitation: {} });
       (server.server.elicitInput as ReturnType<typeof vi.fn>).mockResolvedValue({

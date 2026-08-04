@@ -980,6 +980,7 @@ describe('CaptchaDetector — coverage expansion', () => {
         expect.any(Function),
         '.captcha-slider',
         expect.any(Array), // EXCLUDE_SELECTORS
+        expect.any(Object), // thresholds
       );
     });
   });
@@ -1329,8 +1330,12 @@ describe('CaptchaDetector — coverage expansion', () => {
       const createEvaluatePage = (context: Record<string, unknown>) =>
         ({
           evaluate: vi.fn(
-            async (fn: (...args: any[]) => unknown, selector: string, exclude: string[]) =>
-              runInBrowserContext(fn, context, [selector, exclude]),
+            async (
+              fn: (...args: any[]) => unknown,
+              selector: string,
+              exclude: string[],
+              thresholds?: unknown,
+            ) => runInBrowserContext(fn, context, [selector, exclude, thresholds]),
           ),
         }) as any;
 
@@ -1438,8 +1443,11 @@ describe('CaptchaDetector — coverage expansion', () => {
     it('covers verifyByDOM selector branches inside browser callbacks', async () => {
       const createEvaluatePage = (context: Record<string, unknown>) =>
         createPageMock({
-          evaluate: vi.fn(async (fn: (...args: any[]) => unknown) =>
-            runInBrowserContext(fn, context),
+          // Forward evaluate's trailing args (real puppeteer passes them to
+          // the page function) — verifyByDOM now feeds CAPTCHA_SELECTORS.slider
+          // through the callback parameter.
+          evaluate: vi.fn(async (fn: (...args: any[]) => unknown, ...args: any[]) =>
+            runInBrowserContext(fn, context, args),
           ),
         });
 
@@ -1491,8 +1499,12 @@ describe('CaptchaDetector — coverage expansion', () => {
       const createEvaluatePage = (context: Record<string, unknown>) =>
         createPageMock({
           evaluate: vi.fn(
-            async (fn: (...args: any[]) => unknown, selector: string, exclude: string[]) =>
-              runInBrowserContext(fn, context, [selector, exclude]),
+            async (
+              fn: (...args: any[]) => unknown,
+              selector: string,
+              exclude: string[],
+              thresholds?: unknown,
+            ) => runInBrowserContext(fn, context, [selector, exclude, thresholds]),
           ),
         });
 

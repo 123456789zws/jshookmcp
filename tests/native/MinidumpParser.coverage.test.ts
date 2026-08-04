@@ -246,6 +246,27 @@ describe('parseMinidump — memory lists', () => {
     expect(r.memoryRanges[0]?.startAddress).toBe('0x20000000');
     expect(r.memoryRanges[0]?.size).toBe(0x4000);
   });
+
+  it('accumulates Memory64List data offsets across sequential DataSizes', () => {
+    // Two ranges. Per MSDN, range data is appended sequentially starting at
+    // BaseRva: range 1's data starts at BaseRva + range 0's DataSize.
+    const m64 = Buffer.alloc(16 + 32);
+    m64.writeBigUInt64LE(BigInt(2), 0); // NumberOfMemoryRanges
+    m64.writeBigUInt64LE(BigInt(0x1000), 8); // BaseRva
+    m64.writeBigUInt64LE(BigInt(0x20000000), 16); // range 0 start
+    m64.writeBigUInt64LE(BigInt(0x100), 24); // range 0 size
+    m64.writeBigUInt64LE(BigInt(0x30000000), 32); // range 1 start
+    m64.writeBigUInt64LE(BigInt(0x200), 40); // range 1 size
+    const dirOffset = 32;
+    const dataOffset = dirOffset + 12;
+    const buf = Buffer.concat([header(1, dirOffset), dirEntry(9, m64.length, dataOffset), m64]);
+    mockReadFileSync.mockReturnValue(buf);
+    const r = parseMinidump('/mem64-2.dmp');
+    expect(r.memoryRanges).toHaveLength(2);
+    expect(r.memoryRanges[0]!.dataOffset).toBe(0x1000); // baseRva
+    // 0x1000 + 0x100 — NOT baseRva + 1*16 (descriptor stride).
+    expect(r.memoryRanges[1]!.dataOffset).toBe(0x1000 + 0x100);
+  });
 });
 
 describe('parseMinidump — exception stream', () => {

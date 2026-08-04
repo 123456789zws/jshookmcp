@@ -812,4 +812,40 @@ describe('CodeCollector collect internals', () => {
       ),
     ).rejects.toThrow('Invalid collector context');
   });
+
+  it('never exceeds MAX_FILES_PER_COLLECT under concurrent CDP responses', async () => {
+    const responseBodies: Record<string, { body: string; base64Encoded?: boolean }> = {};
+    const gotoResponses: Array<{
+      response: { url: string; mimeType?: string };
+      requestId: string;
+      type?: string;
+    }> = [];
+    for (let i = 0; i < 30; i++) {
+      responseBodies[`req-${i}`] = { body: `script-content-${i}`, base64Encoded: false };
+      gotoResponses.push({
+        response: { url: `https://cdn.example.com/f-${i}.js`, mimeType: 'application/javascript' },
+        requestId: `req-${i}`,
+        type: 'Script',
+      });
+    }
+
+    const { self } = createHarness({
+      responseBodies,
+      gotoResponses,
+      concurrentGotoResponses: true,
+      responseBodyDelayMs: 5,
+    });
+
+    const result = await collectInnerImpl(self, {
+      url: buildTestUrl('site', { suffix: 'bare', path: '/' }),
+      includeInline: false,
+      includeServiceWorker: false,
+      includeWebWorker: false,
+    });
+
+    expect(result.files.length).toBeLessThanOrEqual(self.MAX_FILES_PER_COLLECT);
+    // Files that were dropped due to the limit must not be recorded as
+    // collected — otherwise a later collection would skip them forever.
+    expect(self.collectedUrls.size).toBeLessThanOrEqual(self.MAX_FILES_PER_COLLECT);
+  });
 });

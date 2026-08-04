@@ -115,6 +115,26 @@ describe('SessionManager — idle TTL sweep', () => {
     expect(mgr.count()).toBe(0);
   });
 
+  it('a dispose that throws does not crash the sweep timer', () => {
+    // The sweep runs on an unref'd interval: an exception inside a session's
+    // dispose would become an uncaughtException and kill the process. Each
+    // session must be isolated so one faulty emulator can't stop the reap.
+    mgr = new SessionManager({
+      emulatorOptions: { syscalls: false },
+      idleTtlMs: 1_000,
+      sweepIntervalMs: 100,
+    });
+    const s = mgr.createSession();
+    vi.spyOn(s.emulator, 'dispose').mockImplementation(() => {
+      throw new Error('dispose exploded');
+    });
+    vi.setSystemTime(Date.now() + 2_000);
+    expect(() => vi.advanceTimersByTime(200)).not.toThrow();
+    // The faulty session is still reaped (delete happens after dispose).
+    expect(mgr.count()).toBe(0);
+    vi.restoreAllMocks();
+  });
+
   it('does not reap a session kept alive by getSession (touch)', () => {
     mgr = new SessionManager({
       idleTtlMs: 1_000,

@@ -34,21 +34,28 @@ vi.mock('@modules/extension-registry', () => ({
   }),
 }));
 
-vi.mock('@server/webhook', () => ({
-  WebhookServer: vi.fn(function (this: any) {
-    this.registerEndpoint = mockRegisterEndpoint;
-    this.removeEndpoint = mockRemoveEndpoint;
-    this.listEndpoints = mockListEndpoints;
-    this.getPort = mockGetPort;
-    this.isRunning = mockIsRunning;
-    this.start = mockStart;
-    this.stop = mockStop;
-  }),
-  CommandQueue: vi.fn(function (this: any) {
+vi.mock('@server/webhook', () => {
+  // Mirrors the real WebhookServerImpl: the server owns its CommandQueue and
+  // exposes it, so handler enqueues always reach the server's instance.
+  function Queue(this: any) {
     this.enqueue = mockEnqueue;
     this.dequeue = mockDequeue;
-  }),
-}));
+  }
+  return {
+    WebhookServer: vi.fn(function (this: any) {
+      this.commandQueue = new (Queue as any)();
+      this.getCommandQueue = () => this.commandQueue;
+      this.registerEndpoint = mockRegisterEndpoint;
+      this.removeEndpoint = mockRemoveEndpoint;
+      this.listEndpoints = mockListEndpoints;
+      this.getPort = mockGetPort;
+      this.isRunning = mockIsRunning;
+      this.start = mockStart;
+      this.stop = mockStop;
+    }),
+    CommandQueue: Queue as never,
+  };
+});
 
 function parseBody(result: any) {
   return JSON.parse(result.content[0].text);

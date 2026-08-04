@@ -45,17 +45,22 @@ function encodeFmovVector(Vd: number, imm8: number, Q: number): number {
   return (0x0f00f400 | (Q << 30) | (abc << 16) | (defgh << 5) | Vd) >>> 0;
 }
 
-/** Reference VFPExpandImm for float32 — must match `execNeonFmovVector` exactly. */
+/**
+ * Reference VFPExpandImm for float32 (ARM ARM D5.1.2) — must match
+ * `execNeonFmovVector` exactly. imm8 = a:b:cdefgh; exp = NOT(b):b×5:c:d,
+ * frac = e:f:g:h:0×19. Verified against real encodings: FMOV V0.4S, #1.0
+ * (imm8=0x70) expands to 0x3F800000.
+ */
 function vfpExpandF32(imm8: number): number {
   const a = (imm8 >>> 7) & 1;
   const b = (imm8 >>> 6) & 1;
   const cdefgh = imm8 & 0b111111;
   const B = b ? 0 : 1;
   const c = (cdefgh >>> 5) & 1;
-  const defgh = cdefgh & 0b11111;
-  const exp = (a << 7) | (B << 6) | (B << 5) | (B << 4) | (B << 3) | (B << 2) | (B << 1) | c;
-  const frac = defgh << 18;
-  return ((a << 31) | (exp << 23) | frac) >>> 0;
+  const d = (cdefgh >>> 4) & 1;
+  const efgh = cdefgh & 0b1111;
+  const exp = (B << 7) | (b << 6) | (b << 5) | (b << 4) | (b << 3) | (b << 2) | (c << 1) | d;
+  return ((a << 31) | (exp << 23) | (efgh << 19)) >>> 0;
 }
 
 const u32 = (u: Uint8Array, i: number): number => {

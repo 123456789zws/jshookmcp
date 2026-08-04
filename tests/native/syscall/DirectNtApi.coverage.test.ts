@@ -29,6 +29,7 @@ import {
   ntFreeVirtualMemory,
   ntSuspendProcess,
   ntResumeProcess,
+  buildObjectAttributes,
 } from '@native/syscall/DirectNtApi';
 
 beforeEach(() => {
@@ -46,6 +47,15 @@ describe('ntSuccess', () => {
   });
 });
 
+describe('buildObjectAttributes', () => {
+  it('writes Attributes at offset 24 (ObjectName pointer stays clear)', () => {
+    const oa = buildObjectAttributes(0x2); // OBJ_INHERIT
+    expect(oa.readUInt32LE(0)).toBe(48); // Length
+    expect(oa.readUInt32LE(16)).toBe(0); // ObjectName must not be clobbered
+    expect(oa.readUInt32LE(24)).toBe(0x2); // Attributes — x64 layout position
+  });
+});
+
 describe('ntOpenProcess', () => {
   it('returns the handle on NTSTATUS success', () => {
     ffiCall.mockReturnValue(0); // STATUS_SUCCESS
@@ -56,6 +66,15 @@ describe('ntOpenProcess', () => {
   it('throws on failure (formatted NTSTATUS)', () => {
     ffiCall.mockReturnValue(0xc0000005 | 0); // STATUS_ACCESS_VIOLATION
     expect(() => ntOpenProcess(1234, 0x1fffff)).toThrow(/NtOpenProcess failed.*c0000005/);
+  });
+
+  it('passes an OBJECT_ATTRIBUTES with Attributes at offset 24 to the kernel', () => {
+    ffiCall.mockReturnValue(0);
+    ntOpenProcess(1234, 0x1fffff, true); // inheritHandle=true → attr=OBJ_INHERIT
+    const oa = ffiCall.mock.calls[0]![2] as Buffer;
+    expect(oa.readUInt32LE(0)).toBe(48);
+    expect(oa.readUInt32LE(24)).toBe(0x2);
+    expect(oa.readUInt32LE(16)).toBe(0); // no garbage at ObjectName
   });
 
   it('respects inheritHandle flag (no throw for success)', () => {

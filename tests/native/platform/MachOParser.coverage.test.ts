@@ -74,6 +74,48 @@ describe('parseMachoSections', () => {
     mockReadFileSync.mockReturnValue(macho64Header());
     expect(parseMachoSections('/x')).toEqual([]);
   });
+
+  it('reads the section file offset from the section_64 offset field (secoff+48)', () => {
+    // header(32) + LC_SEGMENT_64(72) + one section_64(80) = 184 bytes
+    const b = Buffer.alloc(184, 0);
+    // Mach-O 64 header
+    b.writeUInt32LE(0xfeedfacf, 0); // MH_MAGIC_64
+    b.writeUInt32LE(0x0100000c, 4); // CPU_TYPE_ARM64
+    b.writeUInt32LE(1, 16); // ncmds
+    b.writeUInt32LE(152, 20); // sizeofcmds (72 + 80)
+
+    // LC_SEGMENT_64 at offset 32
+    const seg = 32;
+    b.writeUInt32LE(0x19, seg); // cmd = LC_SEGMENT_64
+    b.writeUInt32LE(152, seg + 4); // cmdsize
+    b.write('__TEXT\0', seg + 8, 'ascii'); // segname
+    b.writeBigUInt64LE(0x100000000n, seg + 24); // vmaddr
+    b.writeBigUInt64LE(0x4000n, seg + 32); // vmsize
+    b.writeBigUInt64LE(0n, seg + 40); // fileoff
+    b.writeBigUInt64LE(0x4000n, seg + 48); // filesize
+    b.writeUInt32LE(0x5, seg + 56); // maxprot = R|X
+    b.writeUInt32LE(0x5, seg + 60); // initprot
+    b.writeUInt32LE(1, seg + 64); // nsects = 1
+
+    // section_64 at offset 104
+    const sec = 104;
+    b.write('__text\0', sec, 'ascii'); // sectname
+    b.write('__TEXT\0', sec + 16, 'ascii'); // segname
+    b.writeBigUInt64LE(0x100000000n, sec + 32); // addr
+    b.writeBigUInt64LE(0x4000n, sec + 40); // size
+    b.writeUInt32LE(0x4000, sec + 48); // offset — real file offset of the section data
+    b.writeUInt32LE(0x80000000, sec + 64); // flags = S_ATTR_PURE_INSTRUCTIONS
+
+    mockReadFileSync.mockReturnValue(b);
+    const sections = parseMachoSections('/x');
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]!.name).toBe('__TEXT.__text');
+    // Must be the offset field value (0x4000), NOT the struct's own file offset (104).
+    expect(sections[0]!.fileOffset).toBe(0x4000);
+    expect(sections[0]!.isExecutable).toBe(true);
+    expect(sections[0]!.isWritable).toBe(false);
+  });
 });
 
 describe('parseMachOSymbols', () => {

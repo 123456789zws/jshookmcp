@@ -121,6 +121,7 @@ vi.mock('@src/constants', () => ({
   MCP_HTTP_HEADERS_TIMEOUT_MS: 2_000,
   MCP_HTTP_KEEPALIVE_TIMEOUT_MS: 3_000,
   MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS: 4_000,
+  HTTP_CAPACITY_RETRY_AFTER_MS: 1_000,
 }));
 
 import { closeServer, startHttpTransport, startStdioTransport } from '@server/MCPServer.transport';

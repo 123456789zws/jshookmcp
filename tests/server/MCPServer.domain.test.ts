@@ -116,6 +116,66 @@ describe('MCPServer.domain', () => {
     expect(factory).toHaveBeenCalledTimes(1);
   });
 
+  it('detects circular initialization inside an async factory after an await', async () => {
+    const ctx = { enabledDomains: new Set(['browser']) } as any;
+    let proxy: unknown = null as unknown;
+    const factory = vi.fn(async () => {
+      // Suspend first: the old factoryDepth guard was reset synchronously in
+      // the finally block, so the re-entry below slipped through and the
+      // factory dead-locked on its own initPromise.
+      await Promise.resolve();
+      (proxy as { ping(): Promise<string> }).ping();
+      return { ping: () => 'ok' };
+    });
+    proxy = createDomainProxy(ctx, 'browser', 'Browser handlers', factory) as unknown as {
+      ping(): Promise<string>;
+    };
+
+    await expect((proxy as { ping(): Promise<string> }).ping()).rejects.toThrow(
+      /circular initialization/,
+    );
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('detects circular initialization for sync factories re-entering the proxy', () => {
+    const ctx = { enabledDomains: new Set(['browser']) } as any;
+    let proxy: unknown = null as unknown;
+    const factory = vi.fn(() => {
+      (proxy as { ping(): string }).ping();
+      return { ping: () => 'ok' };
+    });
+    proxy = createDomainProxy(ctx, 'browser', 'Browser handlers', factory);
+
+    expect(() => (proxy as { ping(): string }).ping()).toThrow(/circular initialization/);
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mistake concurrent external access for a circular dependency', async () => {
+    const ctx = { enabledDomains: new Set(['browser']) } as any;
+    let resolveFactory!: (value: { status: string }) => void;
+    const factory = vi.fn(
+      () =>
+        new Promise<{ status: string }>((resolve) => {
+          resolveFactory = resolve;
+        }),
+    );
+    const proxy = createDomainProxy(ctx, 'browser', 'Browser handlers', factory) as unknown as {
+      status: Promise<string>;
+    };
+
+    // First access starts the async factory; the second access happens while
+    // it is still pending — from OUTSIDE the factory, so it must wait for the
+    // in-flight init, not raise a circular-init error.
+    const first = proxy.status;
+    const second = proxy.status;
+    expect(() => proxy.status).not.toThrow();
+
+    resolveFactory({ status: 'ready' });
+    await expect(first).resolves.toBe('ready');
+    await expect(second).resolves.toBe('ready');
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
   it('returns undefined for promise-like probe properties on the top-level proxy', () => {
     const ctx = { enabledDomains: new Set(['browser']) } as any;
     const proxy = createDomainProxy(ctx, 'browser', 'Browser handlers', () => ({

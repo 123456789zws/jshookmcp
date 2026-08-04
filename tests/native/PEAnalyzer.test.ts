@@ -155,7 +155,13 @@ vi.mock('@native/Win32API', () => ({
 
 import { PEAnalyzer } from '@native/PEAnalyzer';
 import { IMAGE_SCN } from '@native/PEAnalyzer.types';
-import { ReadProcessMemory, GetModuleFileNameEx, EnumProcessModules } from '@native/Win32API';
+import {
+  ReadProcessMemory,
+  GetModuleFileNameEx,
+  GetModuleBaseName,
+  GetModuleInformation,
+  EnumProcessModules,
+} from '@native/Win32API';
 
 describe('PEAnalyzer', () => {
   let analyzer: PEAnalyzer;
@@ -514,8 +520,8 @@ describe('PEAnalyzer', () => {
 
     it('should ignore module if GetModuleInformation fails', async () => {
       const p = analyzer as any;
-      const { GetModuleInformation } = await import('@native/Win32API');
-      (GetModuleInformation as any).mockReturnValueOnce({ success: false });
+      const { GetModuleInformation: GMI } = await import('@native/Win32API');
+      (GMI as any).mockReturnValueOnce({ success: false });
       const mods = p.enumerateModulesInternal(1234n);
       expect(mods.length).toBe(0);
     });
@@ -839,5 +845,214 @@ describe('PEAnalyzer', () => {
       const detections = await analyzer.detectInlineHooks(1234, 'test.exe');
       expect(detections.length).toBe(0);
     });
+  });
+});
+
+describe('detectIATHooks — forwarded exports', () => {
+  const analyzer = new PEAnalyzer();
+  const memRegions = new Map<number, Buffer>();
+
+  /** Register a memory region at an absolute address (base 0 in this fixture). */
+  const install = (addr: number, buf: Buffer): void => {
+    memRegions.set(addr, buf);
+  };
+
+  /**
+   * Minimal PE32+ image (DOS + NT headers) with the given data directories.
+   * NOTE: directories must live OUTSIDE the 264-byte NT-header region
+   * ([base+0x40, base+0x148)) or the region-first memory mock returns the
+   * header bytes instead of the directory contents.
+   */
+  function installPeImage(
+    base: number,
+    dirs: Array<{ index: number; rva: number; size: number }>,
+  ): void {
+    const dos = Buffer.alloc(64, 0);
+    dos.writeUInt16LE(0x5a4d, 0); // MZ
+    dos.writeUInt32LE(0x40, 60); // e_lfanew
+    install(base, dos);
+
+    const nt = Buffer.alloc(264, 0);
+    nt.writeUInt32LE(0x00004550, 0); // PE\0\0
+    nt.writeUInt16LE(0x8664, 4); // AMD64
+    nt.writeUInt16LE(1, 6); // numberOfSections
+    nt.writeUInt16LE(240, 20); // SizeOfOptionalHeader
+    nt.writeUInt16LE(0x20b, 24); // PE32+
+    nt.writeUInt32LE(16, 132); // NumberOfRvaAndSizes
+    for (const d of dirs) {
+      nt.writeUInt32LE(d.rva, 136 + d.index * 8);
+      nt.writeUInt32LE(d.size, 136 + d.index * 8 + 4);
+    }
+    install(base + 0x40, nt);
+  }
+
+  beforeEach(() => {
+    memRegions.clear();
+    const rpm = ReadProcessMemory as any;
+    // Real ReadProcessMemory semantics: a read may span/cross regions and
+    // short strings must still be readable via a large request (zero-filled
+    // tail), exactly like an actual page-aligned read in the target process.
+    rpm.mockImplementation((_h: bigint, addr: bigint, size: number) => {
+      const off = Number(addr);
+      for (const [regionBase, region] of memRegions) {
+        if (off >= regionBase && off < regionBase + region.length) {
+          const start = off - regionBase;
+          const end = Math.min(start + size, region.length);
+          const out = Buffer.alloc(size, 0);
+          region.copy(out, 0, start, end);
+          return out;
+        }
+      }
+      return Buffer.alloc(size);
+    });
+  });
+
+  it('skips IAT entries whose source export is forwarded; flags genuine hooks', async () => {
+    // ── Module A (consumer): imports ForwardedFunc + NormalFunc from B.dll.
+    const A = 0x10000;
+    installPeImage(A, [{ index: 1, rva: 0x200, size: 0x100 }]); // IMPORT dir
+
+    const desc = Buffer.alloc(20, 0);
+    desc.writeUInt32LE(0x260, 0); // OriginalFirstThunk (INT)
+    desc.writeUInt32LE(0x2a0, 12); // DLL name RVA
+    desc.writeUInt32LE(0x240, 16); // FirstThunk (IAT)
+    install(A + 0x200, desc);
+    install(A + 0x200 + 20, Buffer.alloc(20, 0)); // descriptor terminator
+
+    // IAT: forwarded func → 0x60000 (module C), hooked func → 0x70000 (nowhere).
+    const iat = Buffer.alloc(24, 0);
+    iat.writeBigUInt64LE(0x60000n, 0);
+    iat.writeBigUInt64LE(0x70000n, 8);
+    install(A + 0x240, iat);
+
+    const int = Buffer.alloc(24, 0);
+    int.writeBigUInt64LE(0x2c0n, 0); // hint/name for ForwardedFunc
+    int.writeBigUInt64LE(0x3c2n, 8); // hint/name for NormalFunc (after hn1's 258B region)
+    install(A + 0x260, int);
+
+    install(A + 0x2a0, Buffer.from('B.dll\0', 'ascii'));
+    const hn1 = Buffer.alloc(258, 0);
+    hn1.writeUInt16LE(1, 0);
+    hn1.write('ForwardedFunc\0', 2, 'ascii');
+    install(A + 0x2c0, hn1);
+    const hn2 = Buffer.alloc(258, 0);
+    hn2.writeUInt16LE(2, 0);
+    hn2.write('NormalFunc\0', 2, 'ascii');
+    install(A + 0x3c2, hn2);
+
+    // ── Module B (source DLL): exports ForwardedFunc (forwarded) + NormalFunc.
+    const B = 0x40000;
+    installPeImage(B, [{ index: 0, rva: 0x200, size: 0x100 }]); // EXPORT dir
+
+    const exp = Buffer.alloc(40, 0);
+    exp.writeUInt32LE(1, 16); // ordinalBase
+    exp.writeUInt32LE(2, 24); // numberOfNames
+    exp.writeUInt32LE(0x300, 28); // AddressOfFunctions
+    exp.writeUInt32LE(0x340, 32); // AddressOfNames
+    exp.writeUInt32LE(0x380, 36); // AddressOfNameOrdinals
+    install(B + 0x200, exp);
+
+    const funcs = Buffer.alloc(8, 0);
+    funcs.writeUInt32LE(0x220, 0); // ForwardedFunc RVA → inside export dir (forward string)
+    funcs.writeUInt32LE(0x1100, 4); // NormalFunc RVA
+    install(B + 0x300, funcs);
+
+    const names = Buffer.alloc(8, 0);
+    names.writeUInt32LE(0x3c0, 0);
+    names.writeUInt32LE(0x3e0, 4);
+    install(B + 0x340, names);
+
+    const ords = Buffer.alloc(4, 0);
+    ords.writeUInt16LE(0, 0);
+    ords.writeUInt16LE(1, 2);
+    install(B + 0x380, ords);
+
+    install(B + 0x3c0, Buffer.from('ForwardedFunc\0', 'ascii'));
+    install(B + 0x3e0, Buffer.from('NormalFunc\0', 'ascii'));
+    install(B + 0x220, Buffer.from('C.dll.NormalFunc\0', 'ascii')); // forward string
+    install(B + 0x1100, Buffer.alloc(32, 0x90)); // real function body
+
+    // ── Module C: the forwarded target's range.
+    const C = 0x60000;
+    installPeImage(C, []);
+
+    // Modules A (consumer), B (source), C (forward target).
+    (EnumProcessModules as any).mockReturnValueOnce({
+      modules: [0x10n, 0x20n, 0x30n],
+      count: 3,
+    });
+    (GetModuleBaseName as any).mockImplementation((_h: bigint, mod: bigint) =>
+      mod === 0x10n ? 'A.exe' : mod === 0x20n ? 'B.dll' : 'C.dll',
+    );
+    (GetModuleInformation as any).mockImplementation((_h: bigint, mod: bigint) => ({
+      success: true,
+      info: {
+        lpBaseOfDll: mod === 0x10n ? 0x10000n : mod === 0x20n ? 0x40000n : 0x60000n,
+        SizeOfImage: 0x2000,
+        EntryPoint: 0x1000n,
+      },
+    }));
+
+    const detections = await analyzer.detectIATHooks(1234, 'A.exe');
+    expect(detections.map((d) => d.functionName)).toEqual(['NormalFunc']);
+
+    // ForwardedFunc → 0x60000 (module C) is a legitimate forward chain — skipped.
+    // NormalFunc → 0x70000 (outside B) is a real IAT hook — reported.
+    expect(detections).toHaveLength(1);
+    expect(detections[0]!.functionName).toBe('NormalFunc');
+    expect(detections[0]!.actualTarget).toBe('0x70000');
+    expect(detections[0]!.importDll).toBe('B.dll');
+  });
+
+  it('reports hooks even when the source module has no export table', async () => {
+    // ── Module A: imports "BareFunc" from B.dll; B has NO export dir.
+    const A = 0x10000;
+    installPeImage(A, [{ index: 1, rva: 0x200, size: 0x100 }]);
+
+    const desc = Buffer.alloc(20, 0);
+    desc.writeUInt32LE(0x260, 0); // OriginalFirstThunk (INT)
+    desc.writeUInt32LE(0x2a0, 12); // DLL name RVA
+    desc.writeUInt32LE(0x240, 16); // FirstThunk (IAT)
+    install(A + 0x200, desc);
+    install(A + 0x200 + 20, Buffer.alloc(20, 0));
+
+    const iat = Buffer.alloc(16, 0);
+    iat.writeBigUInt64LE(0x70000n, 0); // outside B → hook
+    install(A + 0x240, iat);
+
+    const int = Buffer.alloc(16, 0);
+    int.writeBigUInt64LE(0x2c0n, 0);
+    install(A + 0x260, int);
+
+    install(A + 0x2a0, Buffer.from('B.dll\0', 'ascii'));
+    const hn = Buffer.alloc(258, 0);
+    hn.writeUInt16LE(1, 0);
+    hn.write('BareFunc\0', 2, 'ascii');
+    install(A + 0x2c0, hn);
+
+    // Module B: image WITHOUT an export directory (data dirs all zero).
+    const B = 0x40000;
+    installPeImage(B, []);
+
+    (EnumProcessModules as any).mockReturnValueOnce({
+      modules: [0x10n, 0x20n],
+      count: 2,
+    });
+    (GetModuleBaseName as any).mockImplementation((_h: bigint, mod: bigint) =>
+      mod === 0x10n ? 'A.exe' : 'B.dll',
+    );
+    (GetModuleInformation as any).mockImplementation((_h: bigint, mod: bigint) => ({
+      success: true,
+      info: {
+        lpBaseOfDll: mod === 0x10n ? 0x10000n : 0x40000n,
+        SizeOfImage: 0x2000,
+        EntryPoint: 0x1000n,
+      },
+    }));
+
+    const detections = await analyzer.detectIATHooks(1234, 'A.exe');
+    expect(detections).toHaveLength(1);
+    expect(detections[0]!.functionName).toBe('BareFunc');
+    expect(detections[0]!.actualTarget).toBe('0x70000');
   });
 });

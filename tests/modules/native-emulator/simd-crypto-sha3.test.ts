@@ -278,14 +278,15 @@ describe('XAR (Keccak rotation constants)', () => {
 
 // ── Instruction dispatch via CpuEngine ─────────────────────────────────────────
 
-// SHA-3 instruction encodings (based on simd.ts execCryptoSha3Keccak):
+// SHA-3 instruction encodings (verified against binutils/Go asm + HotSpot
+// generated code; capstone disassembles all four base words identically):
 //
 // EOR3:  bit21=0, size=0, bit15=0, 4-reg, Ra in bits[14:10]
 //   base: 0xCE << 24 | (Rm << 16) | (Ra << 10) | (Rn << 5) | Rd
 // BCAX:  bit21=1, size=0, bit15=0, 4-reg, Ra in bits[14:10]
 //   base: 0xCE << 24 | bit21(1) << 21 | (Rm << 16) | (Ra << 10) | (Rn << 5) | Rd
-// RAX1:  bit21=1, size=2, op15_10=000110
-//   base: 0xCE << 24 | size(2) << 22 | bit21(1) << 21 | (Rm << 16) | (0b000110 << 10) | (Rn << 5) | Rd
+// RAX1:  bit21=1, size=1, op15_10=100011  (base 0xCE608C00 — size=01, NOT 10)
+//   base: 0xCE << 24 | size(1) << 22 | bit21(1) << 21 | (Rm << 16) | (0b100011 << 10) | (Rn << 5) | Rd
 // XAR:   bit21=0, size=2, 3-reg, imm6 in bits[15:10]
 //   base: 0xCE << 24 | size(2) << 22 | (Rm << 16) | (imm6 << 10) | (Rn << 5) | Rd
 
@@ -296,7 +297,7 @@ const bcaxI = (rd: number, rn: number, rm: number, ra: number): number =>
   (0xce200000 | (rm << 16) | (ra << 10) | (rn << 5) | rd) >>> 0;
 
 const rax1I = (rd: number, rn: number, rm: number): number =>
-  (0xcea01800 | (rm << 16) | (rn << 5) | rd) >>> 0;
+  (0xce608c00 | (rm << 16) | (rn << 5) | rd) >>> 0;
 
 const xarI = (rd: number, rn: number, rm: number, imm6: number): number =>
   (0xce800000 | (rm << 16) | ((imm6 & 0x3f) << 10) | (rn << 5) | rd) >>> 0;

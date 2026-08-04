@@ -249,6 +249,58 @@ describe('ReverseEvidenceGraph (EVID-01~03, EVID-05)', () => {
     });
   });
 
+  describe('snapshot persistence', () => {
+    it('re-seeds the ID counter on restore so new nodes cannot collide with restored ids', () => {
+      // Build a snapshot containing request-1 / request-2, then simulate a fresh
+      // process (counter reset at module level) restoring it.
+      const source = new ReverseEvidenceGraph();
+      const n1 = source.addNode('request', 'original a', { url: '/a' });
+      const n2 = source.addNode('request', 'original b', { url: '/b' });
+      const snapshot = source.exportSnapshot();
+      expect(n1.id).toBe('request-1');
+      expect(n2.id).toBe('request-2');
+
+      resetIdCounter();
+
+      const restored = new ReverseEvidenceGraph();
+      restored.restoreSnapshot(snapshot);
+      expect(restored.nodeCount).toBe(2);
+
+      // The next node must NOT reuse request-1 (which would silently overwrite
+      // the restored entry in the nodes Map).
+      const n3 = restored.addNode('request', 'fresh c', { url: '/c' });
+      expect(n3.id).toBe('request-3');
+      expect(restored.nodeCount).toBe(3);
+      expect(restored.getNode('request-1')!.label).toBe('original a');
+      expect(restored.getNode('request-3')!.label).toBe('fresh c');
+    });
+
+    it('re-seeds the counter past edge ids as well', () => {
+      const source = new ReverseEvidenceGraph();
+      const a = source.addNode('request', 'a');
+      const b = source.addNode('script', 'b');
+      const e = source.addEdge(a.id, b.id, 'loads');
+      expect(e.id).toBe('edge-3'); // counter shared across node/edge prefixes
+
+      resetIdCounter();
+      const restored = new ReverseEvidenceGraph();
+      restored.restoreSnapshot(source.exportSnapshot());
+
+      const x = restored.addNode('request', 'x');
+      const y = restored.addNode('script', 'y');
+      restored.addEdge(x.id, y.id, 'loads');
+      // No collision with edge-3 from the snapshot.
+      expect(restored.getEdgesFrom(x.id)).toHaveLength(1);
+    });
+
+    it('ignores invalid snapshots', () => {
+      const graph2 = new ReverseEvidenceGraph();
+      graph2.restoreSnapshot(null);
+      graph2.restoreSnapshot({ schemaVersion: 2, graph: { nodes: [], edges: [] } });
+      expect(graph2.nodeCount).toBe(0);
+    });
+  });
+
   describe('exportMarkdown', () => {
     it('produces readable report with sections per node type', () => {
       graph.addNode('request', 'GET /api/data', { url: '/api/data' });

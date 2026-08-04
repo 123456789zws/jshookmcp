@@ -717,6 +717,7 @@ describe('MCPServer', () => {
       timer: setTimeout(() => {}, 1000),
       ttlMs: 1000,
       toolNames: new Set(['tool_alpha']),
+      generation: 1,
     });
 
     mocks.tokenBudget.recordToolCall.mockImplementationOnce(() => {
