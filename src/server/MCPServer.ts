@@ -343,8 +343,17 @@ export class MCPServer implements MCPServerContext {
       return null;
     });
 
-    // Large-data offloader: writes payloads >512KB to disk / DetailedDataManager
-    this.largeDataOffloader = new LargeDataOffloader(this.detailedData);
+    // Large-data offloader: writes payloads >threshold to disk / DetailedDataManager.
+    // Thresholds come from config (OFFLOADER_* envs); previously the offloader
+    // was constructed with zero config, leaving every knob at its default.
+    this.largeDataOffloader = new LargeDataOffloader(this.detailedData, {
+      detailThreshold: config.offloader?.detailThreshold,
+      fileThreshold: config.offloader?.fileThreshold,
+      outputDir: config.offloader?.outputDir,
+      excludeTools: config.offloader?.excludeTools
+        ? new Set(config.offloader.excludeTools)
+        : undefined,
+    });
 
     this.server = new McpServer(
       { name: config.mcp.name, version: config.mcp.version },
@@ -594,7 +603,7 @@ export class MCPServer implements MCPServerContext {
         registeredTool.remove();
       } catch (e) {
         logger.warn(`CircuitBreaker: failed to remove tool "${toolName}":`, e);
-        return;
+        return; // Preserve retry path — don't add to circuitBrokenTools on transient error.
       }
     } else if (!this.activatedToolNames.has(toolName)) {
       return;

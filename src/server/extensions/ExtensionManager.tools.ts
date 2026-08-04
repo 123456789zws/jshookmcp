@@ -2,6 +2,7 @@ import { getToolDomain } from '@server/ToolCatalog';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { ToolProfileId } from '@server/registry/contracts';
 import type { ExtensionToolRecord } from '@server/extensions/types';
+import { deactivateToolCore } from '@server/tool-lifecycle';
 
 const DEFAULT_EXTENSION_PROFILES: readonly ToolProfileId[] = ['search', 'workflow', 'full'];
 
@@ -105,9 +106,12 @@ export function unregisterExtensionToolRecord(
     }
   }
 
-  ctx.router.removeHandler(record.name);
-  ctx.activatedToolNames.delete(record.name);
-  ctx.activatedRegisteredTools.delete(record.name);
+  deactivateToolCore(record.name, {
+    activatedToolNames: ctx.activatedToolNames,
+    activatedRegisteredTools: ctx.activatedRegisteredTools,
+    router: ctx.router,
+    extensionToolsByName: ctx.extensionToolsByName,
+  });
   record.registeredTool = undefined;
   record.activationSource = undefined;
   record.activatedAt = undefined;

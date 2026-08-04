@@ -96,6 +96,35 @@ export class PluginRegistry {
 
   private readonly loadedPlugins = new Map<string, LoadedPluginRecord>();
 
+  /**
+   * Per-key mutual-exclusion locks implemented as Promise chains.
+   * Ensures operations on the same pluginId (cache-check+download+write,
+   * load+unload manifest mutation) are serialised without introducing a
+   * heavyweight dependency.  A failing predecessor does NOT block the
+   * successor — the `.then(fn, fn)` pattern keeps the chain alive.
+   */
+  private readonly locks = new Map<string, Promise<unknown>>();
+
+  private withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    this.locks.set(key, next);
+    // Garbage-collect completed locks to prevent unbounded growth.
+    // Use .then(onFulfilled, onRejected) — NOT .finally() — so the
+    // cleanup promise never rejects even when fn throws.  A rejected
+    // .finally() promise with no handler is an unhandledRejection
+    // that crashes the process under Node --unhandled-rejections=throw.
+    void next.then(
+      () => {
+        if (this.locks.get(key) === next) this.locks.delete(key);
+      },
+      () => {
+        if (this.locks.get(key) === next) this.locks.delete(key);
+      },
+    );
+    return next;
+  }
+
   constructor(
     rootDirOrContext: string | Record<string, unknown> = getExtensionRegistryDir(),
     pluginRoots: string[] = [],
@@ -180,47 +209,57 @@ export class PluginRegistry {
   async loadPlugin(
     pluginId: string,
   ): Promise<{ manifest: RegisteredPluginManifest; exports: Record<string, unknown> }> {
-    const manifest = this.installedPlugins.get(pluginId);
-    if (!manifest) {
-      throw new Error(`Plugin not found: ${pluginId}`);
-    }
+    return this.withLock(`plugin:${pluginId}`, async () => {
+      const manifest = this.installedPlugins.get(pluginId);
+      if (!manifest) {
+        throw new Error(`Plugin not found: ${pluginId}`);
+      }
 
-    const existing = this.loadedPlugins.get(pluginId);
-    if (existing) {
-      return {
-        manifest: this.toPublicManifest(existing.manifest),
-        exports: existing.exports,
+      const existing = this.loadedPlugins.get(pluginId);
+      if (existing) {
+        return {
+          manifest: this.toPublicManifest(existing.manifest),
+          exports: existing.exports,
+        };
+      }
+
+      const entryPath = await this.resolveEntryPath(manifest);
+      const importUrl = pathToFileURL(entryPath);
+      importUrl.searchParams.set('ts', String(Date.now()));
+      const moduleExports: unknown = await import(importUrl.href);
+      const exportsRecord = isRecord(moduleExports) ? moduleExports : {};
+
+      // Clone the manifest so mutations never leak through the reference
+      // shared with unloadPlugin / persisted state.
+      const loaded: StoredPluginManifest = {
+        ...manifest,
+        status: 'loaded',
       };
-    }
+      manifest.status = 'loaded';
+      this.loadedPlugins.set(pluginId, {
+        manifest: loaded,
+        exports: exportsRecord,
+      });
+      await this.persist();
 
-    const entryPath = await this.resolveEntryPath(manifest);
-    const importUrl = pathToFileURL(entryPath);
-    importUrl.searchParams.set('ts', String(Date.now()));
-    const moduleExports: unknown = await import(importUrl.href);
-    const exportsRecord = isRecord(moduleExports) ? moduleExports : {};
-
-    manifest.status = 'loaded';
-    this.loadedPlugins.set(pluginId, {
-      manifest,
-      exports: exportsRecord,
+      return {
+        manifest: this.toPublicManifest(loaded),
+        exports: exportsRecord,
+      };
     });
-    await this.persist();
-
-    return {
-      manifest: this.toPublicManifest(manifest),
-      exports: exportsRecord,
-    };
   }
 
   async unloadPlugin(pluginId: string): Promise<void> {
-    const manifest = this.installedPlugins.get(pluginId);
-    if (!manifest) {
-      return;
-    }
+    await this.withLock(`plugin:${pluginId}`, async () => {
+      const manifest = this.installedPlugins.get(pluginId);
+      if (!manifest) {
+        return;
+      }
 
-    this.loadedPlugins.delete(pluginId);
-    manifest.status = 'unloaded';
-    await this.persist();
+      this.loadedPlugins.delete(pluginId);
+      manifest.status = 'unloaded';
+      await this.persist();
+    });
   }
 
   private initializeFromDisk(): void {
@@ -279,34 +318,36 @@ export class PluginRegistry {
   }
 
   private async downloadRemoteModule(pluginId: string, url: string): Promise<string> {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(
-        `Failed to download plugin module: ${response.status} ${response.statusText}`,
-      );
-    }
-
-    const source = await response.text();
-    const outputPath = path.join(this.moduleCacheDir, `${sanitizeId(pluginId)}.mjs`);
-
-    // Content-addressable cache check: skip rewrite when the existing copy is
-    // byte-identical to the freshly fetched source. Avoids touching mtime,
-    // invalidating dynamic-import caches, and re-paying disk-write cost for
-    // unchanged remote modules.
-    const newHash = createHash('sha256').update(source).digest('hex');
-    try {
-      const existing = await readFile(outputPath, 'utf8');
-      const existingHash = createHash('sha256').update(existing).digest('hex');
-      if (existingHash === newHash) {
-        return outputPath;
+    return this.withLock(`download:${pluginId}`, async () => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download plugin module: ${response.status} ${response.statusText}`,
+        );
       }
-    } catch {
-      // Cached copy missing or unreadable — fall through to write.
-    }
 
-    await mkdir(this.moduleCacheDir, { recursive: true });
-    await writeFile(outputPath, source, 'utf8');
-    return outputPath;
+      const source = await response.text();
+      const outputPath = path.join(this.moduleCacheDir, `${sanitizeId(pluginId)}.mjs`);
+
+      // Content-addressable cache check: skip rewrite when the existing copy is
+      // byte-identical to the freshly fetched source. Avoids touching mtime,
+      // invalidating dynamic-import caches, and re-paying disk-write cost for
+      // unchanged remote modules.
+      const newHash = createHash('sha256').update(source).digest('hex');
+      try {
+        const existing = await readFile(outputPath, 'utf8');
+        const existingHash = createHash('sha256').update(existing).digest('hex');
+        if (existingHash === newHash) {
+          return outputPath;
+        }
+      } catch {
+        // Cached copy missing or unreadable — fall through to write.
+      }
+
+      await mkdir(this.moduleCacheDir, { recursive: true });
+      await writeFile(outputPath, source, 'utf8');
+      return outputPath;
+    });
   }
 
   private toPublicManifest(manifest: StoredPluginManifest): RegisteredPluginManifest {

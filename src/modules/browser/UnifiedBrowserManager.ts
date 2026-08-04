@@ -21,6 +21,7 @@ import {
 } from '@modules/browser/CamoufoxBrowserManager';
 import { BrowserDiscovery, type BrowserInfo } from '@modules/browser/BrowserDiscovery';
 import { logger } from '@utils/logger';
+import { DEBUG_PORT_CANDIDATES } from '@src/constants/server';
 
 /**
  * Supported browser drivers
@@ -135,6 +136,30 @@ export class UnifiedBrowserManager implements IBrowserManager {
     return this.launchChrome();
   }
 
+  /**
+   * Run `launcher` under a single-flight promise lock: concurrent callers
+   * share the in-flight launch, and the lock clears when it settles. Both
+   * driver launch paths use this to prevent launch race conditions.
+   */
+  private async withLaunchLock<T>(
+    getLock: () => Promise<T> | undefined,
+    setLock: (promise: Promise<T> | undefined) => void,
+    launcher: () => Promise<T>,
+  ): Promise<T> {
+    const inFlight = getLock();
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = launcher();
+    setLock(promise);
+    try {
+      return await promise;
+    } finally {
+      setLock(undefined);
+    }
+  }
+
   private async launchChrome(): Promise<PuppeteerBrowser> {
     // Prevent launch during shutdown
     if (this.isClosing) {
@@ -147,17 +172,13 @@ export class UnifiedBrowserManager implements IBrowserManager {
       return existingBrowser;
     }
 
-    // Prevent concurrent launch race condition with promise lock
-    if (this.chromeLaunchPromise) {
-      return this.chromeLaunchPromise;
-    }
-
-    this.chromeLaunchPromise = this.doLaunchChrome();
-    try {
-      return await this.chromeLaunchPromise;
-    } finally {
-      this.chromeLaunchPromise = undefined;
-    }
+    return this.withLaunchLock(
+      () => this.chromeLaunchPromise,
+      (promise) => {
+        this.chromeLaunchPromise = promise;
+      },
+      () => this.doLaunchChrome(),
+    );
   }
 
   private async doLaunchChrome(): Promise<PuppeteerBrowser> {
@@ -209,17 +230,13 @@ export class UnifiedBrowserManager implements IBrowserManager {
       return existingBrowser;
     }
 
-    // Prevent concurrent launch race condition with promise lock
-    if (this.camoufoxLaunchPromise) {
-      return this.camoufoxLaunchPromise;
-    }
-
-    this.camoufoxLaunchPromise = this.doLaunchCamoufox();
-    try {
-      return await this.camoufoxLaunchPromise;
-    } finally {
-      this.camoufoxLaunchPromise = undefined;
-    }
+    return this.withLaunchLock(
+      () => this.camoufoxLaunchPromise,
+      (promise) => {
+        this.camoufoxLaunchPromise = promise;
+      },
+      () => this.doLaunchCamoufox(),
+    );
   }
 
   private async doLaunchCamoufox(): Promise<CamoufoxBrowserLike> {
@@ -321,6 +338,18 @@ export class UnifiedBrowserManager implements IBrowserManager {
     this.isClosing = true;
 
     try {
+      // Wait for any in-flight launches to settle first — a launch that
+      // completes after close() would otherwise leave a running browser
+      // process with no manager reference to close it.
+      const pendingLaunches: Promise<unknown>[] = [];
+      if (this.chromeLaunchPromise) {
+        pendingLaunches.push(this.chromeLaunchPromise.catch(() => undefined));
+      }
+      if (this.camoufoxLaunchPromise) {
+        pendingLaunches.push(this.camoufoxLaunchPromise.catch(() => undefined));
+      }
+      await Promise.all(pendingLaunches);
+
       const camoufoxManager = this.camoufoxManager;
       const chromeManager = this.chromeManager;
 
@@ -406,7 +435,7 @@ export class UnifiedBrowserManager implements IBrowserManager {
   }
 
   async findChromeWithDebugPort(
-    preferredPorts: number[] = [9222, 9229, 9333],
+    preferredPorts: number[] = DEBUG_PORT_CANDIDATES,
   ): Promise<BrowserInfo | null> {
     const browsers = await this.discoverBrowsers();
     const chromeBrowsers = browsers.filter((b) => b.type === 'chrome' || b.type === 'edge');
@@ -421,7 +450,7 @@ export class UnifiedBrowserManager implements IBrowserManager {
   }
 
   async attachToExistingChrome(
-    preferredPorts: number[] = [9222, 9229, 9333],
+    preferredPorts: number[] = DEBUG_PORT_CANDIDATES,
   ): Promise<PuppeteerBrowser | null> {
     const browserInfo = await this.findChromeWithDebugPort(preferredPorts);
 

@@ -858,7 +858,12 @@ export class CpuEngine implements ExecutionContext {
   }
 
   /** Invoke a guest function by address and return after its RET reaches LR=0. */
-  callGuestFunction(address: number, args: readonly bigint[] = [], maxSteps?: number): number {
+  callGuestFunction(
+    address: number,
+    args: readonly bigint[] = [],
+    maxSteps?: number,
+    initRegisters?: Record<number, bigint>,
+  ): number {
     if (args.length > 8) {
       throw new Error(`callGuestFunction supports up to 8 register arguments, got ${args.length}`);
     }
@@ -866,6 +871,7 @@ export class CpuEngine implements ExecutionContext {
       preserveControlState: true,
       resetStack: true, // Always reset SP so every call gets a clean stack.
       maxSteps,
+      initRegisters,
     });
   }
 

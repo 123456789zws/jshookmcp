@@ -140,6 +140,8 @@ import {
   neonSqdmlsl,
   neonSaddlp,
   neonUaddlp,
+  neonSadalp,
+  neonUadalp,
   // neonSxtl, neonUxtl — aliases for SSHLL/USHLL with shift=0, no separate decode needed
   neonSshll,
   neonUshll,
@@ -191,7 +193,6 @@ import {
   isNeonThreeSame,
   isNeonThreeDifferent,
   isNeonModImm,
-  isScalarFmovImm,
   isNeonShiftImm,
   isNeonTwoRegMisc,
   isNeonAcross,
@@ -226,6 +227,7 @@ import {
   neonZip,
   packLanes as neonPackLanes,
 } from './simd-neon';
+import { signExtend9, signExtend7, signExtend19 } from './simd-utils';
 
 /**
  * The narrow capability window CpuEngine grants the SIMD layer. Structural
@@ -530,9 +532,7 @@ function extendOffset(value: bigint, option: number, shift: number): bigint {
   return v << BigInt(shift);
 }
 
-const signExtend9 = (v: number): number => (v & 0x100 ? v - 0x200 : v);
-const signExtend7 = (v: number): number => (v & 0x40 ? v - 0x80 : v);
-const signExtend19 = (v: number): number => (v & 0x40000 ? v - 0x80000 : v);
+// signExtend9 / signExtend7 / signExtend19 are now imported from ./simd-utils.
 
 /**
  * Decode + execute a data-processing SIMD/FP instruction (bits[28:25]=x111):
@@ -557,7 +557,6 @@ export function executeSimdFp(ctx: SimdContext, insn: number): boolean {
   if (isNeonThreeSame(f)) return execNeonThreeSame(ctx, f);
   if (isNeonThreeDifferent(f)) return execNeonThreeDifferent(ctx, f);
   if (isNeonModImm(f)) return execNeonModImm(ctx, f);
-  if (isScalarFmovImm(f)) return execScalarFmovImm(ctx, f);
   if (isNeonShiftImm(f)) return execNeonShiftImm(ctx, f);
   if (isNeonTwoRegMisc(f)) return execNeonTwoRegMisc(ctx, f);
   if (isNeonAcross(f)) return execNeonAcross(ctx, f);
@@ -812,10 +811,10 @@ function execCryptoSha3Keccak(ctx: SimdContext, f: SimdFields): boolean {
     return true;
   }
 
-  // RAX1: bit21=1, size=2, op15_10=000110 — 3-register
-  if (f.bit21 === 1 && f.size === 2) {
+  // RAX1: bit21=1, size=1, op15_10=100011 — 3-register (0xCE608C00 base)
+  if (f.bit21 === 1 && f.size === 1) {
     const op15_10 = (f.insn >>> 10) & 0b111111;
-    if (op15_10 === 0b000110) {
+    if (op15_10 === 0b100011) {
       ctx.vSetBytes(f.rd, rax1(vn, vm));
       return true;
     }
@@ -896,19 +895,11 @@ function execScalarFp16(ctx: SimdContext, f: SimdFields): boolean {
 }
 
 /** FMOV Hdr, #imm8 — half-precision FP immediate. Same 8-bit aBbbbbbc defgh
- * layout as the scalar/double form, expanded to binary16 via VFPExpandImm(H). */
+ * layout as the scalar/double form, expanded to binary16 via VFPExpandImm(H):
+ * exp = NOT(b):b×2:c:d (5 bits), frac = e:f:g:h:0×6. */
 function execFp16Immediate(ctx: SimdContext, f: SimdFields): boolean {
   const imm8 = (f.insn >>> 13) & 0xff;
-  const a = (imm8 >>> 7) & 1;
-  const b = (imm8 >>> 6) & 1;
-  const cdefgh = imm8 & 0b111111;
-  // binary16 VFPExpandImm: sign=a, exp = aBbbb (5 bits: a,NOT(b),b,b,b),
-  // frac = cdefgh << 4 (6 bits → high 6 of 10-bit mantissa).
-  const B = b ? 0 : 1;
-  const exp5 = (a << 4) | (B << 3) | (b << 2) | (b << 1) | b;
-  const frac = (cdefgh << 4) & 0x3ff;
-  const bits16 = ((a << 15) | (exp5 << 10) | frac) >>> 0;
-  ctx.vSetBytes(f.rd, packF16Bits(bits16));
+  ctx.vSetBytes(f.rd, packF16Bits(Number(vfpExpandImm(imm8, 16))));
   return true;
 }
 
@@ -1083,48 +1074,67 @@ function execFpTwoSource(ctx: SimdContext, f: SimdFields, isDouble: boolean): bo
 }
 
 /**
+ * VFPExpandImm (ARM ARM D5.1.2) — expand an 8-bit FMOV/MOVI immediate into an
+ * IEEE-754 bit pattern. imm8 = a:b:cdefgh where:
+ *   a = sign bit
+ *   b = replicated exponent bit; B = NOT(b) is the exponent MSB
+ *   c:d = the two least-significant exponent bits
+ *   e:f:g:h = the most-significant fraction bits
+ *   exp = NOT(b):b×(bits-4):c:d, frac = e:f:g:h:0…
+ * (bits 16 → 5-bit exponent, 32 → 8-bit, 64 → 11-bit.)
+ */
+function vfpExpandImm(imm8: number, bits: 16 | 32 | 64): bigint {
+  const a = (imm8 >>> 7) & 1;
+  const b = (imm8 >>> 6) & 1;
+  const cdefgh = imm8 & 0b111111;
+  const B = b ? 0 : 1; // NOT(b)
+  const c = (cdefgh >>> 5) & 1;
+  const d = (cdefgh >>> 4) & 1;
+  const efgh = cdefgh & 0b1111;
+  if (bits === 32) {
+    const exp = (B << 7) | (b << 6) | (b << 5) | (b << 4) | (b << 3) | (b << 2) | (c << 1) | d;
+    return BigInt(((a << 31) | (exp << 23) | (efgh << 19)) >>> 0);
+  }
+  if (bits === 64) {
+    const exp =
+      (B << 10) |
+      (b << 9) |
+      (b << 8) |
+      (b << 7) |
+      (b << 6) |
+      (b << 5) |
+      (b << 4) |
+      (b << 3) |
+      (b << 2) |
+      (c << 1) |
+      d;
+    return (BigInt(a) << 63n) | (BigInt(exp) << 52n) | (BigInt(efgh) << 48n);
+  }
+  // bits === 16
+  const exp = (B << 4) | (b << 3) | (b << 2) | (c << 1) | d;
+  return BigInt(((a << 15) | (exp << 10) | (efgh << 6)) >>> 0);
+}
+
+/**
  * FP immediate: FMOV Sd/Dd, #imm.
  * imm8 is encoded in bits[20:13], expanded to IEEE-754 via VFPExpandImm.
- * Single-precision: aBbbbbbc defgh000 00000000 00000000 (32 bits)
- * Double-precision: aBbbbbbb bbcdefgh 00000000 ... 00000000 (64 bits)
- * where a=sign, B=NOT(b), b=exp bit, cdefgh=mantissa.
+ * Single-precision: a NOT(b) bbbbb c d efgh0000000000000000000 (32 bits)
+ * Double-precision: a NOT(b) bbbbbbbb c d efgh0000...0000 (64 bits)
+ * where a=sign, b=replicated exp bit, cd=exp LSBs, efgh=mantissa MSBs.
  */
 function execFpImmediate(ctx: SimdContext, f: SimdFields, isDouble: boolean): boolean {
   const imm8 = (f.insn >>> 13) & 0xff;
-  const a = (imm8 >>> 7) & 1; // sign
-  const b = (imm8 >>> 6) & 1;
-  const cdefgh = imm8 & 0b111111;
 
   if (isDouble) {
-    // Double: aBbbbbbb bbcdefgh 0000... (11 exp bits, 52 frac bits)
-    const B = b ? 0 : 1; // NOT(b)
-    const exp =
-      (a << 10) |
-      (B << 9) |
-      (B << 8) |
-      (B << 7) |
-      (B << 6) |
-      (B << 5) |
-      (B << 4) |
-      (B << 3) |
-      (b << 2) |
-      (cdefgh >>> 4);
-    const frac = (cdefgh & 0b1111) << 48; // low 4 bits → high 4 bits of 52-bit mantissa
-    const bits64 = (BigInt(a) << 63n) | (BigInt(exp) << 52n) | BigInt(frac);
+    const bits64 = vfpExpandImm(imm8, 64);
     const view = new DataView(new ArrayBuffer(8));
     view.setBigUint64(0, bits64, true);
     const value = view.getFloat64(0, true);
     ctx.vSetBytes(f.rd, packFp(value, true));
   } else {
-    // Single: aBbbbbbc defgh000 00000000 00000000 (8 exp bits, 23 frac bits)
-    const B = b ? 0 : 1;
-    const c = (cdefgh >>> 5) & 1;
-    const defgh = cdefgh & 0b11111;
-    const exp = (a << 7) | (B << 6) | (B << 5) | (B << 4) | (B << 3) | (B << 2) | (B << 1) | c;
-    const frac = defgh << 18; // 5 bits → high 5 bits of 23-bit mantissa
-    const bits32 = (a << 31) | (exp << 23) | frac;
+    const bits32 = vfpExpandImm(imm8, 32);
     const view = new DataView(new ArrayBuffer(4));
-    view.setUint32(0, bits32 >>> 0, true);
+    view.setUint32(0, Number(bits32), true);
     const value = view.getFloat32(0, true);
     ctx.vSetBytes(f.rd, packFp(value, false));
   }
@@ -1557,11 +1567,21 @@ function execNeonThreeDifferent(ctx: SimdContext, f: SimdFields): boolean {
         return true;
       }
       return false;
-    case 0b0100: // ADDHN (U=0) / RADDHN (U=1)
-      ctx.vSetBytes(rd, u === 0 ? neonAddhn(a, b, size, q) : neonRaddhn(a, b, size, q));
+    case 0b0100: // ADDHN (U=0) / RADDHN (U=1); the 2 forms preserve Vd's low half
+      ctx.vSetBytes(
+        rd,
+        u === 0
+          ? neonAddhn(ctx.vGetBytes(rd), a, b, size, q)
+          : neonRaddhn(ctx.vGetBytes(rd), a, b, size, q),
+      );
       return true;
-    case 0b0110: // SUBHN (U=0) / RSUBHN (U=1)
-      ctx.vSetBytes(rd, u === 0 ? neonSubhn(a, b, size, q) : neonRsubhn(a, b, size, q));
+    case 0b0110: // SUBHN (U=0) / RSUBHN (U=1); the 2 forms preserve Vd's low half
+      ctx.vSetBytes(
+        rd,
+        u === 0
+          ? neonSubhn(ctx.vGetBytes(rd), a, b, size, q)
+          : neonRsubhn(ctx.vGetBytes(rd), a, b, size, q),
+      );
       return true;
     case 0b0101: {
       // SABAL (U=0) / UABAL (U=1) — Absolute difference Accumulate Long
@@ -1598,8 +1618,8 @@ function execNeonTwoRegMisc(ctx: SimdContext, f: SimdFields): boolean {
   const { rd, rn, size, q, u } = f;
   const a = ctx.vGetBytes(rn);
   switch (f.neonOp16_12) {
-    case 0b00000: // REV64
-      ctx.vSetBytes(rd, neonRev(a, 8, q));
+    case 0b00000: // REV64 (U=0) / REV32 (U=1) — U selects the reversal width
+      ctx.vSetBytes(rd, u === 0 ? neonRev(a, 8, q) : neonRev(a, 4, q));
       return true;
     case 0b00001: // REV16
       ctx.vSetBytes(rd, neonRev(a, 2, q));
@@ -1615,16 +1635,17 @@ function execNeonTwoRegMisc(ctx: SimdContext, f: SimdFields): boolean {
       ctx.vSetBytes(rd, result);
       return true;
     }
-    case 0b00010: // REV32 (U=1) / SADDLP (U=0) / UADDLP (U=1)
-      if (u === 0) {
-        ctx.vSetBytes(rd, neonSaddlp(a, size, q));
-        return true;
-      } else {
-        // Check if it's UADDLP or REV32 by context (REV32 needs specific size)
-        // For now, try UADDLP first since it's more common in widening context
-        ctx.vSetBytes(rd, neonUaddlp(a, size, q));
-        return true;
-      }
+    case 0b00010: // SADDLP (U=0) / UADDLP (U=1)
+      ctx.vSetBytes(rd, u === 0 ? neonSaddlp(a, size, q) : neonUaddlp(a, size, q));
+      return true;
+    case 0b00110: // SADALP (U=0) / UADALP (U=1) — accumulate pairwise into Vd
+      ctx.vSetBytes(
+        rd,
+        u === 0
+          ? neonSadalp(ctx.vGetBytes(rd), a, size, q)
+          : neonUadalp(ctx.vGetBytes(rd), a, size, q),
+      );
+      return true;
     case 0b00100: // CLZ
       ctx.vSetBytes(rd, neonClz(a, size, q));
       return true;
@@ -1786,78 +1807,15 @@ function execNeonFmovVector(ctx: SimdContext, f: SimdFields, imm8: number): bool
   // Only the single-precision vector form (size=00) is modelled here. size=01 is
   // reserved and size=1x is FEAT_FP16 — neither is in the declared scope yet.
   if (f.size !== 0b00) return false;
-  const a = (imm8 >>> 7) & 1; // sign
-  const b = (imm8 >>> 6) & 1; // exponent MSB complement input
-  const cdefgh = imm8 & 0b111111;
-  const B = b ? 0 : 1; // NOT(b)
-  const c = (cdefgh >>> 5) & 1;
-  const defgh = cdefgh & 0b11111;
-  const exp = (a << 7) | (B << 6) | (B << 5) | (B << 4) | (B << 3) | (B << 2) | (B << 1) | c;
-  const frac = defgh << 18; // low 5 mantissa bits → high 5 of 23-bit float32 fraction
-  const bits32 = ((a << 31) | (exp << 23) | frac) >>> 0;
-  const view = new DataView(new ArrayBuffer(4));
-  view.setUint32(0, bits32, true);
-  const value = view.getFloat32(0, true);
+  const bits32 = vfpExpandImm(imm8, 32);
 
   const out = new Uint8Array(16);
   const outView = new DataView(out.buffer);
   const laneCount = f.q === 1 ? 4 : 2;
   for (let lane = 0; lane < laneCount; lane++) {
-    outView.setUint32(lane * 4, bits32, true);
+    outView.setUint32(lane * 4, Number(bits32), true);
   }
   // Q=0 leaves bytes 8..15 zero (loop already wrote nothing past lane 1).
-  ctx.vSetBytes(f.rd, out);
-  void value; // value computed for documentation; the bit pattern is what we write
-  return true;
-}
-
-/**
- * Scalar FMOV (immediate): 1 0x 11110 0 type 1 imm5 000001 imm4 Rd.
- * Decodes an 8-bit VFP immediate into a 16-byte SIMD register.
- * type=00→single(32-bit) broadcast, type=01→double(64-bit) broadcast.
- */
-function execScalarFmovImm(ctx: SimdContext, f: SimdFields): boolean {
-  const type = (f.insn >>> 22) & 0b11;
-  // 8-bit immediate: abc = bits 18-16, defgh = bits 9-5
-  const abc = (f.insn >>> 16) & 0b111;
-  const defgh = (f.insn >>> 5) & 0b11111;
-  const imm8 = (abc << 5) | defgh;
-  const a = (imm8 >>> 7) & 1;
-  const b = (imm8 >>> 6) & 1;
-  const cdefgh = imm8 & 0b111111;
-  const B = b ? 0 : 1; // NOT(b)
-  const c = (cdefgh >>> 5) & 1;
-  const defgh5 = cdefgh & 0b11111;
-
-  const out = new Uint8Array(16);
-  const dv = new DataView(out.buffer);
-
-  if (type === 0b00) {
-    // single precision: 32-bit broadcast
-    const exp = (a << 7) | (B << 6) | (B << 5) | (B << 4) | (B << 3) | (B << 2) | (B << 1) | c;
-    const frac = defgh5 << 18;
-    const bits32 = ((a << 31) | (exp << 23) | frac) >>> 0;
-    const laneCount = f.q === 1 ? 4 : 2;
-    for (let i = 0; i < laneCount; i++) dv.setUint32(i * 4, bits32, true);
-  } else if (type === 0b01) {
-    // double precision: 64-bit broadcast
-    const exp =
-      (BigInt(a) << 10n) |
-      (BigInt(B) << 9n) |
-      (BigInt(B) << 8n) |
-      (BigInt(B) << 7n) |
-      (BigInt(B) << 6n) |
-      (BigInt(B) << 5n) |
-      (BigInt(B) << 4n) |
-      (BigInt(c) << 3n) |
-      BigInt(defgh5);
-    const frac = 0n;
-    const bits64 = (BigInt(a) << 63n) | (exp << 48n) | frac;
-    dv.setBigUint64(0, bits64, true);
-    if (f.q === 1) dv.setBigUint64(8, bits64, true);
-  } else {
-    return false; // type=1x → half-precision (FEAT_FP16), not implemented
-  }
   ctx.vSetBytes(f.rd, out);
   return true;
 }

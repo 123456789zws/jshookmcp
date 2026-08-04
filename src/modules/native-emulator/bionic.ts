@@ -72,6 +72,60 @@ export function setBionicHeapBase(addr: number): void {
 }
 /** Allocation granularity (bytes); keeps returned pointers naturally aligned. */
 const HEAP_ALIGN = 16;
+
+// ===========================================================================
+//  Shared bionic stubs — used by both createBionicLibrary (name→fn map) and
+//  installBionicStubs (address-keyed registration).  Single source of truth
+//  prevents the bit-level drift that bit the installBionicStubs malloc
+//  (missing 16-byte pointer alignment — now fixed).
+// ===========================================================================
+
+/** strlen stub — stateless, safe to share across both code paths. */
+function stubStrlen(ctx: HostContext): bigint {
+  return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
+}
+
+/** memcpy stub — stateless. */
+function stubMemcpy(ctx: HostContext): bigint {
+  const dst = Number(ctx.x(0));
+  ctx.write(dst, ctx.read(Number(ctx.x(1)), Number(ctx.x(2))));
+  return ctx.x(0);
+}
+
+/** memset stub — stateless. */
+function stubMemset(ctx: HostContext): bigint {
+  const buf = Number(ctx.x(0));
+  const value = Number(ctx.x(1) & 0xffn);
+  const n = Number(ctx.x(2));
+  ctx.write(buf, new Uint8Array(n).fill(value));
+  return ctx.x(0);
+}
+
+/**
+ * Create a bump-allocator-backed malloc/free pair.
+ *
+ * All pointers are 16-byte aligned (ARM64 ABI requirement).  The returned
+ * free() is a no-op — the bump allocator never reclaims.
+ */
+function createBumpAllocator(
+  engine: { mapMemory(addr: number, size: number): void },
+  heapBase: number,
+): { malloc(ctx: HostContext): bigint; free(ctx: HostContext): void } {
+  let bump = heapBase;
+  return {
+    malloc: (ctx: HostContext): bigint => {
+      const size = Number(ctx.x(0));
+      const roundedSize = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));
+      const ptr = Math.ceil(bump / HEAP_ALIGN) * HEAP_ALIGN;
+      engine.mapMemory(ptr, roundedSize);
+      bump = ptr + roundedSize;
+      return BigInt(ptr);
+    },
+    free: (): void => {
+      // bump allocator never reclaims
+    },
+  };
+}
 /** Default emulated page size returned by libc/sysconf imports. */
 const PAGE_SIZE = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;
 /** Linux/Android-ish sysconf names used by common bionic callers. */
@@ -126,14 +180,8 @@ export function createBionicLibrary(
     return out;
   };
 
-  lib.set('strlen', (ctx) => {
-    return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
-  });
-  lib.set('memcpy', (ctx) => {
-    const dst = Number(ctx.x(0));
-    ctx.write(dst, ctx.read(Number(ctx.x(1)), Number(ctx.x(2))));
-    return ctx.x(0);
-  });
+  lib.set('strlen', stubStrlen);
+  lib.set('memcpy', stubMemcpy);
   lib.set('memmove', (ctx) => {
     // Copy via an intermediate buffer so overlapping ranges stay correct.
     const dst = Number(ctx.x(0));
@@ -141,13 +189,7 @@ export function createBionicLibrary(
     ctx.write(dst, copy);
     return ctx.x(0);
   });
-  lib.set('memset', (ctx) => {
-    const buf = Number(ctx.x(0));
-    const value = Number(ctx.x(1) & 0xffn);
-    const n = Number(ctx.x(2));
-    ctx.write(buf, new Uint8Array(n).fill(value));
-    return ctx.x(0);
-  });
+  lib.set('memset', stubMemset);
   lib.set('memcmp', (ctx) => {
     const a = ctx.read(Number(ctx.x(0)), Number(ctx.x(2)));
     const b = ctx.read(Number(ctx.x(1)), Number(ctx.x(2)));
@@ -647,16 +689,43 @@ export function createBionicLibrary(
     return BigInt(strPtrVal);
   });
   lib.set('strtok_r', (ctx) => {
-    // Simplified: returns first token, NULL after
-    const s = Number(ctx.x(0));
-    const delim = Number(ctx.x(1));
-    if (s === 0) return 0n;
-    const body = readGuestCStringBytes(ctx, s);
-    const d = ctx.read(delim, 1)[0]!;
-    const idx = body.indexOf(d);
-    if (idx < 0) return ctx.x(0);
-    ctx.write(s + idx, new Uint8Array([0]));
-    return ctx.x(0);
+    // char *strtok_r(char *str, const char *delim, char **saveptr). str=NULL
+    // resumes tokenisation from *saveptr; the delimiter set is every byte of
+    // the delim string. Leading delimiters are skipped; the token's trailing
+    // delimiter is replaced by NUL and *saveptr advanced past it (or cleared
+    // at end of string).
+    const str = Number(ctx.x(0));
+    const delimPtr = Number(ctx.x(1));
+    const saveptr = Number(ctx.x(2));
+    if (delimPtr === 0) return 0n;
+    const dset = new Set(readGuestCStringBytes(ctx, delimPtr));
+    let cursor = str !== 0 ? str : Number(ctx.loadValue!(saveptr, 8));
+    if (cursor === 0) return 0n;
+    // Skip leading delimiters.
+    while (true) {
+      const byte = ctx.read(cursor, 1)[0];
+      if (byte === undefined || byte === 0 || !dset.has(byte)) break;
+      cursor += 1;
+    }
+    if (ctx.read(cursor, 1)[0] === 0) {
+      ctx.storeValue!(saveptr, 8, 0n);
+      return 0n; // only delimiters left → no more tokens
+    }
+    // Find the end of the token (a delimiter or the NUL terminator).
+    let end = cursor;
+    while (true) {
+      const byte = ctx.read(end, 1)[0];
+      if (byte === undefined || byte === 0 || dset.has(byte)) break;
+      end += 1;
+    }
+    const token = BigInt(cursor);
+    if (ctx.read(end, 1)[0] === 0) {
+      ctx.storeValue!(saveptr, 8, 0n);
+    } else {
+      ctx.write(end, new Uint8Array([0]));
+      ctx.storeValue!(saveptr, 8, BigInt(end + 1));
+    }
+    return token;
   });
   lib.set('strcat', (ctx) => {
     const dst = Number(ctx.x(0));
@@ -674,10 +743,28 @@ export function createBionicLibrary(
     return BigInt(ptr);
   });
 
-  // --- ctype predicates ---
-  for (const name of ['iscntrl', 'isgraph', 'isprint', 'ispunct']) {
-    lib.set(name, () => 0n); // always false
-  }
+  // --- ctype predicates (C semantics; arg is an int masked to unsigned char,
+  //     matching the isalpha/isdigit family in install-libc-extensions) ---
+  lib.set('iscntrl', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value < 0x20 || value === 0x7f ? 1n : 0n;
+  });
+  lib.set('isgraph', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value >= 0x21 && value <= 0x7e ? 1n : 0n;
+  });
+  lib.set('isprint', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value >= 0x20 && value <= 0x7e ? 1n : 0n;
+  });
+  lib.set('ispunct', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    const alnum =
+      (value >= 0x30 && value <= 0x39) ||
+      (value >= 0x41 && value <= 0x5a) ||
+      (value >= 0x61 && value <= 0x7a);
+    return value >= 0x21 && value <= 0x7e && !alnum ? 1n : 0n;
+  });
 
   // --- stdlib math/conv ---
   lib.set('abs', (ctx) => {
@@ -846,46 +933,25 @@ export function installBionicStubs(
   heapBase = HEAP_BASE,
 ): void {
   if (addrs.strlen !== undefined) {
-    engine.registerHostFunction(addrs.strlen, (ctx: HostContext) => {
-      return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
-    });
+    engine.registerHostFunction(addrs.strlen, stubStrlen);
   }
 
   if (addrs.memcpy !== undefined) {
-    engine.registerHostFunction(addrs.memcpy, (ctx: HostContext) => {
-      const dst = Number(ctx.x(0));
-      const src = Number(ctx.x(1));
-      const n = Number(ctx.x(2));
-      ctx.write(dst, ctx.read(src, n));
-      return ctx.x(0); // memcpy returns dest
-    });
+    engine.registerHostFunction(addrs.memcpy, stubMemcpy);
   }
 
   if (addrs.memset !== undefined) {
-    engine.registerHostFunction(addrs.memset, (ctx: HostContext) => {
-      const buf = Number(ctx.x(0));
-      const value = Number(ctx.x(1) & 0xffn);
-      const n = Number(ctx.x(2));
-      ctx.write(buf, new Uint8Array(n).fill(value));
-      return ctx.x(0); // memset returns dest
-    });
+    engine.registerHostFunction(addrs.memset, stubMemset);
   }
 
-  if (addrs.malloc !== undefined) {
-    let bump = heapBase;
-    engine.registerHostFunction(addrs.malloc, (ctx: HostContext) => {
-      const size = Number(ctx.x(0));
-      const rounded = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));
-      const ptr = bump;
-      engine.mapMemory(ptr, rounded); // lazily back each allocation
-      bump += rounded;
-      return BigInt(ptr);
-    });
-  }
-
-  if (addrs.free !== undefined) {
-    // The bump allocator never reclaims, so free is a no-op.
-    engine.registerHostFunction(addrs.free, () => undefined);
+  if (addrs.malloc !== undefined || addrs.free !== undefined) {
+    const allocator = createBumpAllocator(engine, heapBase);
+    if (addrs.malloc !== undefined) {
+      engine.registerHostFunction(addrs.malloc, allocator.malloc);
+    }
+    if (addrs.free !== undefined) {
+      engine.registerHostFunction(addrs.free, allocator.free);
+    }
   }
 }
 

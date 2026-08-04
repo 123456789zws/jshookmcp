@@ -1,4 +1,5 @@
 import { ScriptLoader } from '@native/ScriptLoader';
+import { DEBUG_PORT_CANDIDATES } from '@src/constants/server';
 
 export interface BrowserInfo {
   type: 'chrome' | 'edge' | 'firefox' | 'unknown';
@@ -25,7 +26,7 @@ export class BrowserDiscovery {
         windowClasses: ['Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_WidgetWin_*'],
         processNames: ['chrome.exe', 'chrome'],
         mainWindowTitle: /.*- Google Chrome$/,
-        debugPorts: [9222, 9229, 9333],
+        debugPorts: [...DEBUG_PORT_CANDIDATES],
       },
     ],
     [
@@ -59,6 +60,21 @@ export class BrowserDiscovery {
 
   private escapePowerShellSingleQuoted(value: string): string {
     return this.sanitizePsInput(value).replace(/'/g, "''");
+  }
+
+  /**
+   * Run a PowerShell `-Command` and return its stdout. The `powershell.exe`
+   * invocation shape (promisified execFile + fixed flags) is shared by all
+   * discovery queries; callers keep their own try/catch and output parsing.
+   */
+  private async execPowerShell(command: string, maxBuffer = 10 * 1024 * 1024): Promise<string> {
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileAsync = promisify(execFile);
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', command], {
+      maxBuffer,
+    });
+    return stdout;
   }
 
   /**
@@ -164,17 +180,10 @@ export class BrowserDiscovery {
     try {
       const escapedPattern = this.escapePowerShellSingleQuoted(name);
       const psCommand =
-        `$Pattern='${escapedPattern}'; Get-Process -Name "*$Pattern*" -ErrorAction SilentlyContinue` +
-        'Select-Object Id, ProcessName, Path, MainWindowTitle, MainWindowHandle, CPU, WorkingSet64' +
+        `$Pattern='${escapedPattern}'; Get-Process -Name "*$Pattern*" -ErrorAction SilentlyContinue ` +
+        'Select-Object Id, ProcessName, Path, MainWindowTitle, MainWindowHandle, CPU, WorkingSet64 ' +
         'ConvertTo-Json -Compress';
-      const { execFile } = await import('child_process');
-      const { promisify } = await import('util');
-      const execFileAsync = promisify(execFile);
-      const { stdout } = await execFileAsync(
-        'powershell.exe',
-        ['-NoProfile', '-Command', psCommand],
-        { maxBuffer: 1024 * 1024 * 10 },
-      );
+      const stdout = await this.execPowerShell(psCommand);
 
       return this.parseProcessResult(stdout, name);
     } catch (error) {
@@ -297,23 +306,15 @@ export class BrowserDiscovery {
    * Check debug port from command line arguments
    */
   private async checkDebugPortFromCommandLine(pid: number): Promise<number | null> {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-
     try {
       if (!Number.isFinite(pid) || pid <= 0) {
         return null;
       }
 
       const psCommand =
-        `Get-CimInstance Win32_Process -Filter "ProcessId = ${Math.trunc(pid)}"` +
+        `Get-CimInstance Win32_Process -Filter "ProcessId = ${Math.trunc(pid)}" ` +
         'Select-Object CommandLine, ParentProcessId | ConvertTo-Json -Compress';
-      const { stdout } = await execFileAsync(
-        'powershell.exe',
-        ['-NoProfile', '-Command', psCommand],
-        { maxBuffer: 1024 * 1024 },
-      );
+      const stdout = await this.execPowerShell(psCommand, 1024 * 1024);
 
       if (!stdout.trim() || stdout.trim() === 'null') {
         return null;
@@ -337,10 +338,6 @@ export class BrowserDiscovery {
    * Check if specified port is being listened by process
    */
   private async checkPort(pid: number, port: number): Promise<boolean> {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-
     try {
       if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(port) || port <= 0) {
         return false;
@@ -348,13 +345,9 @@ export class BrowserDiscovery {
 
       const psCommand =
         `Get-NetTCPConnection -OwningProcess ${Math.trunc(pid)} -State Listen -ErrorAction ` +
-        `SilentlyContinue` +
+        `SilentlyContinue ` +
         'Select-Object LocalPort | ConvertTo-Json -Compress';
-      const { stdout } = await execFileAsync(
-        'powershell.exe',
-        ['-NoProfile', '-Command', psCommand],
-        { maxBuffer: 1024 * 1024 },
-      );
+      const stdout = await this.execPowerShell(psCommand, 1024 * 1024);
 
       if (!stdout.trim() || stdout.trim() === 'null') {
         return false;

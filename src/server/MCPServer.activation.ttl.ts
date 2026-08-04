@@ -15,12 +15,26 @@ import { logger } from '@utils/logger';
 import { getToolDomain } from '@server/ToolCatalog';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import { getRuntimeState } from '@server/runtime/ServerRuntimeState';
+import { deactivateToolCore } from '@server/tool-lifecycle';
+import { MS_PER_MINUTE } from '@src/constants';
 
 export interface DomainTtlEntry {
   timer: ReturnType<typeof setTimeout>;
   ttlMs: number;
   toolNames: Set<string>;
+  /**
+   * Monotonic generation, bumped on every start/refresh of the entry.
+   *
+   * A TTL callback that is replaced (startDomainTtl for the same domain) or
+   * reset (refreshDomainTtl) may already be queued in the macrotask queue —
+   * clearTimeout() cannot retract it. The callback compares its captured
+   * generation against the entry currently in the map and bails out when it is
+   * stale, so an old expiry can never deactivate the tools of a newer activation.
+   */
+  generation: number;
 }
+
+let domainTtlGeneration = 0;
 
 /**
  * Start a TTL timer for a domain activation.
@@ -37,10 +51,21 @@ export function startDomainTtl(
 
   if (ttlMinutes <= 0) return;
 
-  const ttlMs = ttlMinutes * 60 * 1000;
+  const ttlMs = ttlMinutes * MS_PER_MINUTE;
   const names = new Set(toolNames);
+  const entry: DomainTtlEntry = {
+    timer: 0 as unknown as ReturnType<typeof setTimeout>,
+    ttlMs,
+    toolNames: names,
+    generation: ++domainTtlGeneration,
+  };
 
   const timer = setTimeout(() => {
+    // Stale-callback guard: the entry was replaced or refreshed after this
+    // timer was scheduled — do not deactivate the newer activation's tools.
+    if (ctx.domainTtlEntries.get(domain)?.generation !== entry.generation) {
+      return;
+    }
     logger.info(
       `Domain "${domain}" TTL expired (${ttlMinutes}min) — auto-deactivating ${names.size} tools`,
     );
@@ -48,8 +73,9 @@ export function startDomainTtl(
       logger.error(`Failed to deactivate domain "${domain}" on TTL expiry:`, err);
     });
   }, ttlMs);
+  entry.timer = timer;
 
-  ctx.domainTtlEntries.set(domain, { timer, ttlMs, toolNames: names });
+  ctx.domainTtlEntries.set(domain, entry);
 }
 
 /**
@@ -57,18 +83,35 @@ export function startDomainTtl(
  * No-op if the domain has no active TTL entry.
  */
 export function refreshDomainTtl(ctx: MCPServerContext, domain: string): void {
-  const entry = ctx.domainTtlEntries.get(domain);
-  if (!entry) return;
+  const existing = ctx.domainTtlEntries.get(domain);
+  if (!existing) return;
 
-  clearTimeout(entry.timer);
-  const ttlMinutes = entry.ttlMs / 60_000;
+  clearTimeout(existing.timer);
+  const ttlMinutes = existing.ttlMs / MS_PER_MINUTE;
 
-  entry.timer = setTimeout(() => {
+  // Replace the entry with a fresh object carrying a bumped generation. A
+  // pre-refresh expiry callback that is already queued captured the OLD entry
+  // object, whose generation is now stale — it will bail out instead of
+  // deactivating the refreshed activation's tools (see DomainTtlEntry.generation).
+  const entry: DomainTtlEntry = {
+    timer: 0 as unknown as ReturnType<typeof setTimeout>,
+    ttlMs: existing.ttlMs,
+    toolNames: existing.toolNames,
+    generation: ++domainTtlGeneration,
+  };
+
+  const timer = setTimeout(() => {
+    if (ctx.domainTtlEntries.get(domain)?.generation !== entry.generation) {
+      return;
+    }
     logger.info(`Domain "${domain}" TTL expired (${ttlMinutes}min) — auto-deactivating`);
     void deactivateDomainOnExpiry(ctx, domain).catch((err) => {
       logger.error(`Failed to deactivate domain "${domain}" on TTL expiry:`, err);
     });
   }, entry.ttlMs);
+  entry.timer = timer;
+
+  ctx.domainTtlEntries.set(domain, entry);
 }
 
 /**
@@ -120,23 +163,12 @@ export async function deactivateDomainOnExpiry(
     // Only remove if still in activated set (may have been manually deactivated)
     if (!ctx.activatedToolNames.has(name)) continue;
 
-    const registeredTool = ctx.activatedRegisteredTools.get(name);
-    if (registeredTool) {
-      try {
-        registeredTool.remove();
-      } catch (e) {
-        logger.warn(`Failed to remove tool "${name}" on domain TTL expiry:`, e);
-      }
-    }
-    ctx.router.removeHandler(name);
-    ctx.activatedToolNames.delete(name);
-    ctx.activatedRegisteredTools.delete(name);
-
-    // Clear extension tool registration state
-    const extRecord = ctx.extensionToolsByName.get(name);
-    if (extRecord) {
-      extRecord.registeredTool = undefined;
-    }
+    deactivateToolCore(name, {
+      activatedToolNames: ctx.activatedToolNames,
+      activatedRegisteredTools: ctx.activatedRegisteredTools,
+      router: ctx.router,
+      extensionToolsByName: ctx.extensionToolsByName,
+    });
 
     removedCount++;
   }

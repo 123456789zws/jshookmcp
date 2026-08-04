@@ -217,7 +217,7 @@ describe('UnifiedBrowserManager', () => {
     expect(manager.getActivePage()).toBeNull();
   });
 
-  it('does not wait for an in-flight Chrome launch before closing', async () => {
+  it('waits for an in-flight Chrome launch before closing', async () => {
     let resolveLaunch!: (value: any) => void;
     const pendingLaunch = new Promise((resolve) => {
       resolveLaunch = resolve;
@@ -230,17 +230,20 @@ describe('UnifiedBrowserManager', () => {
     await Promise.resolve();
     expect(chromeState.instances).toHaveLength(1);
 
-    const closeResult = await Promise.race([
-      manager.close().then(() => 'closed'),
-      new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
-    ]);
+    let closeSettled = false;
+    const closeResult = manager.close().then(() => {
+      closeSettled = true;
+      return 'closed';
+    });
 
-    expect(closeResult).toBe('closed');
-    expect(chromeState.instances[0]!.close).toHaveBeenCalledTimes(1);
+    // close() must remain pending while the launch is still in flight —
+    // returning early would leak the browser that the launch eventually starts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closeSettled).toBe(false);
 
     resolveLaunch({ isConnected: vi.fn(() => true) });
-    await expect(launchPromise).resolves.toMatchObject({
-      isConnected: expect.any(Function),
-    });
+    await launchPromise;
+    await expect(closeResult).resolves.toBe('closed');
+    expect(chromeState.instances[0]!.close).toHaveBeenCalledTimes(1);
   });
 });

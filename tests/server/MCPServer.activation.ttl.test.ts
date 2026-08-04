@@ -128,6 +128,104 @@ describe('MCPServer.activation.ttl', () => {
     });
   });
 
+  describe('stale TTL callbacks (generation guard)', () => {
+    it('skips an already-queued expiry callback for a replaced entry', () => {
+      const queuedCallbacks: Array<() => void> = [];
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: () => void,
+      ) => {
+        queuedCallbacks.push(callback);
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout);
+
+      try {
+        const removeFn = vi.fn();
+        const ctx = createMockCtx();
+        ctx.activatedToolNames.add('page_navigate');
+        ctx.activatedRegisteredTools.set('page_navigate', {
+          remove: removeFn,
+        } as unknown as RegisteredTool);
+        ctx.enabledDomains.add('browser');
+
+        startDomainTtl(ctx, 'browser', 1, ['page_navigate']);
+        const firstCallback = queuedCallbacks[0]!;
+        // Entry is replaced before the first timer's callback runs (the stale
+        // callback was already queued in the macrotask queue).
+        startDomainTtl(ctx, 'browser', 2, ['page_navigate']);
+
+        firstCallback();
+
+        // The stale callback must not deactivate the NEW entry's tools.
+        expect(removeFn).not.toHaveBeenCalled();
+        expect(ctx.activatedToolNames.has('page_navigate')).toBe(true);
+        expect(ctx.domainTtlEntries.get('browser')).toBeDefined();
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it('skips an already-queued expiry callback for a refreshed entry', () => {
+      const queuedCallbacks: Array<() => void> = [];
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: () => void,
+      ) => {
+        queuedCallbacks.push(callback);
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout);
+
+      try {
+        const removeFn = vi.fn();
+        const ctx = createMockCtx();
+        ctx.activatedToolNames.add('page_navigate');
+        ctx.activatedRegisteredTools.set('page_navigate', {
+          remove: removeFn,
+        } as unknown as RegisteredTool);
+        ctx.enabledDomains.add('browser');
+
+        startDomainTtl(ctx, 'browser', 1, ['page_navigate']);
+        const firstCallback = queuedCallbacks[0]!;
+        refreshDomainTtl(ctx, 'browser');
+
+        firstCallback();
+
+        expect(removeFn).not.toHaveBeenCalled();
+        expect(ctx.activatedToolNames.has('page_navigate')).toBe(true);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it('still deactivates when the current callback fires', () => {
+      const queuedCallbacks: Array<() => void> = [];
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: () => void,
+      ) => {
+        queuedCallbacks.push(callback);
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout);
+
+      try {
+        const removeFn = vi.fn();
+        const ctx = createMockCtx();
+        ctx.activatedToolNames.add('page_navigate');
+        ctx.activatedRegisteredTools.set('page_navigate', {
+          remove: removeFn,
+        } as unknown as RegisteredTool);
+        ctx.enabledDomains.add('browser');
+
+        startDomainTtl(ctx, 'browser', 1, ['page_navigate']);
+        const callback = queuedCallbacks[0]!;
+
+        callback();
+
+        expect(removeFn).toHaveBeenCalledOnce();
+        expect(ctx.activatedToolNames.has('page_navigate')).toBe(false);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+  });
+
   describe('refreshDomainTtl', () => {
     it('resets the timer keeping the same duration', async () => {
       const removeFn = vi.fn();
