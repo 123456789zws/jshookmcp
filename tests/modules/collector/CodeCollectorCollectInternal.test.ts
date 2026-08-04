@@ -823,7 +823,10 @@ describe('CodeCollector collect internals', () => {
     for (let i = 0; i < 30; i++) {
       responseBodies[`req-${i}`] = { body: `script-content-${i}`, base64Encoded: false };
       gotoResponses.push({
-        response: { url: `https://cdn.example.com/f-${i}.js`, mimeType: 'application/javascript' },
+        response: {
+          url: buildTestUrl('site', { suffix: 'bare', path: `f-${i}.js` }),
+          mimeType: 'application/javascript',
+        },
         requestId: `req-${i}`,
         type: 'Script',
       });
