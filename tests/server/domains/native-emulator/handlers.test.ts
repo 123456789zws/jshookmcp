@@ -575,7 +575,8 @@ describe('NativeEmulatorHandlers — isolation & errors', () => {
       }),
     );
     // The auto-NOP patch is recorded for diagnostics.
-    expect(res.diagnostics.autoNopPatches).toBeInstanceOf(Array);
+    const diag = res.diagnostics as Record<string, unknown>;
+    expect(diag.autoNopPatches).toBeInstanceOf(Array);
   });
 
   it('reports destroyed:false when destroying an unknown session', async () => {
