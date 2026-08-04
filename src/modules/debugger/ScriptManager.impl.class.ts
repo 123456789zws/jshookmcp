@@ -8,6 +8,51 @@ import {
   type ExtractFunctionTreeResult,
 } from '@modules/debugger/ScriptManager.impl.extract-function-tree';
 
+/** Cap on the number of scripts scanned by searchInScripts. */
+const SEARCH_RESULT_LIMIT = 500;
+/** Context truncation trigger for the searchInScripts path (chars). */
+const CONTEXT_TRUNCATE_LINES_LARGE = 2000;
+/** Match-window half-width used when truncating the searchInScripts path. */
+const CONTEXT_SNIPPET_HALF_LINES_LARGE = 100;
+/** Context truncation trigger for the keyword-index path (chars). */
+const CONTEXT_TRUNCATE_LINES_SMALL = 1000;
+/** Match-window half-width used when truncating the keyword-index path. */
+const CONTEXT_SNIPPET_HALF_LINES_SMALL = 50;
+/** Match-window half-width for the keyword-index path (lines). */
+const CONTEXT_HALF_LINES_SMALL = 3;
+
+/**
+ * Build the match-window context for a keyword hit. Joins `halfWidth` lines
+ * above/below the match line; when the joined window exceeds `truncateChars`
+ * (a single huge bundle line), falls back to a `snippetHalfWidth`-char window
+ * around the match index with `...` ellipses. Shared by searchInScripts and
+ * buildKeywordIndex.
+ */
+function getContextWindow(
+  lines: string[],
+  line: string,
+  lineIndex: number,
+  matchIndex: number,
+  halfWidth: number,
+  truncateChars: number,
+  snippetHalfWidth: number,
+): string {
+  const startLine = Math.max(0, lineIndex - halfWidth);
+  const endLine = Math.min(lines.length - 1, lineIndex + halfWidth);
+  let context = lines.slice(startLine, endLine + 1).join('\n');
+
+  if (context.length > truncateChars) {
+    const snippetStart = Math.max(0, matchIndex - snippetHalfWidth);
+    const snippetEnd = Math.min(line.length, matchIndex + snippetHalfWidth);
+    context =
+      (snippetStart > 0 ? '...' : '') +
+      line.substring(snippetStart, snippetEnd) +
+      (snippetEnd < line.length ? '...' : '');
+  }
+
+  return context;
+}
+
 export interface ScriptInfo {
   scriptId: string;
   url: string;
@@ -61,6 +106,8 @@ export class ScriptManager {
   /** Throttle zombie-CDP probes — re-probe at most once per this interval. */
   private readonly CDP_HEALTH_PROBE_INTERVAL_MS = 30_000;
   private lastHealthProbeAt = 0;
+  /** Serializes the zombie-detection → reinit path across concurrent callers. */
+  private ensureSessionPromise?: Promise<void>;
 
   constructor(private collector: CodeCollector) {}
 
@@ -149,11 +196,7 @@ export class ScriptManager {
    * the round-trip on every invocation.
    */
   private async ensureCdpSession(): Promise<void> {
-    if (!this.cdpSession) {
-      await this.init();
-      return;
-    }
-    if (!this.initialized) {
+    if (!this.cdpSession || !this.initialized) {
       await this.init();
       return;
     }
@@ -161,24 +204,45 @@ export class ScriptManager {
     if (now - this.lastHealthProbeAt < this.CDP_HEALTH_PROBE_INTERVAL_MS) {
       return;
     }
+
+    // Serialize the zombie path: concurrent probes failing at the same time
+    // would otherwise clear each other's freshly-recreated session (one caller
+    // nulls the session another just built), leaving this.cdpSession null.
+    if (this.ensureSessionPromise) {
+      await this.ensureSessionPromise;
+      return;
+    }
+
+    this.ensureSessionPromise = (async () => {
+      try {
+        await Promise.race([
+          this.cdpSession!.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('session_unreachable')), 3000),
+          ),
+        ]);
+        this.lastHealthProbeAt = Date.now();
+      } catch {
+        logger.warn('ScriptManager CDP session unresponsive (zombie), reinitializing...');
+        // Re-check before wiping: another caller may have already rebuilt.
+        if (!this.cdpSession || !this.initialized) {
+          return;
+        }
+        this.cdpSession = null;
+        this.initialized = false;
+        this.lastHealthProbeAt = 0;
+        this.scripts.clear();
+        this.scriptsByUrl.clear();
+        this.keywordIndex.clear();
+        this.scriptChunks.clear();
+        await this.init();
+      }
+    })();
+
     try {
-      await Promise.race([
-        this.cdpSession.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('session_unreachable')), 3000),
-        ),
-      ]);
-      this.lastHealthProbeAt = now;
-    } catch {
-      logger.warn('ScriptManager CDP session unresponsive (zombie), reinitializing...');
-      this.cdpSession = null;
-      this.initialized = false;
-      this.lastHealthProbeAt = 0;
-      this.scripts.clear();
-      this.scriptsByUrl.clear();
-      this.keywordIndex.clear();
-      this.scriptChunks.clear();
-      await this.init();
+      await this.ensureSessionPromise;
+    } finally {
+      this.ensureSessionPromise = undefined;
     }
   }
 
@@ -341,7 +405,7 @@ export class ScriptManager {
       context: string;
     }> = [];
 
-    const scripts = await this.getAllScripts(true, 500);
+    const scripts = await this.getAllScripts(true, SEARCH_RESULT_LIMIT);
 
     for (const [scriptIndex, script] of scripts.entries()) {
       if (!script.source) continue;
@@ -358,21 +422,15 @@ export class ScriptManager {
         for (const match of lineMatches) {
           if (matches.length >= maxMatches) break;
 
-          const startLine = Math.max(0, i - contextLines);
-          const endLine = Math.min(lines.length - 1, i + contextLines);
-          const contextArray = lines.slice(startLine, endLine + 1);
-          let context = contextArray.join('\n');
-
-          if (context.length > 2000) {
-            const matchIndex = match.index || 0;
-            // On a huge single-line bundle, extract a safe window around the match
-            const snippetStart = Math.max(0, matchIndex - 100);
-            const snippetEnd = Math.min(line.length, matchIndex + 100);
-            context =
-              (snippetStart > 0 ? '...' : '') +
-              line.substring(snippetStart, snippetEnd) +
-              (snippetEnd < line.length ? '...' : '');
-          }
+          const context = getContextWindow(
+            lines,
+            line,
+            i,
+            match.index || 0,
+            contextLines,
+            CONTEXT_TRUNCATE_LINES_LARGE,
+            CONTEXT_SNIPPET_HALF_LINES_LARGE,
+          );
 
           matches.push({
             scriptId: script.scriptId,
@@ -474,19 +532,15 @@ export class ScriptManager {
       for (const match of matches) {
         const keyword = match[0].toLowerCase();
 
-        const startLine = Math.max(0, i - 3);
-        const endLine = Math.min(lines.length - 1, i + 3);
-        let context = lines.slice(startLine, endLine + 1).join('\n');
-
-        if (context.length > 1000) {
-          const matchIndex = match.index || 0;
-          const snippetStart = Math.max(0, matchIndex - 50);
-          const snippetEnd = Math.min(line.length, matchIndex + 50);
-          context =
-            (snippetStart > 0 ? '...' : '') +
-            line.substring(snippetStart, snippetEnd) +
-            (snippetEnd < line.length ? '...' : '');
-        }
+        const context = getContextWindow(
+          lines,
+          line,
+          i,
+          match.index || 0,
+          CONTEXT_HALF_LINES_SMALL,
+          CONTEXT_TRUNCATE_LINES_SMALL,
+          CONTEXT_SNIPPET_HALF_LINES_SMALL,
+        );
 
         const entry: KeywordIndexEntry = {
           scriptId,

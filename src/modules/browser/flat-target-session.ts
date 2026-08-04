@@ -1,3 +1,4 @@
+import { logger } from '@utils/logger';
 import type { CDPSessionLike } from '@modules/browser/CDPSessionLike';
 
 interface TargetAttachResponse {
@@ -46,6 +47,14 @@ export async function attachToFlatTarget(
 
   const attachedSession = connection.session(sessionId);
   if (!attachedSession) {
+    // The attach already succeeded server-side; roll it back so the target is
+    // not left in a half-attached (orphaned) state.
+    await parentSession.send('Target.detachFromTarget', { sessionId }).catch((error) => {
+      logger.warn(
+        `Failed to roll back CDP attachment for ${targetId} (session ${sessionId}): ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     throw new Error(`CDP attached target session ${sessionId} was not registered for ${targetId}`);
   }
 

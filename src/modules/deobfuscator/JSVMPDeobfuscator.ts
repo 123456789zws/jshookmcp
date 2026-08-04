@@ -19,6 +19,20 @@ import {
   restoreJSVMPCode,
 } from '@modules/deobfuscator/JSVMPDeobfuscator.restore';
 
+/* ================================================================== */
+/*  JSVMP detection thresholds (heuristic, tuned on real VM samples)   */
+/* ================================================================== */
+
+/** A switch with more cases than this is treated as a VM dispatch table. */
+const SWITCH_CASE_THRESHOLD = 10;
+/** An array literal with more elements than this is treated as VM bytecode. */
+const INSTRUCTION_ARRAY_THRESHOLD = 50;
+/** A counter variable whose name is no longer than this is treated as a program counter. */
+const PC_VARIABLE_MAX_NAME_LENGTH = 3;
+/** Detected instruction counts above these boundaries map to high / medium complexity. */
+const COMPLEXITY_HIGH_THRESHOLD = 100;
+const COMPLEXITY_MEDIUM_THRESHOLD = 50;
+
 export class JSVMPDeobfuscator {
   private readonly sandbox = new ExecutionSandbox();
 
@@ -126,7 +140,7 @@ export class JSVMPDeobfuscator {
       traverse(ast, {
         SwitchStatement(path) {
           const caseCount = path.node.cases.length;
-          if (caseCount > 10) {
+          if (caseCount > SWITCH_CASE_THRESHOLD) {
             hasSwitch = true;
             if (caseCount > maxSwitchCases) {
               maxSwitchCases = caseCount;
@@ -137,7 +151,7 @@ export class JSVMPDeobfuscator {
         },
 
         ArrayExpression(path) {
-          if (path.node.elements.length > 50) {
+          if (path.node.elements.length > INSTRUCTION_ARRAY_THRESHOLD) {
             hasInstructionArray = true;
           }
         },
@@ -145,7 +159,7 @@ export class JSVMPDeobfuscator {
         UpdateExpression(path) {
           if (path.node.operator === '++' || path.node.operator === '--') {
             const arg = path.node.argument;
-            if (t.isIdentifier(arg) && arg.name.length <= 3) {
+            if (t.isIdentifier(arg) && arg.name.length <= PC_VARIABLE_MAX_NAME_LENGTH) {
               hasProgramCounter = true;
             }
           }
@@ -194,7 +208,11 @@ export class JSVMPDeobfuscator {
 
       if (isJSVMP) {
         const complexity: ComplexityLevel =
-          instructionCount > 100 ? 'high' : instructionCount > 50 ? 'medium' : 'low';
+          instructionCount > COMPLEXITY_HIGH_THRESHOLD
+            ? 'high'
+            : instructionCount > COMPLEXITY_MEDIUM_THRESHOLD
+              ? 'medium'
+              : 'low';
 
         logger.info(' JSVMP:');
         logger.info(`  - Switch: ${hasSwitch} (${maxSwitchCases} cases)`);
@@ -379,8 +397,8 @@ export class JSVMPDeobfuscator {
     _features: VMFeatures,
     vmType: VMType,
     aggressive: boolean,
-    _timeout: number,
-    _maxIterations: number,
+    timeout: number,
+    maxIterations: number,
   ): Promise<{
     code: string;
     confidence: number;
@@ -395,6 +413,11 @@ export class JSVMPDeobfuscator {
       code,
       vmType,
       aggressive,
+      // Wire the caller's budget through to the restore pipeline: sandbox
+      // evaluations honor `timeout`; `maxIterations` bounds iterative restore
+      // passes (currently unused by the linear passes, kept for loop-based
+      // restorers).
+      { timeoutMs: timeout, maxIterations },
     );
   }
 

@@ -47,6 +47,32 @@ import {
   getPlatformFromConfig,
   getVendorFromConfig,
 } from '@modules/emulator/BrowserEnvironmentConfigHelpers';
+
+/**
+ * Shared default values for the emulated browser environment. Kept in one
+ * table so navigator/screen/window rules agree on the same device profile.
+ */
+const BROWSER_ENV_DEFAULTS = {
+  language: 'zh-CN',
+  languages: ['zh-CN', 'zh', 'en-US', 'en'],
+  hardwareConcurrency: 8,
+  deviceMemory: 8,
+  maxTouchPoints: 0,
+  screenWidth: 1920,
+  screenHeight: 1080,
+  screenAvailWidth: 1920,
+  screenAvailHeight: 1040,
+  colorDepth: 24,
+  pixelDepth: 24,
+  windowInnerWidth: 1920,
+  windowInnerHeight: 1080,
+  windowOuterWidth: 1920,
+  windowOuterHeight: 1080,
+  devicePixelRatio: 1,
+  screenX: 0,
+  screenY: 0,
+} as const;
+
 export class BrowserEnvironmentRulesManager {
   private rules: Map<string, EnvironmentRule> = new Map();
   private browserConfigs: Map<BrowserType, BrowserConfig> = new Map();
@@ -87,7 +113,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 'zh-CN',
+      defaultValue: BROWSER_ENV_DEFAULTS.language,
     });
     this.addRule({
       path: 'navigator.languages',
@@ -95,7 +121,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'array',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: ['zh-CN', 'zh', 'en-US', 'en'],
+      defaultValue: BROWSER_ENV_DEFAULTS.languages,
     });
     this.addRule({
       path: 'navigator.hardwareConcurrency',
@@ -103,7 +129,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 8,
+      defaultValue: BROWSER_ENV_DEFAULTS.hardwareConcurrency,
     });
     this.addRule({
       path: 'navigator.deviceMemory',
@@ -111,7 +137,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 8,
+      defaultValue: BROWSER_ENV_DEFAULTS.deviceMemory,
       browsers: ['chrome', 'edge', 'opera'],
     });
     this.addRule({
@@ -120,7 +146,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 5,
-      defaultValue: 0,
+      defaultValue: BROWSER_ENV_DEFAULTS.maxTouchPoints,
     });
     this.addRule({
       path: 'navigator.webdriver',
@@ -170,7 +196,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 1920,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenWidth,
     });
     this.addRule({
       path: 'screen.height',
@@ -178,7 +204,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 1080,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenHeight,
     });
     this.addRule({
       path: 'screen.availWidth',
@@ -186,7 +212,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 1920,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenAvailWidth,
     });
     this.addRule({
       path: 'screen.availHeight',
@@ -194,7 +220,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 1040,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenAvailHeight,
     });
     this.addRule({
       path: 'screen.colorDepth',
@@ -202,7 +228,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 24,
+      defaultValue: BROWSER_ENV_DEFAULTS.colorDepth,
     });
     this.addRule({
       path: 'screen.pixelDepth',
@@ -210,7 +236,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 24,
+      defaultValue: BROWSER_ENV_DEFAULTS.pixelDepth,
     });
     this.addRule({
       path: 'window.innerWidth',
@@ -218,7 +244,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 1920,
+      defaultValue: BROWSER_ENV_DEFAULTS.windowInnerWidth,
     });
     this.addRule({
       path: 'window.innerHeight',
@@ -226,7 +252,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 1080,
+      defaultValue: BROWSER_ENV_DEFAULTS.windowInnerHeight,
     });
     this.addRule({
       path: 'window.outerWidth',
@@ -234,7 +260,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 1920,
+      defaultValue: BROWSER_ENV_DEFAULTS.windowOuterWidth,
     });
     this.addRule({
       path: 'window.outerHeight',
@@ -242,7 +268,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 6,
-      defaultValue: 1080,
+      defaultValue: BROWSER_ENV_DEFAULTS.windowOuterHeight,
     });
     this.addRule({
       path: 'window.devicePixelRatio',
@@ -250,7 +276,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 1,
+      defaultValue: BROWSER_ENV_DEFAULTS.devicePixelRatio,
     });
     this.addRule({
       path: 'window.screenX',
@@ -258,7 +284,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 4,
-      defaultValue: 0,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenX,
     });
     this.addRule({
       path: 'window.screenY',
@@ -266,7 +292,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'number',
       required: true,
       antiCrawlImportance: 4,
-      defaultValue: 0,
+      defaultValue: BROWSER_ENV_DEFAULTS.screenY,
     });
     this.addRule({
       path: 'location.href',
@@ -282,7 +308,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 7,
-      defaultValue: 'https://www.example.com',
+      defaultValue: 'https:',
     });
     this.addRule({
       path: 'location.host',
@@ -460,6 +486,22 @@ export class BrowserEnvironmentRulesManager {
       required: false,
       antiCrawlImportance: 7,
       defaultValue: function (array: unknown) {
+        // Real getRandomValues fills the caller's buffer with random bytes —
+        // a pass-through that returns the untouched array breaks any code
+        // that reads the values.
+        if (ArrayBuffer.isView(array)) {
+          if (
+            typeof globalThis.crypto !== 'undefined' &&
+            typeof globalThis.crypto.getRandomValues === 'function'
+          ) {
+            globalThis.crypto.getRandomValues(array as ArrayBufferView<ArrayBuffer>);
+          } else {
+            const bytes = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+            for (let i = 0; i < bytes.length; i += 1) {
+              bytes[i] = Math.floor(Math.random() * 256);
+            }
+          }
+        }
         return array;
       },
     });

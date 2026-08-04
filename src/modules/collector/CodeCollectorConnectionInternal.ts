@@ -263,14 +263,15 @@ export async function connectWithTimeoutImpl(
       let settled = false;
       const timer = setTimeout(() => {
         settled = true;
-        if (connectAttemptRef.current === attemptId) {
-          connectAttemptRef.current += 1;
-        }
         reject(buildConnectTimeoutError(target, endpointOrOptions, timeoutMs));
       }, timeoutMs);
 
       void connect({ ...connectOptions, defaultViewport: null })
         .then(async (browser) => {
+          // A newer connect attempt has started (ref moved past us) or we
+          // already settled via timeout — discard the late result. The timeout
+          // path no longer bumps the ref: this attempt's playwright fallback
+          // still belongs to the same attempt and is validated below.
           if (settled || connectAttemptRef.current !== attemptId) {
             try {
               await browser.disconnect();
@@ -299,6 +300,20 @@ export async function connectWithTimeoutImpl(
       throw error;
     }
 
-    return await connectWithPlaywrightFallbackImpl(connectOptions, error, timeoutMs);
+    const browser = await connectWithPlaywrightFallbackImpl(connectOptions, error, timeoutMs);
+
+    // While the fallback ran, a newer connect attempt may have started and
+    // won. Return its result only if we are still the active attempt.
+    if (connectAttemptRef.current !== attemptId) {
+      try {
+        await browser.disconnect();
+      } catch {
+        /* best-effort cleanup */
+      }
+      // Not a re-throw: this is a business error, not a wrapped exception.
+      // eslint-disable-next-line preserve-caught-error
+      throw new Error('Connection attempt superseded by a newer attempt');
+    }
+    return browser;
   }
 }

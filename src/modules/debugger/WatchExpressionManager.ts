@@ -2,6 +2,9 @@ import type { RuntimeInspector } from '@modules/debugger/RuntimeInspector';
 import { logger } from '@utils/logger';
 import { WATCH_EVAL_TIMEOUT_MS } from '@src/constants';
 
+/** Cap on retained value-history entries per watch (oldest dropped first). */
+const WATCH_MAX_HISTORY = 100;
+
 type WatchValue = unknown;
 
 interface ValueHistoryEntry {
@@ -101,7 +104,7 @@ export class WatchExpressionManager {
             timestamp: Date.now(),
           });
 
-          if (watch.valueHistory.length > 100) {
+          if (watch.valueHistory.length > WATCH_MAX_HISTORY) {
             watch.valueHistory.shift();
           }
         }
@@ -149,6 +152,39 @@ export class WatchExpressionManager {
   private deepEqual(a: unknown, b: unknown): boolean {
     if (a === b) return true;
     if (a === null || a === undefined || b === null || b === undefined) return false;
+
+    // Non-plain containers need explicit comparisons — Object.keys() on a Map
+    // or RegExp is empty, which used to make any two instances "equal" and
+    // silently suppressed valueChanged notifications.
+    if (a instanceof Map && b instanceof Map) {
+      if (a.size !== b.size) return false;
+      for (const [key, value] of a) {
+        if (!b.has(key) || !this.deepEqual(value, b.get(key))) return false;
+      }
+      return true;
+    }
+    if (a instanceof Set && b instanceof Set) {
+      if (a.size !== b.size) return false;
+      for (const item of a) {
+        if (!b.has(item)) return false;
+      }
+      return true;
+    }
+    if (a instanceof RegExp && b instanceof RegExp) {
+      return a.source === b.source && a.flags === b.flags;
+    }
+    if (a instanceof Date && b instanceof Date) {
+      return a.getTime() === b.getTime();
+    }
+    if (a instanceof ArrayBuffer && b instanceof ArrayBuffer) {
+      if (a.byteLength !== b.byteLength) return false;
+      const viewA = new Uint8Array(a);
+      const viewB = new Uint8Array(b);
+      for (let i = 0; i < viewA.length; i += 1) {
+        if (viewA[i] !== viewB[i]) return false;
+      }
+      return true;
+    }
     if (!this.isRecord(a) || !this.isRecord(b)) return false;
 
     const keysA = Object.keys(a);

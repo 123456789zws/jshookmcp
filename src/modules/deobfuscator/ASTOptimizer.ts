@@ -5,6 +5,15 @@ import generate from '@babel/generator';
 import * as t from '@babel/types';
 import { logger } from '@utils/logger';
 
+/** Number of full optimization passes over the AST. */
+const AST_OPT_PASSES = 3;
+/** Traversals executed per pass (used for progress reporting). */
+const AST_OPT_STEPS_PER_PASS = 8;
+/** A constant variable referenced no more than this many times is inlined. */
+const MAX_USAGE_COUNT = 3;
+/** Valid JS identifier shape: `$`/`_`/alpha start, then word characters. */
+const DUPLICATE_IDENTIFIER_PATTERN = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+
 export class ASTOptimizer {
   optimize(
     code: string,
@@ -16,10 +25,10 @@ export class ASTOptimizer {
         plugins: ['jsx', 'typescript'],
       });
 
-      const totalSteps = 3 * 8; // 3 passes * 8 traversals
+      const totalSteps = AST_OPT_PASSES * AST_OPT_STEPS_PER_PASS;
       let currentStep = 0;
 
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < AST_OPT_PASSES; i++) {
         logger.debug(`AST optimization pass ${i + 1}`);
 
         this.constantFolding(ast);
@@ -119,24 +128,33 @@ export class ASTOptimizer {
   }
 
   private constantPropagation(ast: t.File): void {
-    const constants = new Map<string, t.Expression>();
+    // Keyed by the binding's identifier node (not the name) so same-named
+    // variables in sibling scopes never conflate, and only bindings that are
+    // never reassigned (`binding.constant`) qualify as constants.
+    const constants = new Map<t.Identifier, t.Expression>();
 
     traverse(ast, {
       VariableDeclarator(path) {
         const { id, init } = path.node;
 
         if (t.isIdentifier(id) && init && t.isLiteral(init)) {
-          constants.set(id.name, init);
+          const binding = path.scope.getBinding(id.name);
+          if (binding && binding.constant && binding.path === path) {
+            constants.set(binding.identifier, init);
+          }
         }
       },
 
       Identifier(path) {
-        const name = path.node.name;
-        const constant = constants.get(name);
-        const isBindingIdentifier = path.isBindingIdentifier();
-
-        if (constant && !isBindingIdentifier) {
-          (path as unknown as NodePath<t.Node>).replaceWith(t.cloneNode(constant));
+        if (!path.isReferencedIdentifier()) {
+          return;
+        }
+        const binding = path.scope.getBinding(path.node.name);
+        if (binding) {
+          const constant = constants.get(binding.identifier);
+          if (constant) {
+            (path as unknown as NodePath<t.Node>).replaceWith(t.cloneNode(constant));
+          }
         }
       },
     });
@@ -204,6 +222,11 @@ export class ASTOptimizer {
         const { argument, operator } = path.node;
 
         if (operator === '!' && t.isUnaryExpression(argument) && argument.operator === '!') {
+          // Only rewrite to Boolean(x) when the global Boolean is still in
+          // scope — a shadowing declaration would change the program's meaning.
+          if (path.scope.getBinding('Boolean')) {
+            return;
+          }
           path.replaceWith(t.callExpression(t.identifier('Boolean'), [argument.argument]));
         }
       },
@@ -211,35 +234,48 @@ export class ASTOptimizer {
   }
 
   private variableInlining(ast: t.File): void {
-    const inlineCandidates = new Map<string, { value: t.Expression; usageCount: number }>();
+    // Scope-aware: keyed by binding identifier so same-named variables in
+    // sibling scopes get independent usage counts, and reassigned bindings
+    // (`binding.constant === false`) are never inlined.
+    const inlineCandidates = new Map<t.Identifier, { value: t.Expression; usageCount: number }>();
 
     traverse(ast, {
       VariableDeclarator(path) {
         const { id, init } = path.node;
 
         if (t.isIdentifier(id) && init && t.isLiteral(init)) {
-          inlineCandidates.set(id.name, { value: init, usageCount: 0 });
+          const binding = path.scope.getBinding(id.name);
+          if (binding && binding.constant && binding.path === path) {
+            inlineCandidates.set(binding.identifier, { value: init, usageCount: 0 });
+          }
         }
       },
 
       Identifier(path) {
-        const name = path.node.name;
-        const candidate = inlineCandidates.get(name);
-
-        if (candidate && !path.isBindingIdentifier()) {
-          candidate.usageCount++;
+        if (!path.isReferencedIdentifier()) {
+          return;
+        }
+        const binding = path.scope.getBinding(path.node.name);
+        if (binding) {
+          const candidate = inlineCandidates.get(binding.identifier);
+          if (candidate) {
+            candidate.usageCount++;
+          }
         }
       },
     });
 
     traverse(ast, {
       Identifier(path) {
-        const name = path.node.name;
-        const candidate = inlineCandidates.get(name);
-        const isBindingIdentifier = path.isBindingIdentifier();
-
-        if (candidate && candidate.usageCount <= 3 && !isBindingIdentifier) {
-          (path as unknown as NodePath<t.Node>).replaceWith(t.cloneNode(candidate.value));
+        if (!path.isReferencedIdentifier()) {
+          return;
+        }
+        const binding = path.scope.getBinding(path.node.name);
+        if (binding) {
+          const candidate = inlineCandidates.get(binding.identifier);
+          if (candidate && candidate.usageCount <= MAX_USAGE_COUNT) {
+            (path as unknown as NodePath<t.Node>).replaceWith(t.cloneNode(candidate.value));
+          }
         }
       },
     });
@@ -251,7 +287,7 @@ export class ASTOptimizer {
         const { object, property, computed } = path.node;
 
         if (computed && t.isStringLiteral(property)) {
-          if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(property.value)) {
+          if (DUPLICATE_IDENTIFIER_PATTERN.test(property.value)) {
             path.replaceWith(t.memberExpression(object, t.identifier(property.value), false));
           }
         }
@@ -265,7 +301,7 @@ export class ASTOptimizer {
         const { key, computed } = path.node;
 
         if (computed && t.isStringLiteral(key) && key.value) {
-          if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key.value)) {
+          if (DUPLICATE_IDENTIFIER_PATTERN.test(key.value)) {
             (path.node as t.ObjectProperty).computed = false;
             (path.node as t.ObjectProperty).key = t.identifier(key.value);
           }

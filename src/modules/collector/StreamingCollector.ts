@@ -1,5 +1,11 @@
 import { logger } from '@utils/logger';
 import type { CodeFile } from '@internal-types/index';
+import { truncateUtf16Safe } from '@modules/collector/collector-utils';
+
+/** Score weight per priority-pattern rank. */
+const PRIORITY_MATCH_WEIGHT = 10;
+/** Preview length for stream summaries (chars). */
+const SUMMARY_PREVIEW_CHARS = 500;
 
 export interface StreamChunk {
   chunkIndex: number;
@@ -7,6 +13,8 @@ export interface StreamChunk {
   url: string;
   content: string;
   isLast: boolean;
+  /** True when maxChunks cut the file short — the stream is NOT complete. */
+  truncated?: boolean;
   metadata?: {
     fileSize: number;
     chunkSize: number;
@@ -29,20 +37,31 @@ export class StreamingCollector {
 
     const content = file.content;
     const totalSize = content.length;
-    const totalChunks = Math.min(Math.ceil(totalSize / chunkSize), maxChunks);
+    const rawTotalChunks = Math.ceil(totalSize / chunkSize);
+    const capped = rawTotalChunks > maxChunks;
+    const totalChunks = Math.min(rawTotalChunks, maxChunks);
 
     logger.debug(`Streaming file: ${file.url} (${totalChunks} chunks)`);
 
     for (let i = 0; i < totalChunks; i++) {
       const offset = i * chunkSize;
-      const chunk = content.substring(offset, offset + chunkSize);
+      // Do not split a UTF-16 surrogate pair across chunk boundaries — reuse
+      // the same safe-truncation helper as SmartCodeCollector.
+      const chunk = truncateUtf16Safe(content, Math.min(offset + chunkSize, totalSize)).substring(
+        offset,
+      );
+      const isLast = !capped && i === totalChunks - 1;
 
       yield {
         chunkIndex: i,
         totalChunks,
         url: file.url,
         content: chunk,
-        isLast: i === totalChunks - 1,
+        isLast,
+        // When maxChunks truncated the file, the final emitted chunk must not
+        // claim completion — mark it so consumers can distinguish "done" from
+        // "stopped early".
+        truncated: capped && i === totalChunks - 1 ? true : undefined,
         metadata: {
           fileSize: totalSize,
           chunkSize: chunk.length,
@@ -104,7 +123,7 @@ export class StreamingCollector {
     for (let i = 0; i < priorities.length; i++) {
       const pattern = priorities[i];
       if (pattern && new RegExp(pattern, 'i').test(file.url)) {
-        score += (priorities.length - i) * 10;
+        score += (priorities.length - i) * PRIORITY_MATCH_WEIGHT;
       }
     }
 
@@ -123,17 +142,10 @@ export class StreamingCollector {
     compressionRatio?: number;
   }> {
     for await (const chunk of this.streamFiles(files, options)) {
-      if (chunk.content.length > 10 * 1024) {
-        yield {
-          chunk,
-          compressed: false,
-        };
-      } else {
-        yield {
-          chunk,
-          compressed: false,
-        };
-      }
+      yield {
+        chunk,
+        compressed: false,
+      };
     }
   }
 
@@ -158,7 +170,7 @@ export class StreamingCollector {
     hasAPI: boolean;
   }> {
     for (const file of files) {
-      const preview = file.content.substring(0, 500);
+      const preview = file.content.substring(0, SUMMARY_PREVIEW_CHARS);
 
       yield {
         url: file.url,

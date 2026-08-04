@@ -425,14 +425,20 @@ function parseMemory64List(f: FileView, rva: number, out: MinidumpSummary): void
   const count = f.readU64();
   const baseRva = f.readU64();
 
+  // Per MSDN, every range's raw data is appended sequentially starting at
+  // BaseRva: range i's data begins at baseRva + the cumulative DataSize of all
+  // previous ranges (NOT baseRva + i * descriptor stride — that formula only
+  // works by accident when every range has a 16-byte DataSize).
+  let dataCursor = Number(baseRva);
   for (let i = 0; i < Number(count) && i < 10000; i++) {
     const start = f.readU64();
     const size = f.readU64();
     out.memoryRanges.push({
       startAddress: `0x${start.toString(16)}`,
       size: Number(size),
-      dataOffset: Number(baseRva) + i * 16, // approximate: baseRva + index * entry size
+      dataOffset: dataCursor,
     });
+    dataCursor += Number(size);
   }
 }
 

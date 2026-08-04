@@ -10,6 +10,11 @@ export function ntSuccess(status: number): boolean {
   return status >= 0;
 }
 
+/** Format an NTSTATUS code as a readable hex string (0xXXXXXXXX). */
+export function ntStatusToString(ntStatus: number): string {
+  return `NTSTATUS 0x${(ntStatus >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 // ── Process ──
 
 let _NtOpenProcess: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
@@ -22,13 +27,28 @@ function getNtOpenProcess() {
   return _NtOpenProcess;
 }
 
+/**
+ * Build an OBJECT_ATTRIBUTES structure (x64) in a Buffer.
+ *
+ * Layout: Length(0) RootDirectory(8) ObjectName(16) Attributes(24)
+ * SecurityDescriptor(32) SecurityQualityOfService(40).
+ *
+ * NOTE: Attributes must be written at offset 24. Writing it at 16 (the
+ * ObjectName pointer slot) hands the kernel a garbage 0x2 pointer instead of a
+ * real UNICODE_STRING — harmless only while callers always pass attr = 0.
+ */
+export function buildObjectAttributes(attr: number, length = 48): Buffer {
+  const oa = Buffer.alloc(length);
+  oa.writeUInt32LE(length, 0);
+  oa.writeUInt32LE(attr, 24);
+  return oa;
+}
+
 export function ntOpenProcess(pid: number, desiredAccess: number, inheritHandle = false): bigint {
   const cid = Buffer.alloc(16);
   cid.writeBigUInt64LE(BigInt(pid), 0);
   const attr = inheritHandle ? 0x00000002 : 0x00000000;
-  const oa = Buffer.alloc(48);
-  oa.writeUInt32LE(48, 0);
-  oa.writeUInt32LE(attr, 16);
+  const oa = buildObjectAttributes(attr);
   const handleBuf = Buffer.alloc(8);
   const status = getNtOpenProcess()(
     koffi.address(handleBuf),
@@ -37,9 +57,7 @@ export function ntOpenProcess(pid: number, desiredAccess: number, inheritHandle 
     koffi.address(cid),
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtOpenProcess failed for PID ${pid}: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtOpenProcess failed for PID ${pid}: ${ntStatusToString(status)}`);
   }
   return handleBuf.readBigUInt64LE(0);
 }
@@ -67,9 +85,7 @@ export function ntReadVirtualMemory(hProcess: bigint, baseAddress: bigint, size:
     koffi.address(bytesRead),
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtReadVirtualMemory failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtReadVirtualMemory failed: ${ntStatusToString(status)}`);
   }
   return buf.subarray(0, Number(bytesRead.readBigUInt64LE(0)));
 }
@@ -94,9 +110,7 @@ export function ntWriteVirtualMemory(hProcess: bigint, baseAddress: bigint, data
     koffi.address(bytesWritten),
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtWriteVirtualMemory failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtWriteVirtualMemory failed: ${ntStatusToString(status)}`);
   }
   return Number(bytesWritten.readBigUInt64LE(0));
 }
@@ -129,9 +143,7 @@ export function ntAllocateVirtualMemory(
     protect,
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtAllocateVirtualMemory failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtAllocateVirtualMemory failed: ${ntStatusToString(status)}`);
   }
   return addrBuf.readBigUInt64LE(0);
 }
@@ -165,9 +177,7 @@ export function ntProtectVirtualMemory(
     koffi.address(old),
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtProtectVirtualMemory failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtProtectVirtualMemory failed: ${ntStatusToString(status)}`);
   }
   return { oldProtect: old.readUInt32LE(0) };
 }
@@ -199,9 +209,7 @@ export function ntFreeVirtualMemory(
     freeType,
   ) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtFreeVirtualMemory failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtFreeVirtualMemory failed: ${ntStatusToString(status)}`);
   }
 }
 
@@ -218,9 +226,7 @@ function getNtSP() {
 export function ntSuspendProcess(hProcess: bigint): void {
   const status = getNtSP()(hProcess as unknown as bigint) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtSuspendProcess failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtSuspendProcess failed: ${ntStatusToString(status)}`);
   }
 }
 
@@ -235,8 +241,6 @@ function getNtRP() {
 export function ntResumeProcess(hProcess: bigint): void {
   const status = getNtRP()(hProcess as unknown as bigint) as number;
   if (!ntSuccess(status)) {
-    throw new Error(
-      `NtResumeProcess failed: NTSTATUS 0x${(status >>> 0).toString(16).padStart(8, '0')}`,
-    );
+    throw new Error(`NtResumeProcess failed: ${ntStatusToString(status)}`);
   }
 }

@@ -1,15 +1,15 @@
 import type { CDPSession } from 'rebrowser-puppeteer-core';
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import {
+  buildFindByTextEvaluation,
   buildFindClickableEvaluation,
   buildQueryAllEvaluation,
-  findByTextEvaluation,
+  buildQuerySelectorEvaluation,
   getComputedStyleEvaluation,
   getStructureEvaluation,
   getXPathEvaluation,
   isInViewportEvaluation,
   observeDOMChangesEvaluation,
-  querySelectorEvaluation,
   stopObservingDOMEvaluation,
   type DOMInspectorClickableElement,
   type DOMInspectorElementInfo,
@@ -87,7 +87,9 @@ export class DOMInspector {
   async querySelector(selector: string, _getAttributes = true): Promise<ElementInfo> {
     try {
       const page = await this.collector.getActivePage();
-      const elementInfo = await page.evaluate(querySelectorEvaluation, selector);
+      const elementInfo = await page.evaluate(
+        new Function(buildQuerySelectorEvaluation(selector)) as () => ElementInfo,
+      );
       logger.info(`querySelector: ${selector} - ${elementInfo.found ? 'found' : 'not found'}`);
       return elementInfo;
     } catch (error) {
@@ -247,7 +249,11 @@ export class DOMInspector {
   async findByText(text: string, tag?: string): Promise<ElementInfo[]> {
     try {
       const page = await this.collector.getActivePage();
-      const elements = await page.evaluate(findByTextEvaluation, text, tag);
+      const elements = await page.evaluate(
+        new Function(buildFindByTextEvaluation(text, tag)) as () => Array<
+          ElementInfo & { selector: string }
+        >,
+      );
       logger.info(`findByText: "${text}" - found ${elements.length} elements`);
       return elements;
     } catch (error) {

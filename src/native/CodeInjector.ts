@@ -5,7 +5,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { CODE_CAVE_MIN_SIZE } from '@src/constants';
+import {
+  CODE_CAVE_MIN_SIZE,
+  CODE_CAVE_SECTION_LABEL,
+  INJECT_CHUNK_SIZE,
+  NOP_OPCODE,
+} from '@src/constants';
 import { ToolError } from '@errors/ToolError';
 import type { PatchOperation, CodeCave } from './CodeInjector.types';
 import {
@@ -45,15 +50,20 @@ export class CodeInjector {
         PAGE.EXECUTE_READWRITE,
       );
 
-      // Write patch
-      WriteProcessMemory(handle, addr, patchBuf);
+      try {
+        // Write patch
+        WriteProcessMemory(handle, addr, patchBuf);
 
-      // Flush instruction cache
-      FlushInstructionCache(handle, addr, patchBuf.length);
-
-      // Restore protection
-      if (protOk) {
-        VirtualProtectEx(handle, addr, patchBuf.length, oldProtect);
+        // Flush instruction cache
+        FlushInstructionCache(handle, addr, patchBuf.length);
+      } finally {
+        // Always restore the old protection — a leaked
+        // PAGE_EXECUTE_READWRITE page in the target process is worse than the
+        // original write error. Skipped only when VirtualProtectEx itself
+        // failed (nothing changed, nothing to restore).
+        if (protOk) {
+          VirtualProtectEx(handle, addr, patchBuf.length, oldProtect);
+        }
       }
 
       const op: PatchOperation = {
@@ -83,17 +93,26 @@ export class CodeInjector {
 
     const handle = openProcessForMemory(patch.pid, true);
     try {
-      const { oldProtect } = VirtualProtectEx(
+      const { success: protOk, oldProtect } = VirtualProtectEx(
         handle,
         addr,
         originalBuf.length,
         PAGE.EXECUTE_READWRITE,
       );
+      if (!protOk) {
+        // Writing into an unwritable page would fail anyway — abort loudly
+        // instead of leaving the patch half-restored.
+        throw new Error(`unpatch: VirtualProtectEx failed for ${patch.address}`);
+      }
 
-      WriteProcessMemory(handle, addr, originalBuf);
-      FlushInstructionCache(handle, addr, originalBuf.length);
-
-      VirtualProtectEx(handle, addr, originalBuf.length, oldProtect);
+      try {
+        WriteProcessMemory(handle, addr, originalBuf);
+        FlushInstructionCache(handle, addr, originalBuf.length);
+      } finally {
+        // Restore protection even when the write/flush fails so the target
+        // process never retains PAGE_EXECUTE_READWRITE.
+        VirtualProtectEx(handle, addr, originalBuf.length, oldProtect);
+      }
 
       patch.isApplied = false;
       return true;
@@ -102,9 +121,9 @@ export class CodeInjector {
     }
   }
 
-  /** NOP out instructions at address (replace with 0x90) */
+  /** NOP out instructions at address (replace with NOP_OPCODE) */
   async nopBytes(pid: number, address: string, count: number): Promise<PatchOperation> {
-    const nops: number[] = Array.from({ length: count }, () => 0x90);
+    const nops: number[] = Array.from({ length: count }, () => NOP_OPCODE);
     return this.patchBytes(pid, address, nops);
   }
 
@@ -137,7 +156,7 @@ export class CodeInjector {
               const chunk = ReadProcessMemory(
                 handle,
                 info.BaseAddress,
-                Math.min(regionSize, 4 * 1024 * 1024),
+                Math.min(regionSize, INJECT_CHUNK_SIZE),
               );
               let caveStart = -1;
 
@@ -154,7 +173,9 @@ export class CodeInjector {
                         address: `0x${caveAddr.toString(16).toUpperCase()}`,
                         size: caveSize,
                         module: mod.name,
-                        section: '.text',
+                        // VirtualQueryEx does not return the section name — the
+                        // label is a placeholder, not a real PE section name.
+                        section: CODE_CAVE_SECTION_LABEL,
                       });
                     }
                     caveStart = -1;
@@ -171,7 +192,7 @@ export class CodeInjector {
                     address: `0x${caveAddr.toString(16).toUpperCase()}`,
                     size: caveSize,
                     module: mod.name,
-                    section: '.text',
+                    section: CODE_CAVE_SECTION_LABEL,
                   });
                 }
               }

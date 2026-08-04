@@ -163,8 +163,16 @@ export function remoteSyscall(
   regs.writeBigUInt64LE(gadget, OFF_RIP);
 
   ptrace(PTRACE_SETREGS, pid, null, koffi.address(regs));
+  // PTRACE_SYSCALL stops the tracee TWICE: once at syscall-enter-stop (before
+  // the kernel executes the syscall — orig_rax holds the number, rax is still
+  // the pre-syscall value) and once at syscall-exit-stop (after completion,
+  // when rax holds the return value). Stopping only once leaves the tracee
+  // parked at enter-stop and reading rax yields the syscall number (9 for
+  // mmap) instead of the result.
   ptrace(PTRACE_SYSCALL, pid, null, null);
-  waitStop(pid);
+  waitStop(pid); // syscall-enter-stop
+  ptrace(PTRACE_SYSCALL, pid, null, null);
+  waitStop(pid); // syscall-exit-stop — rax is now the syscall result
 
   // Read result
   ptrace(PTRACE_GETREGS, pid, null, koffi.address(regs));
@@ -176,6 +184,16 @@ export function remoteSyscall(
 
   const isErr = rax >= 0xfffffffffffff000n; // -4095 .. -1 in unsigned
   return { rax, error: isErr };
+}
+
+/**
+ * Convert a negative syscall result (returned as an unsigned 64-bit rax) to a
+ * positive errno. `-Number(rax)` alone overflows to a huge negative float
+ * (e.g. -1.8e19 for -ENOMEM); BigInt.asIntN reinterprets the two's-complement
+ * value so the sign is recovered first.
+ */
+function raxToErrno(rax: bigint): number {
+  return -Number(BigInt.asIntN(64, rax));
 }
 
 /** mmap(0, size, prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) in remote. */
@@ -192,18 +210,18 @@ export function remoteMmap(pid: number, size: number, prot: number): bigint {
     0xffffffffffffffffn,
     0n,
   );
-  if (r.error) throw new Error(`remote mmap failed: errno ${-Number(r.rax)}`);
+  if (r.error) throw new Error(`remote mmap failed: errno ${raxToErrno(r.rax)}`);
   return r.rax;
 }
 
 /** mprotect(addr, size, prot) in remote. */
 export function remoteMprotect(pid: number, addr: bigint, size: number, prot: number): void {
   const r = remoteSyscall(pid, SYS_MPROTECT, addr, BigInt(size), BigInt(prot));
-  if (r.error) throw new Error(`remote mprotect failed: errno ${-Number(r.rax)}`);
+  if (r.error) throw new Error(`remote mprotect failed: errno ${raxToErrno(r.rax)}`);
 }
 
 /** munmap(addr, size) in remote. */
 export function remoteMunmap(pid: number, addr: bigint, size: number): void {
   const r = remoteSyscall(pid, SYS_MUNMAP, addr, BigInt(size));
-  if (r.error) throw new Error(`remote munmap failed: errno ${-Number(r.rax)}`);
+  if (r.error) throw new Error(`remote munmap failed: errno ${raxToErrno(r.rax)}`);
 }

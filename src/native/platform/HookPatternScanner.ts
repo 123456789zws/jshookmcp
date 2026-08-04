@@ -119,13 +119,24 @@ export function decodeHookTarget(bytes: Uint8Array, funcAddr: bigint): string {
     const rel8 = readInt8(bytes, 1);
     return `0x${(funcAddr + 2n + BigInt(rel8)).toString(16)}`;
   }
-  // JMP [rip+disp32] — in x64, the 8-byte absolute target follows the 6-byte instruction.
+  // JMP [rip+disp32] — two encodings with different target extraction:
+  //   * MinHook-style hook (disp32 == 0): the 8-byte absolute address is
+  //     embedded directly after the 6-byte instruction (bytes 6-13).
+  //   * Compiler output (disp32 != 0): JMP QWORD PTR [rip+disp32] — the target
+  //     is the *address of the memory slot* (funcAddr + 6 + disp32), where the
+  //     indirect pointer lives. Reading bytes 6-13 as an absolute address would
+  //     return garbage (the disp32-relative slot content or neighbouring bytes).
   if (b0 === 0xff && bytes[1] === 0x25) {
-    if (bytes.length >= 14) {
-      const target = readBigUInt64LE(bytes, 6);
-      return `0x${target.toString(16)}`;
+    if (bytes.length < 6) return '0x0';
+    const disp32 = readInt32LE(bytes, 2);
+    if (disp32 === 0) {
+      if (bytes.length >= 14) {
+        const target = readBigUInt64LE(bytes, 6);
+        return `0x${target.toString(16)}`;
+      }
+      return '0x0';
     }
-    return '0x0';
+    return `0x${(funcAddr + 6n + BigInt(disp32)).toString(16)}`;
   }
   // MOV r32, imm32 (B8-BF) — target is the loaded immediate (mov_jmp / mov_call).
   if (b0 >= 0xb8 && b0 <= 0xbf) {

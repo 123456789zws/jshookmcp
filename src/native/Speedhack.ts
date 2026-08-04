@@ -127,12 +127,44 @@ const HOOK_TARGETS: HookTarget[] = [
 
 export class Speedhack {
   private states = new Map<number, SpeedhackState>();
+  /**
+   * Per-pid mutex chain. `apply`/`remove`/`setSpeed` must not interleave: a
+   * re-apply calls `remove()` internally, and `remove` awaits nothing today but
+   * a concurrent apply's `await this.remove(pid)` is still a yield point — two
+   * interleaved applies would double-free the same allocation, restore each
+   * other's hooks, and leak the earlier apply's shared memory.
+   */
+  private locks = new Map<number, Promise<unknown>>();
+
+  private withLock<T>(pid: number, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(pid) ?? Promise.resolve();
+    // Run even when the previous op rejected; the chain stays live.
+    const run = prev.then(fn, fn);
+    const cleanup = run.then(
+      () => {
+        if (this.locks.get(pid) === cleanup) this.locks.delete(pid);
+      },
+      () => {
+        if (this.locks.get(pid) === cleanup) this.locks.delete(pid);
+      },
+    );
+    this.locks.set(pid, cleanup);
+    return run;
+  }
 
   /** Apply speedhack to process with multiplier (1.0 = normal). */
-  async apply(pid: number, speed: number): Promise<{ success: boolean; hookedApis: string[] }> {
-    // Re-apply on an already-hooked process: tear down first to avoid double hooks.
+  apply(pid: number, speed: number): Promise<{ success: boolean; hookedApis: string[] }> {
+    return this.withLock(pid, () => this.applyInternal(pid, speed));
+  }
+
+  private async applyInternal(
+    pid: number,
+    speed: number,
+  ): Promise<{ success: boolean; hookedApis: string[] }> {
+    // Re-apply on an already-hooked process: tear down first to avoid double
+    // hooks. Uses the lock-free internal variant — we already hold the pid lock.
     if (this.states.has(pid)) {
-      await this.remove(pid);
+      await this.removeInternal(pid);
     }
 
     const handle = openProcessForMemory(pid, true);
@@ -157,29 +189,40 @@ export class Speedhack {
         throw new Error('VirtualAllocEx failed for speedhack shared memory');
       }
 
-      // Initialise speed multiplier and zero the base anchors (lazy init in-shellcode).
-      const speedBuf = Buffer.alloc(8);
-      speedBuf.writeDoubleLE(speed, 0);
-      WriteProcessMemory(handle, sharedMem + BigInt(OFF_SPEED), speedBuf);
-      WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_TICK64), Buffer.alloc(8, 0));
-      WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_QPC), Buffer.alloc(8, 0));
-      WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_TICK32), Buffer.alloc(8, 0));
+      try {
+        // Initialise speed multiplier and zero the base anchors (lazy init in-shellcode).
+        const speedBuf = Buffer.alloc(8);
+        speedBuf.writeDoubleLE(speed, 0);
+        WriteProcessMemory(handle, sharedMem + BigInt(OFF_SPEED), speedBuf);
+        WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_TICK64), Buffer.alloc(8, 0));
+        WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_QPC), Buffer.alloc(8, 0));
+        WriteProcessMemory(handle, sharedMem + BigInt(OFF_BASE_TICK32), Buffer.alloc(8, 0));
 
-      let metaIdx = 0;
-      for (const target of HOOK_TARGETS) {
-        const funcAddr = GetProcAddress(kernel32Base, target.apiName);
-        if (funcAddr === 0n) continue; // API not available — skip cleanly.
+        let metaIdx = 0;
+        for (const target of HOOK_TARGETS) {
+          const funcAddr = GetProcAddress(kernel32Base, target.apiName);
+          if (funcAddr === 0n) continue; // API not available — skip cleanly.
 
-        try {
-          const installed = this.installHook(handle, funcAddr, sharedMem, target, metaIdx);
-          if (installed) {
-            hookedApis.push(target.apiName);
-            patchIds.push(target.kind);
-            metaIdx += 1;
+          try {
+            const installed = this.installHook(handle, funcAddr, sharedMem, target, metaIdx);
+            if (installed) {
+              hookedApis.push(target.apiName);
+              patchIds.push(target.kind);
+              metaIdx += 1;
+            }
+          } catch {
+            // Best-effort: a single hook failure should not abort the others.
           }
-        } catch {
-          // Best-effort: a single hook failure should not abort the others.
         }
+      } catch (error) {
+        // The shared allocation is ours alone — release it so the target
+        // process never keeps an orphaned 4096B PAGE_EXECUTE_READWRITE region.
+        try {
+          VirtualFreeEx(handle, sharedMem, 0, MEM.RELEASE);
+        } catch {
+          // Best-effort cleanup — do not mask the original error.
+        }
+        throw error;
       }
 
       this.states.set(pid, {
@@ -192,16 +235,17 @@ export class Speedhack {
       });
 
       return { success: hookedApis.length > 0, hookedApis };
-    } catch (error) {
-      CloseHandle(handle);
-      throw error;
     } finally {
       CloseHandle(handle);
     }
   }
 
   /** Update speed multiplier (without re-hooking). */
-  async setSpeed(pid: number, speed: number): Promise<boolean> {
+  setSpeed(pid: number, speed: number): Promise<boolean> {
+    return this.withLock(pid, () => this.setSpeedInternal(pid, speed));
+  }
+
+  private async setSpeedInternal(pid: number, speed: number): Promise<boolean> {
     const state = this.states.get(pid);
     if (!state || !state.isActive || !state.allocatedMemory) return false;
 
@@ -230,7 +274,11 @@ export class Speedhack {
   }
 
   /** Remove speedhack, restore original functions. */
-  async remove(pid: number): Promise<boolean> {
+  remove(pid: number): Promise<boolean> {
+    return this.withLock(pid, () => this.removeInternal(pid));
+  }
+
+  private async removeInternal(pid: number): Promise<boolean> {
     const state = this.states.get(pid);
     if (!state) return false;
 
@@ -248,15 +296,20 @@ export class Speedhack {
             const origSize = metaBuf.readUInt32LE(8);
             if (origAddr !== 0n && origSize > 0 && origSize <= DETOUR_BYTES) {
               const origBytes = metaBuf.subarray(12, 12 + origSize);
-              const { oldProtect } = VirtualProtectEx(
+              const { success: protOk, oldProtect } = VirtualProtectEx(
                 handle,
                 origAddr,
                 origSize,
                 PAGE.EXECUTE_READWRITE,
               );
-              WriteProcessMemory(handle, origAddr, origBytes);
-              FlushInstructionCache(handle, origAddr, origSize);
-              VirtualProtectEx(handle, origAddr, origSize, oldProtect);
+              if (!protOk) continue; // cannot write — keep going with the rest
+              try {
+                WriteProcessMemory(handle, origAddr, origBytes);
+                FlushInstructionCache(handle, origAddr, origSize);
+              } finally {
+                // Never leave the function entry PAGE_EXECUTE_READWRITE.
+                VirtualProtectEx(handle, origAddr, origSize, oldProtect);
+              }
             }
           } catch {
             // Best-effort restore — continue with remaining hooks.
@@ -318,10 +371,25 @@ export class Speedhack {
     // 4. Patch function entry: JMP scale_handler (14-byte abs JMP).
     const scaleHandlerAddr = sharedMem + BigInt(target.scaleOff);
     const jumpToScale = this.buildAbsoluteJump(scaleHandlerAddr);
-    const { oldProtect } = VirtualProtectEx(handle, funcAddr, DETOUR_BYTES, PAGE.EXECUTE_READWRITE);
-    WriteProcessMemory(handle, funcAddr, Buffer.from(jumpToScale));
-    FlushInstructionCache(handle, funcAddr, DETOUR_BYTES);
-    VirtualProtectEx(handle, funcAddr, DETOUR_BYTES, oldProtect);
+    const { success: protOk, oldProtect } = VirtualProtectEx(
+      handle,
+      funcAddr,
+      DETOUR_BYTES,
+      PAGE.EXECUTE_READWRITE,
+    );
+    if (!protOk) {
+      // Writing into an unwritable page would fail anyway — report the failed
+      // hook so apply() skips it instead of recording it as installed.
+      throw new Error(`speedhack: VirtualProtectEx failed for ${target.apiName}`);
+    }
+    try {
+      WriteProcessMemory(handle, funcAddr, Buffer.from(jumpToScale));
+      FlushInstructionCache(handle, funcAddr, DETOUR_BYTES);
+    } finally {
+      // Restore protection even on write failure — never leave the function
+      // entry PAGE_EXECUTE_READWRITE in the target process.
+      VirtualProtectEx(handle, funcAddr, DETOUR_BYTES, oldProtect);
+    }
 
     // 5. Save restore metadata: [origAddr(8) | origSize(4) | origBytes(14) | pad(2)]
     const metaBuf = Buffer.alloc(RESTORE_META_SLOT, 0);

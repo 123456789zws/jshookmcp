@@ -42,6 +42,23 @@ const SECTION_HEADER_SIZE = 40;
 const IMPORT_DESCRIPTOR_SIZE = 20;
 const COMPARE_BYTES = 16; // Bytes to compare for inline hook detection
 
+// PE header layout offsets (IMAGE_DOS_HEADER / IMAGE_NT_HEADERS, PE/COFF spec).
+const DOS_HEADER_SIZE = 64;
+const E_LFANEW_OFFSET = 60; // e_lfanew within IMAGE_DOS_HEADER
+const NT_HEADERS_SIZE = 264; // 4 signature + 20 file header + 240 PE32+ optional header
+const FILE_HEADER_OFFSET = 4; // within NT headers
+const OPTIONAL_HEADER_OFFSET = 24; // within NT headers
+const PE32_NUMBER_OF_RVA_AND_SIZES_OFFSET = 116;
+const PE32PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET = 132;
+const PE32_DATA_DIRECTORIES_OFFSET = 120;
+const PE32PLUS_DATA_DIRECTORIES_OFFSET = 136;
+const MAX_DATA_DIRECTORIES = 16;
+
+/** IMAGE_ORDINAL_FLAG: the high bit of a thunk value marks an import by ordinal. */
+function ordinalFlag(isPE32Plus: boolean): bigint {
+  return isPE32Plus ? 0x8000000000000000n : 0x80000000n;
+}
+
 // ── PEAnalyzer Class ──
 
 export class PEAnalyzer {
@@ -53,29 +70,29 @@ export class PEAnalyzer {
     const hProcess = openProcessForMemory(pid);
 
     try {
-      // Read DOS header (64 bytes)
-      const dosData = ReadProcessMemory(hProcess, base, 64);
+      // Read DOS header
+      const dosData = ReadProcessMemory(hProcess, base, DOS_HEADER_SIZE);
       const e_magic = dosData.readUInt16LE(0);
       if (e_magic !== MZ_MAGIC) {
         throw new Error(`Invalid DOS header: expected 0x5A4D, got 0x${e_magic.toString(16)}`);
       }
-      const e_lfanew = dosData.readUInt32LE(60);
+      const e_lfanew = dosData.readUInt32LE(E_LFANEW_OFFSET);
 
       // Read NT headers (4 + 20 + 240 for PE32+)
-      const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), 264);
+      const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), NT_HEADERS_SIZE);
       const ntSignature = ntData.readUInt32LE(0);
       if (ntSignature !== PE_SIGNATURE) {
         throw new Error(`Invalid PE signature: expected 0x4550, got 0x${ntSignature.toString(16)}`);
       }
 
       // File header (offset 4, 20 bytes)
-      const machine = ntData.readUInt16LE(4);
-      const numberOfSections = ntData.readUInt16LE(6);
-      const timeDateStamp = ntData.readUInt32LE(8);
-      const characteristics = ntData.readUInt16LE(22);
+      const machine = ntData.readUInt16LE(FILE_HEADER_OFFSET);
+      const numberOfSections = ntData.readUInt16LE(FILE_HEADER_OFFSET + 2);
+      const timeDateStamp = ntData.readUInt32LE(FILE_HEADER_OFFSET + 4);
+      const characteristics = ntData.readUInt16LE(FILE_HEADER_OFFSET + 18);
 
       // Optional header (offset 24)
-      const magic = ntData.readUInt16LE(24);
+      const magic = ntData.readUInt16LE(OPTIONAL_HEADER_OFFSET);
       const isPE32Plus = magic === PE32PLUS_MAGIC;
 
       let imageBase: bigint;
@@ -87,12 +104,12 @@ export class PEAnalyzer {
         entryPoint = ntData.readUInt32LE(40);
         imageBase = ntData.readBigUInt64LE(48);
         sizeOfImage = ntData.readUInt32LE(80);
-        numberOfRvaAndSizes = ntData.readUInt32LE(132);
+        numberOfRvaAndSizes = ntData.readUInt32LE(PE32PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET);
       } else {
         entryPoint = ntData.readUInt32LE(40);
         imageBase = BigInt(ntData.readUInt32LE(52));
         sizeOfImage = ntData.readUInt32LE(80);
-        numberOfRvaAndSizes = ntData.readUInt32LE(116);
+        numberOfRvaAndSizes = ntData.readUInt32LE(PE32_NUMBER_OF_RVA_AND_SIZES_OFFSET);
       }
 
       return {
@@ -210,68 +227,77 @@ export class PEAnalyzer {
     const hProcess = openProcessForMemory(pid);
 
     try {
-      const headers = await this.readCoreHeaders(hProcess, base);
-      const exportDir = headers.dataDirectories[IMAGE_DIRECTORY_ENTRY.EXPORT];
-      if (!exportDir || exportDir.rva === 0) return [];
-
-      // Read IMAGE_EXPORT_DIRECTORY (40 bytes)
-      const expData = ReadProcessMemory(hProcess, base + BigInt(exportDir.rva), 40);
-      const numberOfNames = expData.readUInt32LE(24);
-      const addressOfFunctionsRva = expData.readUInt32LE(28);
-      const addressOfNamesRva = expData.readUInt32LE(32);
-      const addressOfNameOrdinalsRva = expData.readUInt32LE(36);
-      const ordinalBase = expData.readUInt32LE(16);
-
-      const exports: ExportEntry[] = [];
-
-      // Read name pointers array
-      const namesBuf = ReadProcessMemory(
-        hProcess,
-        base + BigInt(addressOfNamesRva),
-        numberOfNames * 4,
-      );
-      const ordsBuf = ReadProcessMemory(
-        hProcess,
-        base + BigInt(addressOfNameOrdinalsRva),
-        numberOfNames * 2,
-      );
-
-      for (let i = 0; i < Math.min(numberOfNames, 2000); i++) {
-        const nameRva = namesBuf.readUInt32LE(i * 4);
-        const ordIndex = ordsBuf.readUInt16LE(i * 2);
-
-        // Read function name
-        const nameBuf = ReadProcessMemory(hProcess, base + BigInt(nameRva), 256);
-        const nullIdx = nameBuf.indexOf(0);
-        const name = nameBuf.subarray(0, nullIdx > 0 ? nullIdx : 256).toString('ascii');
-
-        // Read function RVA
-        const funcRva = ReadProcessMemory(
-          hProcess,
-          base + BigInt(addressOfFunctionsRva + ordIndex * 4),
-          4,
-        ).readUInt32LE(0);
-
-        // Check for forwarded export (RVA points inside export directory)
-        let forwardedTo: string | null = null;
-        if (funcRva >= exportDir.rva && funcRva < exportDir.rva + exportDir.size) {
-          const fwdBuf = ReadProcessMemory(hProcess, base + BigInt(funcRva), 256);
-          const fwdEnd = fwdBuf.indexOf(0);
-          forwardedTo = fwdBuf.subarray(0, fwdEnd > 0 ? fwdEnd : 256).toString('ascii');
-        }
-
-        exports.push({
-          name,
-          ordinal: ordinalBase + ordIndex,
-          rva: `0x${funcRva.toString(16)}`,
-          forwardedTo,
-        });
-      }
-
-      return exports;
+      return await this.parseExportsInternal(hProcess, base);
     } finally {
       CloseHandle(hProcess);
     }
+  }
+
+  /**
+   * Export-table parser over an already-open process handle. Shared by the
+   * public {@link parseExports} and {@link detectIATHooks} (which reuses its
+   * own handle instead of opening a second one per module).
+   */
+  private async parseExportsInternal(hProcess: bigint, base: bigint): Promise<ExportEntry[]> {
+    const headers = await this.readCoreHeaders(hProcess, base);
+    const exportDir = headers.dataDirectories[IMAGE_DIRECTORY_ENTRY.EXPORT];
+    if (!exportDir || exportDir.rva === 0) return [];
+
+    // Read IMAGE_EXPORT_DIRECTORY (40 bytes)
+    const expData = ReadProcessMemory(hProcess, base + BigInt(exportDir.rva), 40);
+    const numberOfNames = expData.readUInt32LE(24);
+    const addressOfFunctionsRva = expData.readUInt32LE(28);
+    const addressOfNamesRva = expData.readUInt32LE(32);
+    const addressOfNameOrdinalsRva = expData.readUInt32LE(36);
+    const ordinalBase = expData.readUInt32LE(16);
+
+    const exports: ExportEntry[] = [];
+
+    // Read name pointers array
+    const namesBuf = ReadProcessMemory(
+      hProcess,
+      base + BigInt(addressOfNamesRva),
+      numberOfNames * 4,
+    );
+    const ordsBuf = ReadProcessMemory(
+      hProcess,
+      base + BigInt(addressOfNameOrdinalsRva),
+      numberOfNames * 2,
+    );
+
+    for (let i = 0; i < Math.min(numberOfNames, 2000); i++) {
+      const nameRva = namesBuf.readUInt32LE(i * 4);
+      const ordIndex = ordsBuf.readUInt16LE(i * 2);
+
+      // Read function name
+      const nameBuf = ReadProcessMemory(hProcess, base + BigInt(nameRva), 256);
+      const nullIdx = nameBuf.indexOf(0);
+      const name = nameBuf.subarray(0, nullIdx > 0 ? nullIdx : 256).toString('ascii');
+
+      // Read function RVA
+      const funcRva = ReadProcessMemory(
+        hProcess,
+        base + BigInt(addressOfFunctionsRva + ordIndex * 4),
+        4,
+      ).readUInt32LE(0);
+
+      // Check for forwarded export (RVA points inside export directory)
+      let forwardedTo: string | null = null;
+      if (funcRva >= exportDir.rva && funcRva < exportDir.rva + exportDir.size) {
+        const fwdBuf = ReadProcessMemory(hProcess, base + BigInt(funcRva), 256);
+        const fwdEnd = fwdBuf.indexOf(0);
+        forwardedTo = fwdBuf.subarray(0, fwdEnd > 0 ? fwdEnd : 256).toString('ascii');
+      }
+
+      exports.push({
+        name,
+        ordinal: ordinalBase + ordIndex,
+        rva: `0x${funcRva.toString(16)}`,
+        forwardedTo,
+      });
+    }
+
+    return exports;
   }
 
   /**
@@ -365,6 +391,9 @@ export class PEAnalyzer {
   async detectIATHooks(pid: number, moduleName?: string): Promise<IATHookDetection[]> {
     const hProcess = openProcessForMemory(pid);
     const detections: IATHookDetection[] = [];
+    // Per source module: set of exported names that are forwarded. Computed
+    // lazily (one export-table parse per distinct source module).
+    const srcForwardCache = new Map<string, Set<string>>();
 
     try {
       const modules = this.enumerateModulesInternal(hProcess);
@@ -380,7 +409,7 @@ export class PEAnalyzer {
           if (!importDir || importDir.rva === 0) continue;
 
           const thunkSize = headers.isPE32Plus ? 8 : 4;
-          const IMAGE_ORDINAL_FLAG = headers.isPE32Plus ? 0x8000000000000000n : 0x80000000n;
+          const ordinal = ordinalFlag(headers.isPE32Plus);
           let descOffset = importDir.rva;
 
           // Walk IMAGE_IMPORT_DESCRIPTOR chain (20 bytes each).
@@ -409,6 +438,24 @@ export class PEAnalyzer {
             const srcBase = sourceMod ? BigInt(sourceMod.base) : 0n;
             const srcEnd = sourceMod ? srcBase + BigInt(sourceMod.size) : 0n;
 
+            // Forwarded exports legitimately resolve OUTSIDE the source module:
+            // the loader follows the forward chain (e.g. kernel32 → api-ms-win-*
+            // → KernelBase) and writes the FINAL address into the IAT. Reading the
+            // source module's export table once lets us skip such entries — only
+            // genuinely redirected IAT entries are hooks. Ordinal-only forwards
+            // (no name in the export table) cannot be detected here.
+            if (sourceMod && !srcForwardCache.has(sourceMod.name)) {
+              const srcExports = await this.parseExportsInternal(hProcess, srcBase);
+              const forwarded = new Set<string>();
+              for (const e of srcExports) {
+                if (e.forwardedTo) {
+                  forwarded.add(e.name);
+                  forwarded.add(`Ordinal#${e.ordinal}`);
+                }
+              }
+              srcForwardCache.set(sourceMod.name, forwarded);
+            }
+
             // Walk IAT thunks.
             for (let j = 0; j < 2000; j++) {
               const iatAbs = base + BigInt(firstThunkRva + j * thunkSize);
@@ -430,7 +477,7 @@ export class PEAnalyzer {
                 const intValue = headers.isPE32Plus
                   ? intData.readBigUInt64LE(0)
                   : BigInt(intData.readUInt32LE(0));
-                if ((intValue & IMAGE_ORDINAL_FLAG) !== 0n) {
+                if ((intValue & ordinal) !== 0n) {
                   funcName = `Ordinal#${Number(intValue & 0xffffn)}`;
                 } else if (intValue !== 0n) {
                   const hintNameData = ReadProcessMemory(
@@ -445,6 +492,10 @@ export class PEAnalyzer {
 
               // Flag if the resolved address is outside the source module range.
               if (sourceMod && (funcAddr < srcBase || funcAddr >= srcEnd)) {
+                // Skip forwarded exports — the loader wrote the final target,
+                // so an outside-module address is expected, not a hook.
+                if (srcForwardCache.get(sourceMod.name)?.has(funcName)) continue;
+
                 let actualModule: string | null = null;
                 for (const m of modules) {
                   const mb = BigInt(m.base);
@@ -525,20 +576,24 @@ export class PEAnalyzer {
   // ── Private Helpers ──
 
   private async readCoreHeaders(hProcess: bigint, base: bigint) {
-    const dosData = ReadProcessMemory(hProcess, base, 64);
-    const e_lfanew = dosData.readUInt32LE(60);
+    const dosData = ReadProcessMemory(hProcess, base, DOS_HEADER_SIZE);
+    const e_lfanew = dosData.readUInt32LE(E_LFANEW_OFFSET);
 
-    const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), 264);
-    const numSections = ntData.readUInt16LE(6);
-    const sizeOfOptionalHeader = ntData.readUInt16LE(20);
-    const magic = ntData.readUInt16LE(24);
+    const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), NT_HEADERS_SIZE);
+    const numSections = ntData.readUInt16LE(FILE_HEADER_OFFSET + 2);
+    const sizeOfOptionalHeader = ntData.readUInt16LE(FILE_HEADER_OFFSET + 16);
+    const magic = ntData.readUInt16LE(OPTIONAL_HEADER_OFFSET);
     const isPE32Plus = magic === PE32PLUS_MAGIC;
-    const numberOfRvaAndSizes = isPE32Plus ? ntData.readUInt32LE(132) : ntData.readUInt32LE(116);
+    const numberOfRvaAndSizes = isPE32Plus
+      ? ntData.readUInt32LE(PE32PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET)
+      : ntData.readUInt32LE(PE32_NUMBER_OF_RVA_AND_SIZES_OFFSET);
 
     // Data directories start after fixed optional header fields
-    const dataDirectoriesOffset = isPE32Plus ? 136 : 120;
+    const dataDirectoriesOffset = isPE32Plus
+      ? PE32PLUS_DATA_DIRECTORIES_OFFSET
+      : PE32_DATA_DIRECTORIES_OFFSET;
     const dataDirectories: { rva: number; size: number }[] = [];
-    for (let i = 0; i < Math.min(numberOfRvaAndSizes, 16); i++) {
+    for (let i = 0; i < Math.min(numberOfRvaAndSizes, MAX_DATA_DIRECTORIES); i++) {
       const off = dataDirectoriesOffset + i * 8;
       if (off + 8 <= ntData.length) {
         dataDirectories.push({
@@ -548,9 +603,32 @@ export class PEAnalyzer {
       }
     }
 
-    const firstSectionOffset = e_lfanew + 4 + 20 + sizeOfOptionalHeader;
+    const firstSectionOffset = e_lfanew + FILE_HEADER_OFFSET + 20 + sizeOfOptionalHeader;
 
     return { numSections, isPE32Plus, firstSectionOffset, dataDirectories };
+  }
+
+  /** Read the section table from process memory (name/virtual layout only). */
+  private async readSectionsFromMemory(
+    hProcess: bigint,
+    base: bigint,
+    headers: { numSections: number; firstSectionOffset: number },
+  ): Promise<Array<{ name: string; virtualAddress: number; virtualSize: number }>> {
+    const sections: Array<{ name: string; virtualAddress: number; virtualSize: number }> = [];
+    for (let i = 0; i < headers.numSections; i++) {
+      const sectionOffset = headers.firstSectionOffset + i * SECTION_HEADER_SIZE;
+      const sectionData = ReadProcessMemory(
+        hProcess,
+        base + BigInt(sectionOffset),
+        SECTION_HEADER_SIZE,
+      );
+      const nameBytes = sectionData.subarray(0, 8);
+      const name = nameBytes.toString('utf8').split(String.fromCharCode(0))[0]!;
+      const virtualSize = sectionData.readUInt32LE(8);
+      const virtualAddress = sectionData.readUInt32LE(12);
+      sections.push({ name, virtualAddress, virtualSize });
+    }
+    return sections;
   }
 
   private readThunkArray(
@@ -561,7 +639,7 @@ export class PEAnalyzer {
   ): ImportFunction[] {
     const thunkSize = isPE32Plus ? 8 : 4;
     const functions: ImportFunction[] = [];
-    const IMAGE_ORDINAL_FLAG = isPE32Plus ? 0x8000000000000000n : 0x80000000n;
+    const ordinal = ordinalFlag(isPE32Plus);
 
     for (let i = 0; i < 2000; i++) {
       // Safety limit
@@ -576,7 +654,7 @@ export class PEAnalyzer {
 
       if (thunkValue === 0n) break; // End of array
 
-      if ((thunkValue & IMAGE_ORDINAL_FLAG) !== 0n) {
+      if ((thunkValue & ordinal) !== 0n) {
         // Import by ordinal
         functions.push({
           name: `Ordinal#${Number(thunkValue & 0xffffn)}`,
@@ -634,23 +712,22 @@ export class PEAnalyzer {
     return modules;
   }
 
+  /**
+   * Convert an RVA to a file offset using the section table parsed by
+   * {@link parsePEFromBuffer} — no duplicated section-header parsing. Returns
+   * -1 when the buffer is not a valid PE or the RVA maps to no section.
+   */
   private rvaToFileOffset(peData: Buffer, rva: number): number {
-    // Read section headers to convert RVA to file offset
-    const e_lfanew = peData.readUInt32LE(60);
-    const numSections = peData.readUInt16LE(e_lfanew + 6);
-    const sizeOfOptionalHeader = peData.readUInt16LE(e_lfanew + 20);
-    const secStart = e_lfanew + 24 + sizeOfOptionalHeader;
+    let parsed: PEParsedBuffer;
+    try {
+      parsed = this.parsePEFromBuffer(peData);
+    } catch {
+      return -1; // Not a valid PE — nothing to map
+    }
 
-    for (let i = 0; i < numSections; i++) {
-      const off = secStart + i * 40;
-      if (off + 40 > peData.length) break;
-
-      const virtualAddr = peData.readUInt32LE(off + 12);
-      const virtualSize = peData.readUInt32LE(off + 8);
-      const rawOffset = peData.readUInt32LE(off + 20);
-
-      if (rva >= virtualAddr && rva < virtualAddr + virtualSize) {
-        return rawOffset + (rva - virtualAddr);
+    for (const section of parsed.sections) {
+      if (rva >= section.virtualAddress && rva < section.virtualAddress + section.virtualSize) {
+        return section.pointerToRawData + (rva - section.virtualAddress);
       }
     }
 
@@ -703,7 +780,7 @@ export class PEAnalyzer {
         `Invalid DOS header in buffer: expected 0x5A4D, got 0x${e_magic.toString(16)}`,
       );
     }
-    const e_lfanew = buffer.readUInt32LE(60);
+    const e_lfanew = buffer.readUInt32LE(E_LFANEW_OFFSET);
 
     // Read NT headers
     const ntSignature = buffer.readUInt32LE(e_lfanew);
@@ -714,19 +791,19 @@ export class PEAnalyzer {
     }
 
     // File header (offset = e_lfanew + 4)
-    const fileHeaderOffset = e_lfanew + 4;
+    const fileHeaderOffset = e_lfanew + FILE_HEADER_OFFSET;
     const machine = buffer.readUInt16LE(fileHeaderOffset);
     const numberOfSections = buffer.readUInt16LE(fileHeaderOffset + 2);
     const timeDateStamp = buffer.readUInt32LE(fileHeaderOffset + 4);
 
     // Optional header magic (offset = e_lfanew + 24)
     // Note: isPE32Plus determination available for future PE32+ specific handling
-    // const magic = buffer.readUInt16LE(e_lfanew + 24);
+    // const magic = buffer.readUInt16LE(e_lfanew + OPTIONAL_HEADER_OFFSET);
     // const isPE32Plus = magic === PE32PLUS_MAGIC;
 
     // Section table offset = e_lfanew + 24 + sizeOfOptionalHeader
     const sizeOfOptionalHeader = buffer.readUInt16LE(fileHeaderOffset + 16);
-    const sectionTableOffset = e_lfanew + 24 + sizeOfOptionalHeader;
+    const sectionTableOffset = e_lfanew + OPTIONAL_HEADER_OFFSET + sizeOfOptionalHeader;
 
     // Parse sections
     const sections: Array<{
@@ -780,34 +857,10 @@ export class PEAnalyzer {
     const hProcess = openProcessForMemory(pid);
 
     try {
-      // 1. Parse memory PE (we need sections, so use the internal method)
-      // Read DOS header
-      const dosData = ReadProcessMemory(hProcess, base, 64);
-      const e_lfanew = dosData.readUInt32LE(60);
-
-      // Read NT headers to get section count
-      const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), 264);
-      const fileHeaderOffset = 4;
-      const numberOfSections = ntData.readUInt16LE(fileHeaderOffset + 2);
-      const sizeOfOptionalHeader = ntData.readUInt16LE(fileHeaderOffset + 16);
-      const sectionTableOffset = e_lfanew + 24 + sizeOfOptionalHeader;
-
-      // Parse memory sections
-      const memorySections: Array<{ name: string; virtualAddress: number; virtualSize: number }> =
-        [];
-      for (let i = 0; i < numberOfSections; i++) {
-        const sectionOffset = sectionTableOffset + i * SECTION_HEADER_SIZE;
-        const sectionData = ReadProcessMemory(
-          hProcess,
-          base + BigInt(sectionOffset),
-          SECTION_HEADER_SIZE,
-        );
-        const nameBytes = sectionData.subarray(0, 8);
-        const name = nameBytes.toString('utf8').split(String.fromCharCode(0))[0]!;
-        const virtualSize = sectionData.readUInt32LE(8);
-        const virtualAddress = sectionData.readUInt32LE(12);
-        memorySections.push({ name, virtualAddress, virtualSize });
-      }
+      // 1. Parse memory PE (shared header + section parsing instead of a
+      //    third copy of the DOS/NT header reads).
+      const headers = await this.readCoreHeaders(hProcess, base);
+      const memorySections = await this.readSectionsFromMemory(hProcess, base, headers);
 
       // 2. Read and parse disk PE file
       const diskBuffer = await fs.readFile(diskPath);

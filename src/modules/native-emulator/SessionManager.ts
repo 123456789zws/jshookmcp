@@ -11,14 +11,15 @@
  * register state mid-instruction.
  *
  * Sessions also expire: an AI that forgets to destroy a session would otherwise
- * leak tens of MB (mapped .so bytes + stack + JNI tables) per orphan. An idle
- * sweep, modelled on AutoPruner's unref'd interval, reaps sessions untouched for
- * longer than the TTL. dispose() (wired into the server's graceful shutdown)
- * stops the timer and drops every session.
+ * leak tens of MB (mapped .so bytes + stack + JNI tables) per orphan. The idle
+ * sweep lives in the shared {@link IdleSweepRegistry} base class (also used by
+ * the dart-inspector snapshot manager); this subclass adds the per-session
+ * emulator construction and the emulator `dispose()` on reap.
  */
 import { randomUUID } from 'node:crypto';
 
 import { NEMU_SESSION_IDLE_TTL_MS, NEMU_SESSION_SWEEP_MS, NEMU_MAX_SESSIONS } from '@src/constants';
+import { IdleSweepRegistry, type SessionInfo } from './IdleSweepRegistry';
 import { NativeEmulator, type NativeEmulatorOptions } from './NativeEmulator';
 import type { BionicOptions } from './bionic';
 import type { AndroidSyscallOptions } from './syscalls';
@@ -32,11 +33,7 @@ export interface EmulatorSession {
 }
 
 /** Session metadata exposed to callers (never leaks the emulator instance). */
-export interface SessionInfo {
-  id: string;
-  createdAt: number;
-  lastUsedAt: number;
-}
+export type { SessionInfo };
 
 export interface SessionManagerOptions {
   /** Idle threshold before an untouched session is swept (ms). */
@@ -55,20 +52,17 @@ export interface CreateSessionOptions {
   bionic?: BionicOptions;
 }
 
-export class SessionManager {
-  private readonly sessions = new Map<string, EmulatorSession>();
-  private readonly idleTtlMs: number;
-  private readonly sweepIntervalMs: number;
-  private readonly maxSessions: number;
+export class SessionManager extends IdleSweepRegistry<EmulatorSession> {
+  protected readonly sessionLabel = 'emulator';
   private readonly emulatorOptions: NativeEmulatorOptions;
-  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: SessionManagerOptions = {}) {
-    this.idleTtlMs = options.idleTtlMs ?? NEMU_SESSION_IDLE_TTL_MS;
-    this.sweepIntervalMs = options.sweepIntervalMs ?? NEMU_SESSION_SWEEP_MS;
-    this.maxSessions = options.maxSessions ?? NEMU_MAX_SESSIONS;
+    super(options, {
+      idleTtlMs: NEMU_SESSION_IDLE_TTL_MS,
+      sweepIntervalMs: NEMU_SESSION_SWEEP_MS,
+      maxSessions: NEMU_MAX_SESSIONS,
+    });
     this.emulatorOptions = options.emulatorOptions ?? {};
-    this.startSweep();
   }
 
   /**
@@ -77,7 +71,7 @@ export class SessionManager {
    * runaway caller can't exhaust memory.
    */
   createSession(options: CreateSessionOptions = {}): EmulatorSession {
-    if (this.sessions.size >= this.maxSessions) {
+    if (this.isAtCapacity()) {
       throw new Error(
         `Emulator session limit reached (${this.maxSessions}); destroy an existing session first`,
       );
@@ -98,76 +92,8 @@ export class SessionManager {
     return session;
   }
 
-  /** Look up a session, refreshing its lastUsedAt; undefined when unknown. */
-  getSession(id: string): EmulatorSession | undefined {
-    const session = this.sessions.get(id);
-    if (session) session.lastUsedAt = Date.now();
-    return session;
-  }
-
-  /** Look up a session, refreshing its lastUsedAt; throws when unknown. */
-  requireSession(id: string): EmulatorSession {
-    const session = this.getSession(id);
-    if (!session) {
-      throw new Error(`Unknown emulator session: ${id}`);
-    }
-    return session;
-  }
-
-  /** Destroy a session; returns whether it existed. */
-  destroySession(id: string): boolean {
-    const session = this.sessions.get(id);
-    if (session) {
-      // Release emulator resources before removing from registry
-      session.emulator.dispose();
-      this.sessions.delete(id);
-      return true;
-    }
-    return false;
-  }
-
-  /** List session metadata without exposing the underlying emulators. */
-  listSessions(): SessionInfo[] {
-    const infos: SessionInfo[] = [];
-    for (const s of this.sessions.values()) {
-      infos.push({ id: s.id, createdAt: s.createdAt, lastUsedAt: s.lastUsedAt });
-    }
-    return infos;
-  }
-
-  /** Current live session count. */
-  count(): number {
-    return this.sessions.size;
-  }
-
-  /** Stop the sweep timer and drop every session. Idempotent. */
-  dispose(): void {
-    if (this.sweepTimer) {
-      clearInterval(this.sweepTimer);
-      this.sweepTimer = null;
-    }
-    // Dispose all emulator instances before clearing
-    for (const session of this.sessions.values()) {
-      session.emulator.dispose();
-    }
-    this.sessions.clear();
-  }
-
-  private startSweep(): void {
-    this.sweepTimer = setInterval(() => this.sweep(), this.sweepIntervalMs);
-    // Don't keep the event loop (and thus the process) alive for the sweep.
-    if (this.sweepTimer.unref) this.sweepTimer.unref();
-  }
-
-  /** Reap sessions whose last use is older than the idle TTL. */
-  private sweep(): void {
-    const now = Date.now();
-    for (const [id, session] of this.sessions) {
-      if (now - session.lastUsedAt >= this.idleTtlMs) {
-        // Dispose emulator resources before removing
-        session.emulator.dispose();
-        this.sessions.delete(id);
-      }
-    }
+  /** Release emulator resources before the session is removed (destroy/sweep/dispose). */
+  protected release(session: EmulatorSession): void {
+    session.emulator.dispose();
   }
 }

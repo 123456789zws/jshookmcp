@@ -6,6 +6,7 @@ import {
   EXCLUDE_MATCH_RULES,
   EXCLUDE_SELECTORS,
 } from '@modules/captcha/CaptchaDetector.constants';
+import { CAPTCHA_SELECTORS } from '@modules/captcha/rules/selectors';
 import type {
   CaptchaAssessment,
   CaptchaCandidate,
@@ -18,6 +19,30 @@ import type {
 
 // Re-export for backward compatibility
 export type { CaptchaDetectionResult } from '@modules/captcha/types';
+
+/**
+ * Assessment thresholds shared by the confidence/score heuristics and the
+ * in-page slider verification script.
+ */
+const CAPTCHA_THRESHOLDS = {
+  /** Confidence required to call an assessment likelyCaptcha. */
+  likelyCaptchaConfidence: 90,
+  /** Score margin (captcha minus exclude signals) for likelyCaptcha. */
+  likelyCaptchaScoreMargin: 70,
+  /** Confidence required to recommend a manual solve. */
+  manualConfidence: 95,
+  /** Candidate count required to recommend a manual solve. */
+  manualCandidateCount: 2,
+  /** Score margin required to recommend a manual solve. */
+  manualScoreMargin: 120,
+  /** Slider element size bounds (min/max width and height, px). */
+  sliderMinWidth: 30,
+  sliderMaxWidth: 500,
+  sliderMinHeight: 30,
+  sliderMaxHeight: 200,
+  /** How many ancestors are inspected for a captcha class/id. */
+  maxParentDepth: 3,
+} as const;
 
 export class CaptchaDetector {
   private static readonly EXCLUDE_SELECTORS = EXCLUDE_SELECTORS;
@@ -74,7 +99,10 @@ export class CaptchaDetector {
       .reduce((sum, signal) => sum + signal.confidence, 0);
 
     const confidence = primaryDetection.detected ? primaryDetection.confidence : 0;
-    const likelyCaptcha = candidates.length > 0 && (confidence >= 90 || score - excludeScore >= 70);
+    const likelyCaptcha =
+      candidates.length > 0 &&
+      (confidence >= CAPTCHA_THRESHOLDS.likelyCaptchaConfidence ||
+        score - excludeScore >= CAPTCHA_THRESHOLDS.likelyCaptchaScoreMargin);
 
     const recommendedNextStep = this.getRecommendedNextStep({
       score,
@@ -199,10 +227,20 @@ export class CaptchaDetector {
         return result.title ?? 'title-match';
       case 'dom':
         return result.selector ?? result.type;
-      case 'text':
-        return typeof result.details === 'object' && result.details && 'keyword' in result.details
-          ? String((result.details as Record<string, unknown>).keyword)
-          : result.type;
+      case 'text': {
+        // Explicit guard: `in` on a null/primitive details crashes, and the
+        // typeof-check alone does not exclude null.
+        const details = result.details;
+        if (
+          details !== null &&
+          typeof details === 'object' &&
+          'keyword' in details &&
+          typeof (details as Record<string, unknown>).keyword === 'string'
+        ) {
+          return String((details as Record<string, unknown>).keyword);
+        }
+        return result.type;
+      }
       case 'vendor':
       default:
         return result.providerHint ?? result.type;
@@ -314,9 +352,9 @@ export class CaptchaDetector {
     }
 
     if (
-      input.confidence >= 95 ||
-      input.candidateCount >= 2 ||
-      input.score - input.excludeScore >= 120
+      input.confidence >= CAPTCHA_THRESHOLDS.manualConfidence ||
+      input.candidateCount >= CAPTCHA_THRESHOLDS.manualCandidateCount ||
+      input.score - input.excludeScore >= CAPTCHA_THRESHOLDS.manualScoreMargin
     ) {
       return 'manual';
     }
@@ -328,80 +366,94 @@ export class CaptchaDetector {
     return 'observe';
   }
 
-  protected async checkUrl(page: Page): Promise<CaptchaDetectionResult> {
-    const url = page.url();
-    const excludeRule = this.matchRule(url, CaptchaDetector.EXCLUDE_MATCH_RULES.url);
+  /**
+   * Shared template for the exclude → match → DOM-confirm → build pipeline
+   * used by the URL/title/text heuristics. The per-source checks only differ
+   * in which value and rule sets they feed in, and how the winning rule is
+   * rendered into the result.
+   */
+  protected async checkSignal(
+    page: Page,
+    options: {
+      sourceLabel: string;
+      value: string;
+      excludeRules: readonly CaptchaHeuristicRule[];
+      matchRules: readonly CaptchaHeuristicRule[];
+      defaultType: Exclude<CaptchaDetectionResult['type'], 'none'>;
+      logMessage: (rule: CaptchaHeuristicRule) => string;
+      buildDetails: (rule: CaptchaHeuristicRule, matchText: string) => unknown;
+      extra?: (
+        rule: CaptchaHeuristicRule,
+        matchText: string,
+        value: string,
+      ) => Record<string, unknown>;
+    },
+  ): Promise<CaptchaDetectionResult> {
+    const excludeRule = this.matchRule(options.value, options.excludeRules);
     if (excludeRule) {
-      return this.buildExcludeResult('URL', excludeRule.rule, excludeRule.matchText);
+      return this.buildExcludeResult(options.sourceLabel, excludeRule.rule, excludeRule.matchText);
     }
 
-    const matchRule = this.matchRule(url, CaptchaDetector.CAPTCHA_MATCH_RULES.url);
+    const matchRule = this.matchRule(options.value, options.matchRules);
     if (matchRule) {
       const domConfirmed = await this.confirmRuleWithDOM(page, matchRule.rule);
       if (!domConfirmed) {
-        logger.debug(`URL rule required DOM confirmation but none was found: ${matchRule.rule.id}`);
+        logger.debug(
+          `${options.sourceLabel} rule required DOM confirmation but none was found: ${matchRule.rule.id}`,
+        );
         return {
           detected: false,
           type: 'none',
           confidence: matchRule.rule.confidence,
-          falsePositiveReason: `URLDOM exclusion: ${matchRule.matchText}`,
+          falsePositiveReason: `${options.sourceLabel}DOM exclusion: ${matchRule.matchText}`,
         };
       }
 
-      logger.warn(`CAPTCHA URL signal detected (confidence: ${matchRule.rule.confidence}%)`);
+      logger.warn(options.logMessage(matchRule.rule));
       return this.buildCaptchaResult({
         confidence: matchRule.rule.confidence,
-        type: matchRule.rule.typeHint ?? 'url_redirect',
+        type: matchRule.rule.typeHint ?? options.defaultType,
         providerHint: matchRule.rule.providerHint,
-        url,
-        details: {
-          ruleId: matchRule.rule.id,
-          ruleLabel: matchRule.rule.label,
-          matchText: matchRule.matchText,
-        },
+        ...options.extra?.(matchRule.rule, matchRule.matchText, options.value),
+        details: options.buildDetails(matchRule.rule, matchRule.matchText),
       });
     }
 
     return { detected: false, type: 'none', confidence: 0 };
   }
 
+  protected async checkUrl(page: Page): Promise<CaptchaDetectionResult> {
+    return this.checkSignal(page, {
+      sourceLabel: 'URL',
+      value: page.url(),
+      excludeRules: CaptchaDetector.EXCLUDE_MATCH_RULES.url,
+      matchRules: CaptchaDetector.CAPTCHA_MATCH_RULES.url,
+      defaultType: 'url_redirect',
+      logMessage: (rule) => `CAPTCHA URL signal detected (confidence: ${rule.confidence}%)`,
+      extra: (_rule, _matchText, value) => ({ url: value }),
+      buildDetails: (rule, matchText) => ({
+        ruleId: rule.id,
+        ruleLabel: rule.label,
+        matchText,
+      }),
+    });
+  }
+
   protected async checkTitle(page: Page): Promise<CaptchaDetectionResult> {
-    const title = await page.title();
-    const excludeRule = this.matchRule(title, CaptchaDetector.EXCLUDE_MATCH_RULES.title);
-    if (excludeRule) {
-      return this.buildExcludeResult('Title', excludeRule.rule, excludeRule.matchText);
-    }
-
-    const matchRule = this.matchRule(title, CaptchaDetector.CAPTCHA_MATCH_RULES.title);
-    if (matchRule) {
-      const domConfirmed = await this.confirmRuleWithDOM(page, matchRule.rule);
-      if (!domConfirmed) {
-        logger.debug(
-          `Title rule required DOM confirmation but none was found: ${matchRule.rule.id}`,
-        );
-        return {
-          detected: false,
-          type: 'none',
-          confidence: matchRule.rule.confidence,
-          falsePositiveReason: `TitleDOM exclusion: ${matchRule.matchText}`,
-        };
-      }
-
-      logger.warn(`CAPTCHA title rule detected: ${matchRule.rule.label}`);
-      return this.buildCaptchaResult({
-        confidence: matchRule.rule.confidence,
-        type: matchRule.rule.typeHint ?? 'page_redirect',
-        providerHint: matchRule.rule.providerHint,
-        title,
-        details: {
-          ruleId: matchRule.rule.id,
-          ruleLabel: matchRule.rule.label,
-          matchText: matchRule.matchText,
-        },
-      });
-    }
-
-    return { detected: false, type: 'none', confidence: 0 };
+    return this.checkSignal(page, {
+      sourceLabel: 'Title',
+      value: await page.title(),
+      excludeRules: CaptchaDetector.EXCLUDE_MATCH_RULES.title,
+      matchRules: CaptchaDetector.CAPTCHA_MATCH_RULES.title,
+      defaultType: 'page_redirect',
+      logMessage: (rule) => `CAPTCHA title rule detected: ${rule.label}`,
+      extra: (_rule, _matchText, value) => ({ title: value }),
+      buildDetails: (rule, matchText) => ({
+        ruleId: rule.id,
+        ruleLabel: rule.label,
+        matchText,
+      }),
+    });
   }
 
   protected async checkDOMElements(page: Page): Promise<CaptchaDetectionResult> {
@@ -426,41 +478,22 @@ export class CaptchaDetector {
   }
 
   protected async checkPageText(page: Page): Promise<CaptchaDetectionResult> {
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    const excludeRule = this.matchRule(bodyText, CaptchaDetector.EXCLUDE_MATCH_RULES.text);
-    if (excludeRule) {
-      return this.buildExcludeResult('Text', excludeRule.rule, excludeRule.matchText);
-    }
-
-    const matchRule = this.matchRule(bodyText, CaptchaDetector.CAPTCHA_MATCH_RULES.text);
-    if (matchRule) {
-      const domConfirmed = await this.confirmRuleWithDOM(page, matchRule.rule);
-      if (!domConfirmed) {
-        logger.debug(
-          `Text rule required DOM confirmation but none was found: ${matchRule.rule.id}`,
-        );
-        return {
-          detected: false,
-          type: 'none',
-          confidence: matchRule.rule.confidence,
-          falsePositiveReason: `TextDOM exclusion: ${matchRule.matchText}`,
-        };
-      }
-
-      logger.warn(`CAPTCHA text rule detected: ${matchRule.rule.label}`);
-      return this.buildCaptchaResult({
-        confidence: matchRule.rule.confidence,
-        type: matchRule.rule.typeHint ?? 'unknown',
-        providerHint: matchRule.rule.providerHint,
-        details: {
-          keyword: matchRule.rule.label,
-          ruleId: matchRule.rule.id,
-          matchText: matchRule.matchText,
-        },
-      });
-    }
-
-    return { detected: false, type: 'none', confidence: 0 };
+    // document.body may be absent (early document states) — never let a null
+    // body crash the text check.
+    const bodyText = (await page.evaluate(() => document.body?.innerText ?? '')) ?? '';
+    return this.checkSignal(page, {
+      sourceLabel: 'Text',
+      value: bodyText,
+      excludeRules: CaptchaDetector.EXCLUDE_MATCH_RULES.text,
+      matchRules: CaptchaDetector.CAPTCHA_MATCH_RULES.text,
+      defaultType: 'unknown',
+      logMessage: (rule) => `CAPTCHA text rule detected: ${rule.label}`,
+      buildDetails: (rule, matchText) => ({
+        keyword: rule.label,
+        ruleId: rule.id,
+        matchText,
+      }),
+    });
   }
 
   protected async checkVendorSpecific(_page: Page): Promise<CaptchaDetectionResult> {
@@ -489,15 +522,9 @@ export class CaptchaDetector {
 
   protected async verifyByDOM(page: Page): Promise<boolean> {
     try {
-      const hasSlider = await page.evaluate(() => {
-        const sliderSelectors = [
-          '.captcha-slider',
-          '.slide-verify',
-          '[class*="captcha"][class*="slider"]',
-          '[class*="verify"][class*="slider"]',
-        ];
+      const hasSlider = await page.evaluate((sliderSelectors) => {
         return sliderSelectors.some((sel) => document.querySelector(sel) !== null);
-      });
+      }, CAPTCHA_SELECTORS.slider);
 
       const hasWidget = await page.evaluate(() => {
         return (
@@ -527,7 +554,7 @@ export class CaptchaDetector {
       const excludeSelectors = CaptchaDetector.EXCLUDE_SELECTORS;
 
       const result = await page.evaluate(
-        (sel, excludeSels) => {
+        (sel, excludeSels, thresholds) => {
           const element = document.querySelector(sel);
           if (!element) return false;
 
@@ -593,7 +620,7 @@ export class CaptchaDetector {
 
           let parent = element.parentElement;
           let hasParentCaptcha = false;
-          for (let i = 0; i < 3 && parent; i++) {
+          for (let i = 0; i < thresholds.maxParentDepth && parent; i++) {
             const parentClass = parent.className.toLowerCase();
             const parentId = parent.id.toLowerCase();
 
@@ -612,7 +639,11 @@ export class CaptchaDetector {
 
           const width = rect.width;
           const height = rect.height;
-          const hasReasonableSize = width >= 30 && width <= 500 && height >= 30 && height <= 200;
+          const hasReasonableSize =
+            width >= thresholds.sliderMinWidth &&
+            width <= thresholds.sliderMaxWidth &&
+            height >= thresholds.sliderMinHeight &&
+            height <= thresholds.sliderMaxHeight;
 
           if (!hasReasonableSize) {
             console.warn(`[CaptchaDetector] Rejected by size heuristic: ${width}x${height}`);
@@ -636,6 +667,13 @@ export class CaptchaDetector {
         },
         selector,
         excludeSelectors,
+        {
+          maxParentDepth: CAPTCHA_THRESHOLDS.maxParentDepth,
+          sliderMinWidth: CAPTCHA_THRESHOLDS.sliderMinWidth,
+          sliderMaxWidth: CAPTCHA_THRESHOLDS.sliderMaxWidth,
+          sliderMinHeight: CAPTCHA_THRESHOLDS.sliderMinHeight,
+          sliderMaxHeight: CAPTCHA_THRESHOLDS.sliderMaxHeight,
+        },
       );
 
       return result;

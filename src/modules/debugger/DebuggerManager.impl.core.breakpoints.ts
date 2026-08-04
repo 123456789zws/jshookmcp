@@ -22,6 +22,55 @@ function asBreakpointsCoreContext(ctx: unknown): BreakpointsCoreContext {
   return ctx as BreakpointsCoreContext;
 }
 
+/** Shared line/column validation for code-location breakpoints. */
+function validateBreakpointPosition(lineNumber: number, columnNumber: number | undefined): void {
+  if (lineNumber < 0) {
+    throw new Error('lineNumber must be a non-negative number');
+  }
+  if (columnNumber !== undefined && columnNumber < 0) {
+    throw new Error('columnNumber must be a non-negative number');
+  }
+}
+
+/** Build the bookkeeping entry stored in the breakpoints map after a CDP set. */
+function buildBreakpointInfo(params: {
+  breakpointId: string;
+  location: BreakpointInfo['location'];
+  condition?: string;
+  logMessage?: string;
+}): BreakpointInfo {
+  return {
+    breakpointId: params.breakpointId,
+    location: params.location,
+    condition: params.condition,
+    logMessage: params.logMessage,
+    enabled: true,
+    hitCount: 0,
+    createdAt: Date.now(),
+  };
+}
+
+async function ensureUsableSession(coreCtx: BreakpointsCoreContext): Promise<void> {
+  if (coreCtx.enabled && coreCtx.cdpSession) {
+    return;
+  }
+  try {
+    await coreCtx.ensureSession();
+  } catch (err) {
+    logger.warn(
+      `Debugger auto-reconnect failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw new PrerequisiteError(
+      'Debugger is not enabled and auto-reconnect failed. Call init() or enable() first.',
+    );
+  }
+  // ensureSession may "succeed" without restoring a session — never touch a
+  // null cdpSession afterwards.
+  if (!coreCtx.cdpSession) {
+    throw new PrerequisiteError('Debugger auto-reconnect did not restore the CDP session.');
+  }
+}
+
 export async function setBreakpointByUrlCore(
   ctx: unknown,
   params: {
@@ -34,30 +83,13 @@ export async function setBreakpointByUrlCore(
 ): Promise<BreakpointInfo> {
   const coreCtx = asBreakpointsCoreContext(ctx);
 
-  if (!coreCtx.enabled || !coreCtx.cdpSession) {
-    try {
-      await coreCtx.ensureSession();
-    } catch (err) {
-      logger.warn(
-        `Debugger auto-reconnect failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      throw new PrerequisiteError(
-        'Debugger is not enabled and auto-reconnect failed. Call init() or enable() first.',
-      );
-    }
-  }
+  await ensureUsableSession(coreCtx);
 
   if (!params.url) {
     throw new Error('url parameter is required');
   }
 
-  if (params.lineNumber < 0) {
-    throw new Error('lineNumber must be a non-negative number');
-  }
-
-  if (params.columnNumber !== undefined && params.columnNumber < 0) {
-    throw new Error('columnNumber must be a non-negative number');
-  }
+  validateBreakpointPosition(params.lineNumber, params.columnNumber);
 
   try {
     const result = await coreCtx.cdpSession!.send<SetBreakpointResult>(
@@ -71,7 +103,7 @@ export async function setBreakpointByUrlCore(
       },
     );
 
-    const breakpointInfo: BreakpointInfo = {
+    const breakpointInfo = buildBreakpointInfo({
       breakpointId: result.breakpointId,
       location: {
         url: params.url,
@@ -80,10 +112,7 @@ export async function setBreakpointByUrlCore(
       },
       condition: params.condition,
       logMessage: params.logMessage,
-      enabled: true,
-      hitCount: 0,
-      createdAt: Date.now(),
-    };
+    });
 
     coreCtx.breakpoints.set(result.breakpointId, breakpointInfo);
 
@@ -111,30 +140,13 @@ export async function setBreakpointCore(
 ): Promise<BreakpointInfo> {
   const coreCtx = asBreakpointsCoreContext(ctx);
 
-  if (!coreCtx.enabled || !coreCtx.cdpSession) {
-    try {
-      await coreCtx.ensureSession();
-    } catch (err) {
-      logger.warn(
-        `Debugger auto-reconnect failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      throw new PrerequisiteError(
-        'Debugger is not enabled and auto-reconnect failed. Call init() or enable() first.',
-      );
-    }
-  }
+  await ensureUsableSession(coreCtx);
 
   if (!params.scriptId) {
     throw new Error('scriptId parameter is required');
   }
 
-  if (params.lineNumber < 0) {
-    throw new Error('lineNumber must be a non-negative number');
-  }
-
-  if (params.columnNumber !== undefined && params.columnNumber < 0) {
-    throw new Error('columnNumber must be a non-negative number');
-  }
+  validateBreakpointPosition(params.lineNumber, params.columnNumber);
 
   try {
     const result = await coreCtx.cdpSession!.send<SetBreakpointResult>('Debugger.setBreakpoint', {
@@ -147,7 +159,7 @@ export async function setBreakpointCore(
       logMessage: params.logMessage,
     });
 
-    const breakpointInfo: BreakpointInfo = {
+    const breakpointInfo = buildBreakpointInfo({
       breakpointId: result.breakpointId,
       location: {
         scriptId: params.scriptId,
@@ -156,10 +168,7 @@ export async function setBreakpointCore(
       },
       condition: params.condition,
       logMessage: params.logMessage,
-      enabled: true,
-      hitCount: 0,
-      createdAt: Date.now(),
-    };
+    });
 
     coreCtx.breakpoints.set(result.breakpointId, breakpointInfo);
 
@@ -180,18 +189,7 @@ export async function setBreakpointOnFunctionCallCore(
 ): Promise<{ breakpointId: string; functionName: string }> {
   const coreCtx = asBreakpointsCoreContext(ctx);
 
-  if (!coreCtx.enabled || !coreCtx.cdpSession) {
-    try {
-      await coreCtx.ensureSession();
-    } catch (err) {
-      logger.warn(
-        `Debugger auto-reconnect failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      throw new PrerequisiteError(
-        'Debugger is not enabled and auto-reconnect failed. Call init() or enable() first.',
-      );
-    }
-  }
+  await ensureUsableSession(coreCtx);
 
   if (!functionName) {
     throw new Error('functionName parameter is required');
@@ -229,13 +227,10 @@ export async function setBreakpointOnFunctionCallCore(
       { objectId },
     );
 
-    const breakpointInfo: BreakpointInfo = {
+    const breakpointInfo = buildBreakpointInfo({
       breakpointId: bpResult.breakpointId,
       location: { lineNumber: 0 },
-      enabled: true,
-      hitCount: 0,
-      createdAt: Date.now(),
-    };
+    });
     coreCtx.breakpoints.set(bpResult.breakpointId, breakpointInfo);
 
     logger.info(`Breakpoint set on function: ${functionName}`, {
@@ -291,9 +286,23 @@ export async function clearAllBreakpointsCore(ctx: unknown): Promise<void> {
   const coreCtx = asBreakpointsCoreContext(ctx);
   const breakpointIds = Array.from(coreCtx.breakpoints.keys());
 
+  // Best-effort: a single failed removal must not abort the sweep, or the
+  // remaining breakpoints would be stuck in the local map forever.
+  let failures = 0;
   for (const id of breakpointIds) {
-    await coreCtx.removeBreakpoint(id);
+    try {
+      await coreCtx.removeBreakpoint(id);
+    } catch (error) {
+      failures += 1;
+      logger.warn(`Failed to remove breakpoint ${id} while clearing all:`, error);
+    }
   }
 
-  logger.info(`Cleared ${breakpointIds.length} breakpoints`);
+  if (failures > 0) {
+    logger.error(
+      `Failed to clear ${failures}/${breakpointIds.length} breakpoints (remaining kept for retry)`,
+    );
+  } else {
+    logger.info(`Cleared ${breakpointIds.length} breakpoints`);
+  }
 }

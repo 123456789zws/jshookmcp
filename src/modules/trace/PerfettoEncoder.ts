@@ -59,11 +59,14 @@ function fieldVarint(buf: number[], fieldNumber: number, value: number): void {
   appendVarint(buf, value);
 }
 
-/** Wire type 5: fixed32 field = tag + 4 LE bytes. */
-function fieldFixed32(buf: number[], fieldNumber: number, value: number): void {
-  appendVarint(buf, (fieldNumber << 3) | 5);
-  const v = Math.floor(value) >>> 0;
-  buf.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+/** Wire type 1: fixed64 field (e.g. proto3 double) = tag + 8 LE bytes. */
+function fieldFixed64(buf: number[], fieldNumber: number, value: number): void {
+  appendVarint(buf, (fieldNumber << 3) | 1);
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, true); // little-endian IEEE 754
+  for (let i = 0; i < 8; i += 1) {
+    buf.push(view.getUint8(i));
+  }
 }
 
 /** Wire type 2: length-delimited field = tag + varint-length + raw bytes. */
@@ -88,15 +91,15 @@ function fieldMessage(buf: number[], fieldNumber: number, body: number[]): void 
 
 function buildProcessDescriptor(pid: number, processName: string): number[] {
   const buf: number[] = [];
-  fieldFixed32(buf, 1, pid); // pid (int32, wire type 5)
+  fieldVarint(buf, 1, pid); // pid (int32, wire type 0)
   fieldString(buf, 2, processName); // process_name
   return buf;
 }
 
 function buildThreadDescriptor(pid: number, tid: number, threadName: string): number[] {
   const buf: number[] = [];
-  fieldFixed32(buf, 1, pid);
-  fieldFixed32(buf, 2, tid);
+  fieldVarint(buf, 1, pid);
+  fieldVarint(buf, 2, tid);
   if (threadName) fieldString(buf, 5, threadName);
   return buf;
 }
@@ -165,12 +168,17 @@ function buildTrackEvent(params: {
   type: number;
   timestampUs: number;
   durationUs?: number;
+  /** For TYPE_INSTANT counter events — encoded as counter_value (field 30). */
+  counterValue?: number;
 }): number[] {
   const buf: number[] = [];
   fieldVarint(buf, 1, params.trackUuid); // track_uuid
   fieldVarint(buf, 9, params.type); // type
   if (params.name) fieldString(buf, 23, params.name); // name
   if (params.category) fieldString(buf, 22, params.category); // categories
+  if (params.counterValue !== undefined) {
+    fieldFixed64(buf, 30, params.counterValue); // counter_value (double)
+  }
   return buf;
 }
 
@@ -244,6 +252,7 @@ export function encodePerfettoTrace(
       category: counter.category,
       type: 3, // TYPE_INSTANT
       timestampUs: counter.timestampUs,
+      counterValue: counter.value,
     });
     const packet = buildTracePacket({
       timestampUs: counter.timestampUs,

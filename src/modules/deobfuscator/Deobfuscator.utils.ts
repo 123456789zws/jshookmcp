@@ -1,21 +1,54 @@
 import type { ObfuscationType } from '@internal-types/index';
 
+/**
+ * Source lengths above this with zero newlines are classified as uglify —
+ * uglify-js output is a single minified line, while real (large) sources
+ * virtually always retain line breaks.
+ */
+const UGLIFY_TOKEN_COUNT = 1000;
+
+/**
+ * Density = non-whitespace chars / total chars. Below this the source is
+ * considered low-density (whitespace-rich, i.e. not packed/minified).
+ */
+const DENSITY_THRESHOLD = 0.8;
+
+/**
+ * Readability score contributions (max 100). Weights reflect how strongly
+ * each signal indicates human-written source: preserved formatting (+20),
+ * human-meaningful identifier length (+30, the strongest single signal),
+ * whitespace presence (+20) and absence of hex-escaped identifiers (+20).
+ */
+const SCORE_WEIGHTS = {
+  /** Source contains newlines — formatting was preserved. */
+  newlines: 20,
+  /** Average identifier length > 3 — human-meaningful names survive. */
+  identifierLength: 30,
+  /** Whitespace-rich source — not packed/minified. */
+  lowDensity: 20,
+  /** No `_0x` / `\x` hex-escaped identifiers. */
+  noHexEscaping: 20,
+} as const;
+
 export function detectObfuscationType(code: string): ObfuscationType[] {
+  // Null/undefined inputs (e.g. failed script captures) must not crash on
+  // .includes() — treat them as empty source.
+  const src = code ?? '';
   const types: ObfuscationType[] = [];
 
-  if (code.includes('_0x') || code.includes('\\x') || /var\s+_0x[a-f0-9]+\s*=/.test(code)) {
+  if (src.includes('_0x') || src.includes('\\x') || /var\s+_0x[a-f0-9]+\s*=/.test(src)) {
     types.push('javascript-obfuscator');
   }
 
-  if (code.includes('__webpack_require__') || code.includes('webpackJsonp')) {
+  if (src.includes('__webpack_require__') || src.includes('webpackJsonp')) {
     types.push('webpack');
   }
 
-  if (code.length > 1000 && !code.includes('\n')) {
+  if (src.length > UGLIFY_TOKEN_COUNT && !src.includes('\n')) {
     types.push('uglify');
   }
 
-  if (code.includes('eval') && code.includes('Function')) {
+  if (src.includes('eval') && src.includes('Function')) {
     types.push('vm-protection');
   }
 
@@ -27,18 +60,19 @@ export function detectObfuscationType(code: string): ObfuscationType[] {
 }
 
 export function calculateReadabilityScore(code: string): number {
+  const src = code ?? '';
   let score = 0;
 
-  if (code.includes('\n')) score += 20;
+  if (src.includes('\n')) score += SCORE_WEIGHTS.newlines;
 
-  const varNames = code.match(/\b[a-zA-Z_$][a-zA-Z0-9_$]*\b/g) || [];
+  const varNames = src.match(/\b[a-zA-Z_$][a-zA-Z0-9_$]*\b/g) || [];
   const avgLength = varNames.reduce((sum, name) => sum + name.length, 0) / (varNames.length || 1);
-  if (avgLength > 3) score += 30;
+  if (avgLength > 3) score += SCORE_WEIGHTS.identifierLength;
 
-  const density = code.replace(/\s/g, '').length / code.length;
-  if (density < 0.8) score += 20;
+  const density = src.length > 0 ? src.replace(/\s/g, '').length / src.length : 0;
+  if (density < DENSITY_THRESHOLD) score += SCORE_WEIGHTS.lowDensity;
 
-  if (!code.includes('_0x') && !code.includes('\\x')) score += 20;
+  if (!src.includes('_0x') && !src.includes('\\x')) score += SCORE_WEIGHTS.noHexEscaping;
 
   return Math.min(score, 100);
 }

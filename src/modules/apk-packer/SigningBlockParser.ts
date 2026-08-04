@@ -20,16 +20,16 @@
  */
 
 import { createHash } from 'node:crypto';
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 
 import { ToolError } from '@errors/ToolError';
 
 import {
-  APK_PACKER_MAX_APK_BYTES,
   APK_SIGBLOCK_DEX_PREFIX_HEAD_BYTES,
   APK_SIGBLOCK_EOCD_SCAN_BYTES,
   APK_SIGBLOCK_MAX_BYTES,
 } from './constants';
+import { validateApkFile } from './validate-apk';
 import type {
   Anomaly,
   CertificateInfo,
@@ -48,7 +48,7 @@ import {
   BLOCK_ID_V2,
   BLOCK_ID_V3,
   BLOCK_ID_V3_1,
-  BLOCK_ID_V4,
+  BLOCK_ID_VERITY_PADDING,
   DEX_MAGIC,
   EOCD_SIGNATURE,
 } from './signing-block-types';
@@ -77,36 +77,12 @@ export class SigningBlockParser {
    * `ToolError(NOT_FOUND|VALIDATION)` only for unusable input.
    */
   async parse(apkPath: string): Promise<SigningBlockReport> {
-    if (!apkPath || typeof apkPath !== 'string') {
-      throw new ToolError('VALIDATION', 'apkPath must be a non-empty string');
-    }
-
-    let stats;
-    try {
-      stats = await stat(apkPath);
-    } catch (cause) {
-      throw new ToolError('NOT_FOUND', `APK not found: ${apkPath}`, {
-        details: { apkPath },
-        cause: cause as Error,
-      });
-    }
-    if (!stats.isFile()) {
-      throw new ToolError('VALIDATION', `Path is not a regular file: ${apkPath}`, {
-        details: { apkPath },
-      });
-    }
-    if (stats.size > APK_PACKER_MAX_APK_BYTES) {
-      throw new ToolError(
-        'VALIDATION',
-        `APK exceeds APK_PACKER_MAX_APK_BYTES (${APK_PACKER_MAX_APK_BYTES} bytes): ${stats.size}`,
-        { details: { apkPath, size: stats.size, max: APK_PACKER_MAX_APK_BYTES } },
-      );
-    }
+    const { size: fileSize } = await validateApkFile(apkPath);
 
     let fh: FileHandle | undefined;
     try {
       fh = await open(apkPath, 'r');
-      return await this.parseHandle(fh, apkPath, stats.size);
+      return await this.parseHandle(fh, apkPath, fileSize);
     } finally {
       if (fh) await fh.close();
     }
@@ -322,9 +298,13 @@ function dispatchBlock(id: number, value: Buffer, state: ParserState): void {
       state.schemes.v3_1 = { signers };
       return;
     }
-    case BLOCK_ID_V4: {
-      const v4 = parseV4Block(value);
-      if (v4) state.schemes.v4 = v4;
+    case BLOCK_ID_VERITY_PADDING: {
+      // 0x42726577 ("Brew") is the verity *padding* block (page alignment).
+      // It is not the v4 signature — v4 lives in a separate .idsig file.
+      state.unknownBlocks.push({ id: toHexId(id), size: value.length });
+      state.warnings.push(
+        `Verity padding block (0x42726577, size=${value.length}) present — content ignored`,
+      );
       return;
     }
     case BLOCK_ID_SOURCE_STAMP:
@@ -493,33 +473,6 @@ function collectProofOfRotation(signers: ReadonlyArray<V3Signer>): ProofOfRotati
     }
   }
   return undefined;
-}
-
-/**
- * Parse a v4 block. The on-disk shape varies by AOSP version; we read the
- * conservative subset: u32 algorithm id + u32 root-hash length + hash +
- * u32 tree size length + u64 tree size (best-effort).
- */
-function parseV4Block(value: Buffer): V4Block | undefined {
-  try {
-    const r = new LengthReader(value, 'v4');
-    const algId = r.readU32();
-    const hashLen = r.readU32();
-    const hash = r.readSlice(hashLen, 'v4-hash');
-    let treeSize = 0;
-    if (r.remaining() >= 8) {
-      treeSize = readU64LEAsNumber(value, r.position());
-    } else if (r.remaining() >= 4) {
-      treeSize = r.readU32();
-    }
-    return {
-      algorithm: mapAlgorithmId(algId),
-      rootHash: hash.toString('hex'),
-      treeSize,
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 /** Compute SHA-256 over a DER-encoded certificate. */

@@ -366,7 +366,7 @@ export class JniEnvironment {
       const name = JNI_INDEX_NAMES[index] ?? `slot_${index}`;
       const wrapped = (ctx: HostContext): bigint | number | void => {
         this.jniDiagLog.push(
-          `JNI: ${name} x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)}`,
+          `JNI: ${name} x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)} x3=0x${ctx.x(3).toString(16)} x4=0x${ctx.x(4).toString(16)} x5=0x${ctx.x(5).toString(16)} x6=0x${ctx.x(6).toString(16)} x7=0x${ctx.x(7).toString(16)}`,
         );
         return fn(ctx);
       };
@@ -505,7 +505,7 @@ export class JniEnvironment {
       const slotIdx = idx; // capture for closure
       this.bind(idx, (ctx) => {
         const name = JNI_INDEX_NAMES[slotIdx] ?? `unknown_${slotIdx}`;
-        const msg = `JNI stub: ${name} (slot ${slotIdx}) x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)}`;
+        const msg = `JNI stub: ${name} (slot ${slotIdx}) x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)} x3=0x${ctx.x(3).toString(16)} x4=0x${ctx.x(4).toString(16)} x5=0x${ctx.x(5).toString(16)} x6=0x${ctx.x(6).toString(16)} x7=0x${ctx.x(7).toString(16)}`;
         this.jniDiagLog.push(msg);
         return 0n;
       });

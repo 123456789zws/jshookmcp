@@ -2,6 +2,7 @@ import type { CollectCodeOptions, CollectCodeResult, CodeFile } from '@internal-
 import type { CDPSession, Page } from 'rebrowser-puppeteer-core';
 import type { CodeSummary, SmartCollectOptions } from '@modules/collector/SmartCodeCollector';
 import { logger } from '@utils/logger';
+import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
 import { toChromeCompatibleWaitUntil } from '@modules/browser/navigation-wait-until';
 import {
   collectInlineScripts,
@@ -10,6 +11,16 @@ import {
   analyzeDependencies,
   setupWebWorkerTracking,
 } from '@modules/collector/PageScriptCollectors';
+
+/** Fallback navigation/collection timeout when neither options nor config supply one. */
+const DEFAULT_COLLECTION_TIMEOUT_MS = 30_000;
+/** How long to wait after navigation for late-loading dynamic scripts. */
+const DYNAMIC_SCRIPT_WAIT_MS = 3_000;
+/** Compression batch tuning (retries per file, parallel files). */
+const COMPRESS_MAX_RETRIES = 3;
+const COMPRESS_CONCURRENCY = 5;
+/** Log compression progress every N percent. */
+const COMPRESS_PROGRESS_LOG_INTERVAL = 25;
 
 interface CDPResponseReceivedParams {
   response: {
@@ -225,7 +236,12 @@ export async function collectInnerImpl(
         : await self.browser.newPage();
 
   try {
-    const timeoutMs = options.timeout ?? self.config.timeout ?? 30000;
+    const collectorConfig = getReverseEngineeringConfig().collector;
+    const timeoutMs =
+      options.timeout ??
+      self.config.timeout ??
+      collectorConfig.defaultTimeoutMs ??
+      DEFAULT_COLLECTION_TIMEOUT_MS;
     page.setDefaultTimeout(timeoutMs);
 
     await page.setUserAgent(self.userAgent);
@@ -287,12 +303,22 @@ export async function collectInnerImpl(
           return;
         }
 
+        if (self.collectedUrls.has(url)) {
+          return;
+        }
+
         try {
           const responseBody = (await self.cdpSession!.send('Network.getResponseBody', {
             requestId,
           })) as CDPResponseBody;
 
           if (typeof responseBody.body !== 'string') {
+            return;
+          }
+
+          // Concurrent responses may have filled the quota while we awaited
+          // the body — re-check before accepting this file.
+          if (files.length >= self.MAX_FILES_PER_COLLECT) {
             return;
           }
 
@@ -314,32 +340,33 @@ export async function collectInnerImpl(
             );
           }
 
-          if (!self.collectedUrls.has(url)) {
+          const file: CodeFile = {
+            url,
+            content: finalContent,
+            size: finalContent.length,
+            type: 'external',
+            metadata: truncated
+              ? {
+                  truncated: true,
+                  originalSize: contentSize,
+                  truncatedSize: finalContent.length,
+                }
+              : undefined,
+          };
+          const fileCountBeforeAppend = files.length;
+          appendFilesWithinLimit([file], 'external scripts');
+
+          // Only mark the URL as collected once it was actually accepted —
+          // otherwise files dropped by the limit would be skipped forever in
+          // later collections.
+          if (files.length > fileCountBeforeAppend) {
             self.collectedUrls.add(url);
-            const file: CodeFile = {
-              url,
-              content: finalContent,
-              size: finalContent.length,
-              type: 'external',
-              metadata: truncated
-                ? {
-                    truncated: true,
-                    originalSize: contentSize,
-                    truncatedSize: finalContent.length,
-                  }
-                : undefined,
-            };
-            const fileCountBeforeAppend = files.length;
-            appendFilesWithinLimit([file], 'external scripts');
+            self.collectedFilesCache.set(url, file);
 
-            if (files.length > fileCountBeforeAppend) {
-              self.collectedFilesCache.set(url, file);
-
-              logger.debug(
-                `[CDP] Collected (${files.length}/${self.MAX_FILES_PER_COLLECT}): ${url} (` +
-                  `${(finalContent.length / 1024).toFixed(2)} KB)${truncated ? ' [TRUNCATED]' : ''}`,
-              );
-            }
+            logger.debug(
+              `[CDP] Collected (${files.length}/${self.MAX_FILES_PER_COLLECT}): ${url} (` +
+                `${(finalContent.length / 1024).toFixed(2)} KB)${truncated ? ' [TRUNCATED]' : ''}`,
+            );
           }
         } catch (error) {
           logger.warn(`[CDP] Failed to get response body for: ${url}`, error);
@@ -383,7 +410,9 @@ export async function collectInnerImpl(
 
     if (options.includeDynamic) {
       logger.info('Waiting for dynamic scripts...');
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await new Promise((resolve) =>
+        setTimeout(resolve, collectorConfig.dynamicScriptWaitMs ?? DYNAMIC_SCRIPT_WAIT_MS),
+      );
     }
 
     if (self.cdpSession) {
@@ -467,10 +496,10 @@ export async function collectInnerImpl(
           const compressedResults = await self.compressor.compressBatch(filesToCompress, {
             level: undefined,
             useCache: true,
-            maxRetries: 3,
-            concurrency: 5,
+            maxRetries: COMPRESS_MAX_RETRIES,
+            concurrency: COMPRESS_CONCURRENCY,
             onProgress: (progress: number) => {
-              if (progress % 25 === 0) {
+              if (progress % COMPRESS_PROGRESS_LOG_INTERVAL === 0) {
                 logger.debug(`Compression progress: ${progress.toFixed(0)}%`);
               }
             },

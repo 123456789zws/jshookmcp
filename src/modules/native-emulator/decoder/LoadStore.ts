@@ -17,6 +17,7 @@
 import type { ExecutionContext } from '../cpu/ExecutionContext';
 import type { SimdContext } from '../simd';
 import { executeSimdLoadStore } from '../simd';
+import { signExtend7, signExtend9, signExtend19 } from '../simd-utils';
 
 /**
  * Try to execute a Loads and Stores instruction.
@@ -40,7 +41,15 @@ export function execLoadStore(
   // by another agent: a load reads normally, and a store always succeeds and
   // reports status 0 in Rs. This is what lets a stdlib guarding shared state
   // with LDAXR/STLXR (or a refcount) run to completion here.
-  if (((insn >>> 24) & 0b111111) === 0b001000) {
+  //
+  // o2 (bit23) and o1 (bit21) must both be clear: the v8.1 atomics (CAS/CASP,
+  // LDADD/SWP/…) set o2 and share the same 001000 prefix, and silently running
+  // one as an ordinary exclusive load/store would drop its atomic semantics.
+  if (
+    ((insn >>> 24) & 0b111111) === 0b001000 &&
+    ((insn >>> 23) & 1) === 0 &&
+    ((insn >>> 21) & 1) === 0
+  ) {
     const size = insn >>> 30;
     const bytes = 1 << size;
     const isLoad = ((insn >>> 22) & 1) === 1;
@@ -126,7 +135,7 @@ export function execLoadStore(
       // pre-index only, so every STUR/LDUR with a non-zero offset hit the wrong
       // address and silently lost the access.)
       const imm9raw = (insn >>> 12) & 0x1ff;
-      const imm9 = imm9raw & 0x100 ? imm9raw - 0x200 : imm9raw;
+      const imm9 = signExtend9(imm9raw);
       const idx = (insn >>> 10) & 0b11;
       const base = ctx.readGprSp(rn);
       // BUGFIX: Do address arithmetic in bigint space
@@ -151,7 +160,7 @@ export function execLoadStore(
     const bytes = opc === 0b01 ? 8 : 4;
     const rt = insn & 0b11111;
     const imm19 = (insn >>> 5) & 0x7ffff;
-    const offset = (imm19 & 0x40000 ? imm19 - 0x80000 : imm19) * 4;
+    const offset = signExtend19(imm19) * 4;
     const addr = ctx.pc + offset;
     const raw = ctx.loadValue(addr, bytes);
     if (signExtend && bytes === 4) {
@@ -173,7 +182,7 @@ export function execLoadStore(
     const idx = (insn >>> 23) & 0b11;
     const isLoad = ((insn >>> 22) & 1) === 1;
     const imm7raw = (insn >>> 15) & 0x7f;
-    const imm7 = (imm7raw & 0x40 ? imm7raw - 0x80 : imm7raw) * bytes;
+    const imm7 = signExtend7(imm7raw) * bytes;
     const rt2 = (insn >>> 10) & 0b11111;
     const rn = (insn >>> 5) & 0b11111;
     const rt = insn & 0b11111;

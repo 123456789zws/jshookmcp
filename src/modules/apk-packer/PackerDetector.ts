@@ -26,13 +26,10 @@ import {
 
 import { ToolError } from '@errors/ToolError';
 
-import {
-  APK_PACKER_MAX_APK_BYTES,
-  APK_PACKER_MAX_ZIP_ENTRIES,
-  APK_PACKER_REGEX_TIMEOUT_MS,
-} from './constants';
+import { APK_PACKER_MAX_ZIP_ENTRIES, APK_PACKER_REGEX_TIMEOUT_MS } from './constants';
 import { DEFAULT_SIGNATURES } from './fingerprints';
 import { mergeSignatures, testPatternTimed } from './classifiers';
+import { validateApkFile } from './validate-apk';
 import type { DetectionResult, DetectOptions, PackerMatch, PackerSignature } from './types';
 
 const LIB_PATH_RE = /^lib\/[^/]+\/(lib[^/]+\.so)$/i;
@@ -43,31 +40,7 @@ export class PackerDetector {
 
   /** Scan a packaged `.apk` (or `.aab`) ZIP archive. */
   async detectFromApk(apkPath: string, opts: DetectOptions = {}): Promise<DetectionResult> {
-    if (!apkPath || apkPath.length === 0) {
-      throw new ToolError('VALIDATION', 'apkPath must be a non-empty string');
-    }
-
-    let stats;
-    try {
-      stats = await stat(apkPath);
-    } catch (cause) {
-      throw new ToolError('NOT_FOUND', `APK not found: ${apkPath}`, {
-        details: { apkPath },
-        cause: cause as Error,
-      });
-    }
-    if (!stats.isFile()) {
-      throw new ToolError('VALIDATION', `APK path is not a regular file: ${apkPath}`, {
-        details: { apkPath },
-      });
-    }
-    if (stats.size > APK_PACKER_MAX_APK_BYTES) {
-      throw new ToolError(
-        'VALIDATION',
-        `APK exceeds APK_PACKER_MAX_APK_BYTES (${APK_PACKER_MAX_APK_BYTES} bytes): ${stats.size}`,
-        { details: { apkPath, size: stats.size, max: APK_PACKER_MAX_APK_BYTES } },
-      );
-    }
+    await validateApkFile(apkPath);
 
     const libBasenames = await listLibBasenamesFromApk(apkPath);
     return this.matchBasenames(libBasenames, opts);
@@ -170,66 +143,78 @@ function aggregateConfidence(matches: readonly PackerMatch[]): number {
  */
 async function listLibBasenamesFromApk(apkPath: string): Promise<LibEntry[]> {
   return new Promise<LibEntry[]>((resolve, reject) => {
-    openZipArchive(apkPath, { lazyEntries: true, autoClose: true }, (err, zipFile) => {
-      if (err || !zipFile) {
-        reject(
-          new ToolError('VALIDATION', `Failed to open APK as ZIP: ${err?.message ?? 'unknown'}`, {
-            details: { apkPath },
-            cause: err ?? undefined,
-          }),
-        );
-        return;
-      }
-      const collected: LibEntry[] = [];
-      let entryCount = 0;
-      const zip = zipFile as YauzlZipFile;
-      const onEntry = (entry: ZipEntry) => {
-        entryCount += 1;
-        if (entryCount > APK_PACKER_MAX_ZIP_ENTRIES) {
-          zip.close();
+    // yauzl can throw synchronously (e.g. unreadable file descriptor) before
+    // the callback fires — without this guard the promise would hang forever.
+    try {
+      openZipArchive(apkPath, { lazyEntries: true, autoClose: true }, (err, zipFile) => {
+        if (err || !zipFile) {
           reject(
-            new ToolError(
-              'VALIDATION',
-              `APK has too many ZIP entries (> ${APK_PACKER_MAX_ZIP_ENTRIES})`,
-              { details: { apkPath } },
-            ),
+            new ToolError('VALIDATION', `Failed to open APK as ZIP: ${err?.message ?? 'unknown'}`, {
+              details: { apkPath },
+              cause: err ?? undefined,
+            }),
           );
           return;
         }
-        const fileName = entry.fileName;
-        const match = LIB_PATH_RE.exec(fileName);
-        if (match) {
-          const base = (match[1] as string).toLowerCase();
-          collected.push({ path: fileName.toLowerCase(), basename: base });
+        const collected: LibEntry[] = [];
+        let entryCount = 0;
+        const zip = zipFile as YauzlZipFile;
+        const onEntry = (entry: ZipEntry) => {
+          entryCount += 1;
+          if (entryCount > APK_PACKER_MAX_ZIP_ENTRIES) {
+            zip.close();
+            reject(
+              new ToolError(
+                'VALIDATION',
+                `APK has too many ZIP entries (> ${APK_PACKER_MAX_ZIP_ENTRIES})`,
+                { details: { apkPath } },
+              ),
+            );
+            return;
+          }
+          const fileName = entry.fileName;
+          const match = LIB_PATH_RE.exec(fileName);
+          if (match) {
+            const base = (match[1] as string).toLowerCase();
+            collected.push({ path: fileName.toLowerCase(), basename: base });
+          }
+          zip.readEntry();
+        };
+        const onEnd = () => {
+          cleanup();
+          resolve(collected);
+        };
+        const onError = (e: Error) => {
+          cleanup();
+          // autoClose:true only fires on 'end'; close explicitly on error to
+          // release the file descriptor. yauzl's close() is idempotent.
+          zip.close();
+          reject(
+            new ToolError('RUNTIME', `ZIP read failed: ${e.message}`, {
+              details: { apkPath },
+              cause: e,
+            }),
+          );
+        };
+        function cleanup() {
+          zip.removeListener('entry', onEntry);
+          zip.removeListener('end', onEnd);
+          zip.removeListener('error', onError);
         }
+        zip.on('entry', onEntry);
+        zip.on('end', onEnd);
+        zip.on('error', onError);
         zip.readEntry();
-      };
-      const onEnd = () => {
-        cleanup();
-        resolve(collected);
-      };
-      const onError = (e: Error) => {
-        cleanup();
-        // autoClose:true only fires on 'end'; close explicitly on error to
-        // release the file descriptor. yauzl's close() is idempotent.
-        zip.close();
-        reject(
-          new ToolError('RUNTIME', `ZIP read failed: ${e.message}`, {
-            details: { apkPath },
-            cause: e,
-          }),
-        );
-      };
-      function cleanup() {
-        zip.removeListener('entry', onEntry);
-        zip.removeListener('end', onEnd);
-        zip.removeListener('error', onError);
-      }
-      zip.on('entry', onEntry);
-      zip.on('end', onEnd);
-      zip.on('error', onError);
-      zip.readEntry();
-    });
+      });
+    } catch (error) {
+      reject(
+        new ToolError(
+          'VALIDATION',
+          `Failed to open APK as ZIP: ${error instanceof Error ? error.message : String(error)}`,
+          { details: { apkPath }, cause: error as Error },
+        ),
+      );
+    }
   });
 }
 
