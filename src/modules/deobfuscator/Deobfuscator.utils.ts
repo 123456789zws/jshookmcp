@@ -30,6 +30,11 @@ const SCORE_WEIGHTS = {
   noHexEscaping: 20,
 } as const;
 
+/** Average identifier length above this counts as human-meaningful. */
+const IDENTIFIER_LENGTH_THRESHOLD = 3;
+/** Readability score ceiling (the weights above sum to this). */
+const MAX_READABILITY_SCORE = 100;
+
 export function detectObfuscationType(code: string): ObfuscationType[] {
   // Null/undefined inputs (e.g. failed script captures) must not crash on
   // .includes() — treat them as empty source.
@@ -67,12 +72,12 @@ export function calculateReadabilityScore(code: string): number {
 
   const varNames = src.match(/\b[a-zA-Z_$][a-zA-Z0-9_$]*\b/g) || [];
   const avgLength = varNames.reduce((sum, name) => sum + name.length, 0) / (varNames.length || 1);
-  if (avgLength > 3) score += SCORE_WEIGHTS.identifierLength;
+  if (avgLength > IDENTIFIER_LENGTH_THRESHOLD) score += SCORE_WEIGHTS.identifierLength;
 
   const density = src.length > 0 ? src.replace(/\s/g, '').length / src.length : 0;
   if (density < DENSITY_THRESHOLD) score += SCORE_WEIGHTS.lowDensity;
 
   if (!src.includes('_0x') && !src.includes('\\x')) score += SCORE_WEIGHTS.noHexEscaping;
 
-  return Math.min(score, 100);
+  return Math.min(score, MAX_READABILITY_SCORE);
 }

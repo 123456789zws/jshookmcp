@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import {
+  WEBHOOK_PORT,
   WEBHOOK_QUEUE_MAX_RETRIES,
   WEBHOOK_QUEUE_MAX_SIZE,
   WEBHOOK_QUEUE_RETRY_DELAY_MS,
@@ -119,7 +120,7 @@ export class WebhookServerImpl extends EventEmitter {
 
   constructor(options: WebhookServerOptions = {}) {
     super();
-    this.port = typeof options.port === 'number' ? options.port : 18_789;
+    this.port = typeof options.port === 'number' ? options.port : WEBHOOK_PORT;
     // The queue is owned by the server (created here when not injected), so
     // its lifecycle always matches the server's: stopping the server releases
     // the queue, and any code that enqueues through getCommandQueue() talks to

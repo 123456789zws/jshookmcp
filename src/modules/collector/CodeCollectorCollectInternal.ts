@@ -379,7 +379,11 @@ export async function collectInnerImpl(
     logger.info(`Navigating to: ${options.url}`);
     await page.goto(options.url, {
       waitUntil: toChromeCompatibleWaitUntil(),
-      timeout: options.timeout || self.config.timeout,
+      // Reuse the resolved timeoutMs (options → config → collector config →
+      // fallback) instead of re-deriving it with `||` semantics, which would
+      // ignore an explicit options.timeout of 0 and diverge from the
+      // setDefaultTimeout above.
+      timeout: timeoutMs,
     });
 
     if (options.includeInline !== false) {

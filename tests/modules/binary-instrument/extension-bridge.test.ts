@@ -107,6 +107,36 @@ describe('ExtensionBridge', () => {
       });
     });
 
+    it('preserves raw text when plugin returns a JSON array (not a result record)', async () => {
+      const runtimeById = new Map();
+      runtimeById.set('plugin_frida_bridge', {
+        lifecycleContext: {
+          invokeTool: vi.fn().mockResolvedValue({
+            content: [{ type: 'text', text: '["a","b"]' }],
+          }),
+        },
+      });
+      const ctx = {
+        extensionPluginsById: new Map([['plugin_frida_bridge', {}]]),
+        extensionPluginRuntimeById: runtimeById,
+      } as unknown as MCPServerContext;
+
+      const config: ExtensionBridgeConfig = {
+        pluginId: 'plugin_frida_bridge',
+        toolName: 'frida_attach',
+        args: {},
+      };
+
+      const result = await invokePlugin(ctx, config);
+
+      // A bare array has no success/data/error fields — it must fall through to
+      // the raw-text path instead of silently dropping the payload.
+      expect(result).toMatchObject({
+        success: true,
+        data: '["a","b"]',
+      });
+    });
+
     it('handles empty text content from plugin', async () => {
       const runtimeById = new Map();
       runtimeById.set('plugin_frida_bridge', {

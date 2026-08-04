@@ -6,6 +6,15 @@ import { truncateUtf16Safe } from '@modules/collector/collector-utils';
 const PRIORITY_MATCH_WEIGHT = 10;
 /** Preview length for stream summaries (chars). */
 const SUMMARY_PREVIEW_CHARS = 500;
+/** Content signals used by both priority scoring and summary detection. */
+const ENCRYPTION_CONTENT_RE = /encrypt|crypto|cipher/i;
+/** Network signal for priority scoring (kept `request`-less to preserve scoring). */
+const NETWORK_CONTENT_RE = /fetch|xhr|ajax/i;
+/** Network signal for summary `hasAPI` (broader: includes `request`). */
+const NETWORK_API_CONTENT_RE = /fetch|xhr|ajax|request/i;
+/** Priority bonus when a file's content mentions crypto/network APIs. */
+const CONTENT_ENCRYPTION_BONUS = 50;
+const CONTENT_NETWORK_BONUS = 30;
 
 export interface StreamChunk {
   chunkIndex: number;
@@ -127,8 +136,8 @@ export class StreamingCollector {
       }
     }
 
-    if (/encrypt|crypto|cipher/i.test(file.content)) score += 50;
-    if (/fetch|xhr|ajax/i.test(file.content)) score += 30;
+    if (ENCRYPTION_CONTENT_RE.test(file.content)) score += CONTENT_ENCRYPTION_BONUS;
+    if (NETWORK_CONTENT_RE.test(file.content)) score += CONTENT_NETWORK_BONUS;
 
     return score;
   }
@@ -177,8 +186,8 @@ export class StreamingCollector {
         size: file.size,
         type: file.type,
         preview,
-        hasEncryption: /encrypt|crypto|cipher/i.test(file.content),
-        hasAPI: /fetch|xhr|ajax|request/i.test(file.content),
+        hasEncryption: ENCRYPTION_CONTENT_RE.test(file.content),
+        hasAPI: NETWORK_API_CONTENT_RE.test(file.content),
       };
     }
   }

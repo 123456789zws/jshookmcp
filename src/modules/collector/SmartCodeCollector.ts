@@ -111,7 +111,7 @@ export class SmartCodeCollector {
     const result: CodeFile[] = [];
     let currentSize = 0;
 
-    for (const { file } of scoredFiles) {
+    for (const { file, score } of scoredFiles) {
       let content = file.content;
       let truncated = false;
 
@@ -133,7 +133,9 @@ export class SmartCodeCollector {
           ...file.metadata,
           truncated,
           originalSize: file.size,
-          priorityScore: this.calculatePriority(file, options.priorities || []),
+          // Reuse the pre-computed score — re-running calculatePriority here
+          // would duplicate the identical computation for every file.
+          priorityScore: score,
         },
       });
 

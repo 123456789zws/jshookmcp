@@ -134,6 +134,7 @@ export class NativeEmulator {
    * @returns Load result for the primary library (entry, unresolvedImports, constructorFaults).
    */
   loadLibraryChain(dependencies: Uint8Array[], primary: Uint8Array): NativeLibraryLoadResult {
+    this.checkNotDisposed();
     return this.engine.loadLibraryChain(dependencies, primary, this.bionic);
   }
 

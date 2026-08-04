@@ -17,6 +17,7 @@ import {
   isJSONRPCResultResponse,
 } from '@modelcontextprotocol/sdk/types.js';
 import { logger } from '@utils/logger';
+import { HTTP_CAPACITY_RETRY_AFTER_MS } from '@src/constants';
 
 interface SessionRecord {
   sessionId: string;
@@ -179,7 +180,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     const maxSessions = this.options.maxSessions ?? Number.MAX_SAFE_INTEGER;
     if (this.getSessionAdmissionUsage() >= maxSessions) await this.evictExpiredSessions();
     if (this.getSessionAdmissionUsage() >= maxSessions) {
-      const retryAfterMs = this.options.capacityRetryAfterMs ?? 1_000;
+      const retryAfterMs = this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS;
       const admissionUsage = this.getSessionAdmissionUsage();
       res.writeHead(503, {
         'Content-Type': 'application/json',
@@ -443,7 +444,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
       Number.isFinite(details['retryAfterMs']) &&
       details['retryAfterMs'] >= 0
         ? details['retryAfterMs']
-        : (this.options.capacityRetryAfterMs ?? 1_000);
+        : (this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS);
     const errorCode =
       typeof details?.['code'] === 'string' ? details['code'] : 'MCP_SESSION_ADMISSION_FAILED';
     res.writeHead(503, {

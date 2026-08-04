@@ -71,6 +71,9 @@ const BROWSER_ENV_DEFAULTS = {
   devicePixelRatio: 1,
   screenX: 0,
   screenY: 0,
+  /** Placeholder origin used by the location.* / document.* rules. */
+  exampleUrl: 'https://www.example.com',
+  exampleHost: 'www.example.com',
 } as const;
 
 export class BrowserEnvironmentRulesManager {
@@ -300,7 +303,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'https://www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleUrl,
     });
     this.addRule({
       path: 'location.protocol',
@@ -316,7 +319,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleHost,
     });
     this.addRule({
       path: 'location.hostname',
@@ -324,7 +327,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleHost,
     });
     this.addRule({
       path: 'location.port',
@@ -364,7 +367,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'https://www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleUrl,
     });
     this.addRule({
       path: 'document.title',
@@ -380,7 +383,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'https://www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleUrl,
     });
     this.addRule({
       path: 'document.domain',
@@ -388,7 +391,7 @@ export class BrowserEnvironmentRulesManager {
       type: 'string',
       required: true,
       antiCrawlImportance: 8,
-      defaultValue: 'www.example.com',
+      defaultValue: BROWSER_ENV_DEFAULTS.exampleHost,
     });
     this.addRule({
       path: 'document.referrer',

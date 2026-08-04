@@ -19,6 +19,15 @@ export const WS_PAYLOAD_SAMPLE_LIMIT = int('WS_PAYLOAD_SAMPLE_LIMIT', 2_000);
 /** Default event/message cap for the fetch-stream and WebRTC monitors. */
 export const STREAMING_MAX_EVENTS = int('STREAMING_MAX_EVENTS', 2_000);
 
+/** Hard upper bound for monitor maxEvents / maxCalls args across streaming tools. */
+export const STREAMING_MAX_EVENTS_CAP = int('STREAMING_MAX_EVENTS_CAP', 50_000);
+
+/** Default `limit` for *_get_events / *_get_frames / grpc_get_calls pagination. */
+export const STREAMING_QUERY_LIMIT_DEFAULT = int('STREAMING_QUERY_LIMIT_DEFAULT', 100);
+
+/** Upper bound for the pagination `limit` arg. */
+export const STREAMING_QUERY_LIMIT_MAX = int('STREAMING_QUERY_LIMIT_MAX', 5_000);
+
 /**
  * Cap on the fetch-stream reassembly buffer. A stream that never emits an SSE
  * dispatch separator would otherwise grow its buffer without bound; on

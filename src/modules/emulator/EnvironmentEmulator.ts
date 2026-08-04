@@ -33,6 +33,20 @@ interface MemberExpressionNodeLike {
   property: unknown;
 }
 
+/** Browser globals whose bare use is recorded as an environment access. */
+const BROWSER_GLOBAL_NAMES = [
+  'window',
+  'document',
+  'navigator',
+  'location',
+  'screen',
+  'console',
+  'localStorage',
+  'sessionStorage',
+];
+/** Top-level globals treated as environment roots when building paths. */
+const ENV_ROOT_NAMES = ['window', 'document', 'navigator', 'location', 'screen'];
+
 export class EnvironmentEmulator {
   private browser?: Browser;
 
@@ -150,18 +164,7 @@ export class EnvironmentEmulator {
 
         Identifier: (path) => {
           const name = path.node.name;
-          if (
-            [
-              'window',
-              'document',
-              'navigator',
-              'location',
-              'screen',
-              'console',
-              'localStorage',
-              'sessionStorage',
-            ].includes(name)
-          ) {
+          if (BROWSER_GLOBAL_NAMES.includes(name)) {
             if (path.scope.hasBinding(name)) {
               return;
             }
@@ -217,11 +220,7 @@ export class EnvironmentEmulator {
       }
     }
 
-    if (
-      parts.length > 0 &&
-      parts[0] &&
-      ['window', 'document', 'navigator', 'location', 'screen'].includes(parts[0])
-    ) {
+    if (parts.length > 0 && parts[0] && ENV_ROOT_NAMES.includes(parts[0])) {
       return parts.join('.');
     }
 

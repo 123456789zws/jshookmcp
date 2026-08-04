@@ -6,6 +6,14 @@ import { config as dotenvConfig } from 'dotenv';
 import { z } from 'zod';
 import { DEFAULT_SEARCH_CONFIG } from '@src/config/search-defaults';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '@src/constants/search-model';
+import {
+  MCP_BROWSER_FLEET_LEASE_TTL_MS,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+  MCP_BROWSER_FLEET_VIRTUAL_NODES,
+  MCP_TRANSPORT,
+  OFFLOADER_DETAIL_THRESHOLD_BYTES,
+  OFFLOADER_FILE_THRESHOLD_BYTES,
+} from '@src/constants/server';
 import { logger } from './logger';
 import { getPackageVersion } from './packageVersion';
 import { isRecord } from './type-guards';
@@ -80,9 +88,9 @@ const CONFIG_DEFAULTS = {
     browserSessionReservedPendingPerSession: 1,
     browserSessionCostEwmaAlpha: 0.2,
     browserFleetWorkerId: 'local',
-    browserFleetVirtualNodes: 128,
-    browserFleetLeaseTtlMs: 600_000,
-    browserFleetMaxLocalLeases: 4096,
+    browserFleetVirtualNodes: MCP_BROWSER_FLEET_VIRTUAL_NODES,
+    browserFleetLeaseTtlMs: MCP_BROWSER_FLEET_LEASE_TTL_MS,
+    browserFleetMaxLocalLeases: MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
   },
   cache: {
     enabled: false,
@@ -102,8 +110,8 @@ const CONFIG_DEFAULTS = {
     maxCodeSizeMB: 10,
   },
   offloader: {
-    detailThreshold: 512 * 1024, // 512KB
-    fileThreshold: 4 * 1024 * 1024, // 4MB
+    detailThreshold: OFFLOADER_DETAIL_THRESHOLD_BYTES,
+    fileThreshold: OFFLOADER_FILE_THRESHOLD_BYTES,
     outputDir: 'artifacts/offloaded',
     excludeTools: [],
   },
@@ -609,7 +617,7 @@ function cloneSearchConfig(search: SearchConfig): SearchConfig {
 
 function buildSearchConfig(): SearchConfig {
   const defaults = cloneSearchConfig(DEFAULT_SEARCH_CONFIG);
-  const httpTransport = process.env.MCP_TRANSPORT?.trim().toLowerCase() === 'http';
+  const httpTransport = MCP_TRANSPORT.trim().toLowerCase() === 'http';
 
   return {
     queryCategoryProfiles: parseSearchQueryCategoryProfiles() ?? defaults.queryCategoryProfiles,

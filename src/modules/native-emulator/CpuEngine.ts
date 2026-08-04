@@ -198,6 +198,13 @@ export class CpuEngine implements ExecutionContext {
   private readonly hostFns = new Map<number, HostFunction>();
   /** Syscall handlers keyed by AArch64 syscall number (x8). */
   private readonly syscalls = new Map<number, SyscallHandler>();
+  /**
+   * Syscall handlers normalized to the decoder's HostContext shape. Rebuilt
+   * lazily and invalidated by registerSyscall — the fetch loop calls execute()
+   * once per instruction, so rebuilding this map inline would allocate on
+   * every branch/system instruction.
+   */
+  private normalizedSyscalls: Map<number, (hctx: HostContext) => number | undefined> | null = null;
   /** Top of the lazily-mapped guest stack (0 = not yet allocated). */
   private stackTop = 0;
   /** Base of the lazily-mapped thread-local (TPIDR_EL0) block (0 = none yet). */
@@ -316,6 +323,7 @@ export class CpuEngine implements ExecutionContext {
     // Clear host function stubs and syscalls
     this.hostFns.clear();
     this.syscalls.clear();
+    this.normalizedSyscalls = null;
 
     // Clear instruction hooks
     this.instructionHooks.length = 0;
@@ -790,6 +798,25 @@ export class CpuEngine implements ExecutionContext {
   /** Register a syscall handler for an AArch64 syscall number (svc #0, nr in x8). */
   registerSyscall(nr: number, handler: SyscallHandler): void {
     this.syscalls.set(nr, handler);
+    // Invalidate the normalized-syscall cache — the fetch loop must see the
+    // new handler on the next branch/system instruction.
+    this.normalizedSyscalls = null;
+  }
+
+  /** Lazy cache of syscall handlers normalized to the decoder's HostContext shape. */
+  private getNormalizedSyscalls(): Map<number, (hctx: HostContext) => number | undefined> {
+    if (this.normalizedSyscalls === null) {
+      const normalized = new Map<number, (hctx: HostContext) => number | undefined>();
+      for (const [num, handler] of this.syscalls) {
+        normalized.set(num, (hctx) => {
+          const result = handler(hctx);
+          if (result === undefined || result === null) return undefined;
+          return typeof result === 'bigint' ? Number(result) : result;
+        });
+      }
+      this.normalizedSyscalls = normalized;
+    }
+    return this.normalizedSyscalls;
   }
 
   /**
@@ -1313,22 +1340,13 @@ export class CpuEngine implements ExecutionContext {
     if (op0 === 0b1000 || op0 === 0b1001) {
       if (execDataProcessingImmediate(this, insn)) return;
     } else if (op0 === 0b1010 || op0 === 0b1011) {
-      // Normalize syscall handler return type for decoder compatibility
-      const normalizedSyscalls = new Map<number, (hctx: HostContext) => number | undefined>();
-      for (const [num, handler] of this.syscalls) {
-        normalizedSyscalls.set(num, (hctx) => {
-          const result = handler(hctx);
-          if (result === undefined || result === null) return undefined;
-          return typeof result === 'bigint' ? Number(result) : result;
-        });
-      }
       if (
         execBranchSystem(
           this,
           insn,
           () => this.ensureTls(),
           () => this.hostContext(),
-          normalizedSyscalls,
+          this.getNormalizedSyscalls(),
         )
       )
         return;

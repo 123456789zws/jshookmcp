@@ -25,6 +25,17 @@ const STRENGTH_THRESHOLDS = {
   weak: 40,
 } as const;
 
+/** An array literal of this many elements is treated as an S-box (AES: 256). */
+const SBOX_ARRAY_SIZE = 256;
+/** Big-number operations that imply asymmetric crypto. */
+const BIGINT_OPERATION_METHODS = ['modPow', 'modInverse', 'gcd', 'isProbablePrime'];
+/** Function-name hints for custom hash detection. */
+const HASH_FUNCTION_NAME_HINTS = ['hash', 'digest', 'checksum'];
+/** Confidence assigned to heuristic AST detections. */
+const SBOX_DETECT_CONFIDENCE = 0.8;
+const BIGINT_OP_CONFIDENCE = 0.75;
+const HASH_FUNCTION_CONFIDENCE = 0.7;
+
 export interface SecurityIssue {
   severity: 'critical' | 'high' | 'medium' | 'low';
   algorithm?: string;
@@ -183,7 +194,7 @@ export class CryptoDetector {
           const node = path.node;
           if (
             node.init?.type === 'ArrayExpression' &&
-            node.init.elements.length === 256 &&
+            node.init.elements.length === SBOX_ARRAY_SIZE &&
             node.id.type === 'Identifier' &&
             (node.id.name.toLowerCase().includes('sbox') ||
               node.id.name.toLowerCase().includes('box') ||
@@ -192,7 +203,7 @@ export class CryptoDetector {
             algorithms.push({
               name: 'Custom Symmetric Cipher',
               type: 'symmetric',
-              confidence: 0.8,
+              confidence: SBOX_DETECT_CONFIDENCE,
               location: { file: 'current', line: node.loc?.start.line || 0 },
               usage: `S-box array detected (${node.id.name})`,
             });
@@ -204,11 +215,11 @@ export class CryptoDetector {
           if (t.isMemberExpression(node.callee) && t.isIdentifier(node.callee.property)) {
             const methodName = node.callee.property.name;
 
-            if (['modPow', 'modInverse', 'gcd', 'isProbablePrime'].includes(methodName)) {
+            if (BIGINT_OPERATION_METHODS.includes(methodName)) {
               algorithms.push({
                 name: 'Asymmetric Encryption',
                 type: 'asymmetric',
-                confidence: 0.75,
+                confidence: BIGINT_OP_CONFIDENCE,
                 location: { file: 'current', line: node.loc?.start.line || 0 },
                 usage: `Big number operation detected: ${methodName}`,
               });
@@ -222,11 +233,7 @@ export class CryptoDetector {
           const node = path.node;
           const funcName = node.id?.name.toLowerCase() || '';
 
-          if (
-            funcName.includes('hash') ||
-            funcName.includes('digest') ||
-            funcName.includes('checksum')
-          ) {
+          if (HASH_FUNCTION_NAME_HINTS.some((hint) => funcName.includes(hint))) {
             const bodyCode = code.substring(node.start || 0, node.end || 0);
             const hasLoop = bodyCode.includes('for') || bodyCode.includes('while');
             const hasBitOps = />>>|<<|&|\||\^/.test(bodyCode);
@@ -235,7 +242,7 @@ export class CryptoDetector {
               algorithms.push({
                 name: 'Custom Hash Function',
                 type: 'hash',
-                confidence: 0.7,
+                confidence: HASH_FUNCTION_CONFIDENCE,
                 location: { file: 'current', line: node.loc?.start.line || 0 },
                 usage: `Hash function detected: ${funcName}`,
               });

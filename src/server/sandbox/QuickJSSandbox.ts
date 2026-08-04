@@ -136,96 +136,12 @@ export class QuickJSSandbox {
    * it down.  There is zero state leakage between calls.
    */
   async execute(code: string, options: SandboxOptions = {}): Promise<SandboxResult> {
-    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const memoryLimitBytes = options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES;
-
-    const QuickJS = await getQuickJS();
-    const runtime = QuickJS.newRuntime();
-
-    // Resource limits
-    runtime.setMemoryLimit(memoryLimitBytes);
-
-    // Timeout enforcement via interrupt handler
-    const startTime = Date.now();
-    let timedOut = false;
-    runtime.setInterruptHandler(() => {
-      if (Date.now() - startTime > timeoutMs) {
-        timedOut = true;
-        return true; // interrupt execution
-      }
-      return false;
-    });
-
-    const context = runtime.newContext();
-    const logs: string[] = [];
-
-    try {
-      // Inject console.log stub to capture output
-      this.injectConsole(context, logs);
-
-      // Inject pre-built helper libraries
-      this.injectHelpers(context);
-
-      // Inject MCP bridge if available
+    return this.executeInFreshRuntime(code, options, (ctx, logs) => {
+      // Legacy sync bridge stub — injected only when a bridge is set.
       if (this.bridge) {
-        this.injectBridge(context, this.bridge, logs);
+        this.injectBridge(ctx, this.bridge, logs);
       }
-
-      // Inject user-supplied globals
-      if (options.globals) {
-        this.injectGlobals(context, options.globals);
-      }
-
-      // Evaluate the user code
-      const result = context.evalCode(code, 'sandbox-eval.js');
-
-      if (result.error) {
-        const errorMsg = context.dump(result.error);
-        // Disposes the error handle and any value handle the engine produced
-        // alongside it — otherwise the value leaks for the runtime's lifetime.
-        disposeEvalResult(result);
-
-        if (timedOut) {
-          return {
-            ok: false,
-            error: 'Execution timed out',
-            timedOut: true,
-            durationMs: Date.now() - startTime,
-            logs,
-          };
-        }
-
-        return {
-          ok: false,
-          error: typeof errorMsg === 'object' ? JSON.stringify(errorMsg) : String(errorMsg),
-          timedOut: false,
-          durationMs: Date.now() - startTime,
-          logs,
-        };
-      }
-
-      const output = unmarshalFromQuickJS(context, result.value);
-      disposeEvalResult(result);
-
-      return {
-        ok: true,
-        output,
-        timedOut: false,
-        durationMs: Date.now() - startTime,
-        logs,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        timedOut,
-        durationMs: Date.now() - startTime,
-        logs,
-      };
-    } finally {
-      context.dispose();
-      runtime.dispose();
-    }
+    });
   }
 
   /**
@@ -350,6 +266,22 @@ export class QuickJSSandbox {
     bridge: MCPBridge,
     options: SandboxOptions = {},
   ): Promise<SandboxResult> {
+    return this.executeInFreshRuntime(code, options, (ctx, logs) => {
+      this.injectBridgeForOrchestration(ctx, bridge, logs);
+    });
+  }
+
+  /**
+   * Shared single-round execution: spins up a fresh QuickJS runtime, injects
+   * the console/helpers/globals plus the caller-supplied bridge injection,
+   * evaluates the code, and tears everything down. Used by both execute()
+   * (legacy sync bridge stub) and executeOneRound() (orchestration bridge).
+   */
+  private async executeInFreshRuntime(
+    code: string,
+    options: SandboxOptions = {},
+    injectBridge: (ctx: QuickJSContext, logs: string[]) => void,
+  ): Promise<SandboxResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const memoryLimitBytes = options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES;
 
@@ -373,7 +305,7 @@ export class QuickJSSandbox {
     try {
       this.injectConsole(context, logs);
       this.injectHelpers(context);
-      this.injectBridgeForOrchestration(context, bridge, logs);
+      injectBridge(context, logs);
 
       if (options.globals) {
         this.injectGlobals(context, options.globals);
@@ -383,6 +315,8 @@ export class QuickJSSandbox {
 
       if (result.error) {
         const errorMsg = context.dump(result.error);
+        // Disposes the error handle and any value handle the engine produced
+        // alongside it — otherwise the value leaks for the runtime's lifetime.
         disposeEvalResult(result);
 
         if (timedOut) {

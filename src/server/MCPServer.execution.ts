@@ -152,11 +152,13 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
           try {
             const safeArgs = JSON.stringify(args).slice(0, ARGS_PREVIEW_MAX_CHARS);
             logger.warn(
-              `Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'. ` +
+              `Telemetry Alert [ERR-03]: Tool execution hung (${Math.round(timeoutMs / 1000)}s) for '${name}'. ` +
                 `Args preview: ${safeArgs}...`,
             );
           } catch {
-            logger.warn(`Telemetry Alert [ERR-03]: Tool execution hung (>30s) for '${name}'.`);
+            logger.warn(
+              `Telemetry Alert [ERR-03]: Tool execution hung (${Math.round(timeoutMs / 1000)}s) for '${name}'.`,
+            );
           }
         }, timeoutMs);
         timeoutTimer.unref();

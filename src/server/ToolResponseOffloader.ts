@@ -30,6 +30,7 @@ import { DetailedDataManager } from '@utils/DetailedDataManager';
 import { sanitizeForCache, formatSize, DATA_URI_RE, getOffloadDir } from '@utils/sanitizeForCache';
 import { resolveArtifactPath } from '@utils/artifacts';
 import { logger } from '@utils/logger';
+import { OFFLOADER_DETAIL_THRESHOLD_BYTES, OFFLOADER_FILE_THRESHOLD_BYTES } from '@src/constants';
 
 export interface OffloaderConfig {
   /** Strings larger than this (bytes) go to DetailedDataManager. Default: 512KB */
@@ -68,8 +69,8 @@ export class LargeDataOffloader {
     private readonly detailedData: DetailedDataManager,
     config: OffloaderConfig = {},
   ) {
-    this.detailThreshold = config.detailThreshold ?? 512 * 1024; // 512KB
-    this.fileThreshold = config.fileThreshold ?? 4 * 1024 * 1024; // 4MB
+    this.detailThreshold = config.detailThreshold ?? OFFLOADER_DETAIL_THRESHOLD_BYTES;
+    this.fileThreshold = config.fileThreshold ?? OFFLOADER_FILE_THRESHOLD_BYTES;
     this.excludeTools = config.excludeTools ?? new Set();
     this.outputDir = config.outputDir ?? getOffloadDir();
   }

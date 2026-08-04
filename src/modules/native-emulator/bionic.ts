@@ -128,6 +128,9 @@ function createBumpAllocator(
 }
 /** Default emulated page size returned by libc/sysconf imports. */
 const PAGE_SIZE = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;
+/** Fake pid/uid reported by getpid/getuid/geteuid — stable so emulated code
+ *  that caches the value (or writes it into logs/state) is deterministic. */
+const FAKE_PID_UID = 10000n;
 /** Linux/Android-ish sysconf names used by common bionic callers. */
 const SC_PAGE_SIZE_NAMES = new Set([30, 47]);
 const SC_NPROCESSORS_ONLN_NAMES = new Set([84]);
@@ -369,8 +372,8 @@ export function createBionicLibrary(
   lib.set('mprotect', () => 0n);
   lib.set('munmap', () => 0n);
   lib.set('prctl', () => 0n);
-  lib.set('getpid', () => 10000n);
-  lib.set('getuid', () => 10000n);
+  lib.set('getpid', () => FAKE_PID_UID);
+  lib.set('getuid', () => FAKE_PID_UID);
   lib.set('sleep', () => 0n);
   lib.set('usleep', () => 0n);
 
@@ -631,7 +634,7 @@ export function createBionicLibrary(
   });
 
   lib.set('dlclose', () => 0n); // succeed (no-op: handles never freed)
-  lib.set('geteuid', () => 10000n); // same as getuid
+  lib.set('geteuid', () => FAKE_PID_UID); // same as getuid
   lib.set('mremap', () => BigInt(-1)); // fail: not implemented
 
   installFortifiedMemoryStubs(lib);

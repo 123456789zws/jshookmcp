@@ -17,6 +17,7 @@ import {
   ADB_SCREENRECORD_DURATION_CLAMP_MAX,
   ADB_SCREENRECORD_DURATION_CLAMP_MIN,
   ADB_SCREENRECORD_DURATION_DEFAULT,
+  ADB_SCREENRECORD_TIMEOUT_PAD_SEC,
   ADB_UI_DUMP_CLEANUP_TIMEOUT_MS,
   ADB_LARGE_OUTPUT_MAX_BUFFER_BYTES,
   ADB_LOGCAT_MAX_LINES_DEFAULT,
@@ -28,6 +29,7 @@ import {
   ADB_GETPROP_MAX_PROPERTIES,
   ADB_SHELL_TIMEOUT_MS,
   ADB_WEBVIEW_HOST_PORT_DEFAULT,
+  ADB_WEBVIEW_HTTP_TIMEOUT_MS,
   APK_ZIP_MAGIC_HEX_HEADERS,
 } from '@src/constants';
 import {
@@ -874,7 +876,7 @@ export class ADBBridgeHandlers {
 
       const recordResult = await execAdb(adb, recordArgs, {
         allowNonZero: true,
-        timeoutMs: (durationSec + 10) * 1000,
+        timeoutMs: (durationSec + ADB_SCREENRECORD_TIMEOUT_PAD_SEC) * 1000,
         maxBufferBytes: ADB_MAX_BUFFER_BYTES,
       });
       if (recordResult.exitCode !== 0) {
@@ -1604,7 +1606,7 @@ export class ADBBridgeHandlers {
       const targets = await new Promise<
         Array<{ id: string; title: string; url: string; webSocketDebuggerUrl: string }>
       >((resolve) => {
-        http
+        const request = http
           .get(`http://localhost:${hostPort}/json/list`, (res) => {
             let body = '';
             res.on('data', (chunk) => {
@@ -1619,6 +1621,12 @@ export class ADBBridgeHandlers {
             });
           })
           .on('error', () => resolve([]));
+        // A forwarded-but-silent endpoint would otherwise hang the handler
+        // forever — bound the probe with the configured HTTP timeout.
+        request.setTimeout(ADB_WEBVIEW_HTTP_TIMEOUT_MS, () => {
+          request.destroy();
+          resolve([]);
+        });
       });
 
       return {
@@ -1658,7 +1666,7 @@ export class ADBBridgeHandlers {
 
       const http = await import('node:http');
       const wsUrl = await new Promise<string | undefined>((resolve) => {
-        http
+        const request = http
           .get(`http://localhost:${hostPort}/json`, (res) => {
             let body = '';
             res.on('data', (chunk) => {
@@ -1678,6 +1686,11 @@ export class ADBBridgeHandlers {
             });
           })
           .on('error', () => resolve(undefined));
+        // Bound the probe — a silent forwarded endpoint must not hang the handler.
+        request.setTimeout(ADB_WEBVIEW_HTTP_TIMEOUT_MS, () => {
+          request.destroy();
+          resolve(undefined);
+        });
       });
 
       if (!wsUrl) {

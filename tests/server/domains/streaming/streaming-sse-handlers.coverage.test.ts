@@ -660,6 +660,7 @@ describe('SseHandlers', () => {
       expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), {
         maxEvents: 500,
         urlFilterRaw: 'api\\.example',
+        previewLimit: expect.any(Number),
       });
     });
 
@@ -669,6 +670,7 @@ describe('SseHandlers', () => {
       expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), {
         maxEvents: 1000,
         urlFilterRaw: undefined,
+        previewLimit: expect.any(Number),
       });
     });
 

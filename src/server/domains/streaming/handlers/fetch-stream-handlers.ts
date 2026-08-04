@@ -26,6 +26,9 @@ import {
 import {
   SSE_BUFFER_MAX_BYTES,
   STREAMING_MAX_EVENTS,
+  STREAMING_MAX_EVENTS_CAP,
+  STREAMING_QUERY_LIMIT_DEFAULT,
+  STREAMING_QUERY_LIMIT_MAX,
   WS_PAYLOAD_PREVIEW_LIMIT,
 } from '@src/constants/streaming';
 
@@ -357,7 +360,7 @@ export class FetchStreamHandlers {
     const maxEvents = parseNumberArg(args.maxEvents, {
       defaultValue: STREAMING_MAX_EVENTS,
       min: 1,
-      max: 50000,
+      max: STREAMING_MAX_EVENTS_CAP,
       integer: true,
     });
     const urlFilterRaw = parseOptionalStringArg(args.urlFilter);
@@ -409,9 +412,9 @@ export class FetchStreamHandlers {
     const eventType = parseOptionalStringArg(args.eventType);
     const fullData = parseBooleanArg(args.fullData, false);
     const limit = parseNumberArg(args.limit, {
-      defaultValue: 100,
+      defaultValue: STREAMING_QUERY_LIMIT_DEFAULT,
       min: 1,
-      max: 5000,
+      max: STREAMING_QUERY_LIMIT_MAX,
       integer: true,
     });
     const offset = parseNumberArg(args.offset, {

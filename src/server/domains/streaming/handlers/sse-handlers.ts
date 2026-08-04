@@ -21,6 +21,13 @@ import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
 } from '@modules/collector/PageController';
+import {
+  STREAMING_MAX_EVENTS,
+  STREAMING_MAX_EVENTS_CAP,
+  STREAMING_QUERY_LIMIT_DEFAULT,
+  STREAMING_QUERY_LIMIT_MAX,
+  WS_PAYLOAD_PREVIEW_LIMIT,
+} from '@src/constants/streaming';
 
 type InternalSseEvent = {
   sourceUrl: string;
@@ -54,12 +61,22 @@ type ExportFormat = 'json' | 'ndjson';
 const parseExportFormat = (value: unknown): ExportFormat =>
   value === 'ndjson' ? 'ndjson' : 'json';
 
-function sseInjectionFn(config: { maxEvents: number; urlFilterRaw?: string }) {
+function sseInjectionFn(config: {
+  maxEvents: number;
+  urlFilterRaw?: string;
+  /** Data preview truncation limit; canonical value WS_PAYLOAD_PREVIEW_LIMIT. */
+  previewLimit?: number;
+}) {
   const globalWindow = window as Window &
     typeof globalThis & {
       __jshookSSEMonitor?: InternalSseMonitorState;
       EventSource: typeof EventSource;
     };
+
+  // Preview truncation limit, supplied by the handler from the streaming
+  // constants module (WS_PAYLOAD_PREVIEW_LIMIT); the fallback keeps the
+  // serialized script self-contained.
+  const previewLimit = config.previewLimit ?? 200;
 
   if (!globalWindow.__jshookSSEMonitor) {
     globalWindow.__jshookSSEMonitor = {
@@ -112,7 +129,8 @@ function sseInjectionFn(config: { maxEvents: number; urlFilterRaw?: string }) {
   ): void => {
     if (!state.enabled || !shouldCapture(sourceUrl)) return;
     const dataString = toDataString(rawData);
-    const preview = dataString.length > 200 ? `${dataString.slice(0, 200)}…` : dataString;
+    const preview =
+      dataString.length > previewLimit ? `${dataString.slice(0, previewLimit)}…` : dataString;
     const record: InternalSseEvent = {
       sourceUrl,
       eventType,
@@ -256,8 +274,13 @@ export class SseHandlers {
   ): Promise<SseEnableResult | { success: false; error: string }> {
     const page = await this.s.collector.getActivePage();
 
+    const injectionConfig = {
+      maxEvents,
+      urlFilterRaw,
+      previewLimit: WS_PAYLOAD_PREVIEW_LIMIT,
+    };
     if (options?.persistent) {
-      await evaluateOnNewDocumentWithTimeout(page, sseInjectionFn, { maxEvents, urlFilterRaw });
+      await evaluateOnNewDocumentWithTimeout(page, sseInjectionFn, injectionConfig);
       return {
         success: true,
         message: 'SSE monitor enabled (persistent — survives navigations)',
@@ -268,15 +291,15 @@ export class SseHandlers {
       };
     }
 
-    const result = await evaluateWithTimeout(page, sseInjectionFn, { maxEvents, urlFilterRaw });
+    const result = await evaluateWithTimeout(page, sseInjectionFn, injectionConfig);
     return result as SseEnableResult | { success: false; error: string };
   }
 
   async handleSseMonitorEnable(args: Record<string, unknown>): Promise<TextToolResponse> {
     const maxEvents = parseNumberArg(args.maxEvents, {
-      defaultValue: 2000,
+      defaultValue: STREAMING_MAX_EVENTS,
       min: 1,
-      max: 50000,
+      max: STREAMING_MAX_EVENTS_CAP,
       integer: true,
     });
     const urlFilterRaw = parseOptionalStringArg(args.urlFilter);
@@ -311,9 +334,9 @@ export class SseHandlers {
     const eventType = parseOptionalStringArg(args.eventType);
     const fullData = parseBooleanArg(args.fullData, false);
     const limit = parseNumberArg(args.limit, {
-      defaultValue: 100,
+      defaultValue: STREAMING_QUERY_LIMIT_DEFAULT,
       min: 1,
-      max: 5000,
+      max: STREAMING_QUERY_LIMIT_MAX,
       integer: true,
     });
     const offset = parseNumberArg(args.offset, {

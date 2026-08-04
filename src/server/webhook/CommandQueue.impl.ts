@@ -9,6 +9,9 @@ import {
 export type WebhookCommandStoredStatus = 'pending' | 'processing' | 'processed' | 'failed';
 export type WebhookCommandStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
+/** ID prefix for queued commands (also parsed back in importState). */
+const COMMAND_ID_PREFIX = 'cmd-';
+
 export interface WebhookCommandInput {
   endpointId?: string;
   event?: string;
@@ -68,7 +71,7 @@ export class CommandQueueImpl extends EventEmitter {
       throw new Error(`Command queue is full (${this.maxQueueSize})`);
     }
 
-    const id = `cmd-${this.nextId}`;
+    const id = `${COMMAND_ID_PREFIX}${this.nextId}`;
     this.nextId += 1;
 
     const createdAt = normalizeTimestamp();
@@ -266,7 +269,7 @@ export class CommandQueue extends CommandQueueImpl {
       this.order.push(entry.id);
 
       // Extract numeric portion from command ID (e.g. "cmd-42" → 42)
-      const match = /^cmd-(\d+)$/.exec(entry.id);
+      const match = new RegExp(`^${COMMAND_ID_PREFIX}(\\d+)$`).exec(entry.id);
       if (match && match[1]) {
         const num = parseInt(match[1], 10);
         if (num > maxId) {

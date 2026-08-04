@@ -7,7 +7,12 @@ import { logger } from '@utils/logger';
 import { RingBuffer } from '@utils/RingBuffer';
 import { resolveArtifactPath } from '@utils/artifacts';
 import { evaluateWithTimeout } from '@modules/collector/PageController';
-import { WS_PAYLOAD_PREVIEW_LIMIT, WS_PAYLOAD_SAMPLE_LIMIT } from '@src/constants';
+import {
+  STREAMING_QUERY_LIMIT_DEFAULT,
+  STREAMING_QUERY_LIMIT_MAX,
+  WS_PAYLOAD_PREVIEW_LIMIT,
+  WS_PAYLOAD_SAMPLE_LIMIT,
+} from '@src/constants/streaming';
 import type {
   StreamingSharedState,
   TextToolResponse,
@@ -437,9 +442,9 @@ export class WsHandlers {
 
   async handleWsGetFrames(args: Record<string, unknown>): Promise<TextToolResponse> {
     const limit = parseNumberArg(args.limit, {
-      defaultValue: 100,
+      defaultValue: STREAMING_QUERY_LIMIT_DEFAULT,
       min: 1,
-      max: 5000,
+      max: STREAMING_QUERY_LIMIT_MAX,
       integer: true,
     });
     const offset = parseNumberArg(args.offset, {

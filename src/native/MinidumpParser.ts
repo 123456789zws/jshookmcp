@@ -103,6 +103,14 @@ export interface AddressResolution {
 
 // ── Stream type constants ──────────────────────────────────────────────────────
 
+/** The stream types this parser decodes (keys align with STREAM_TYPES below). */
+const STREAM_THREAD_LIST = 3;
+const STREAM_MODULE_LIST = 4;
+const STREAM_MEMORY_LIST = 5;
+const STREAM_EXCEPTION = 6;
+const STREAM_SYSTEM_INFO = 7;
+const STREAM_MEMORY64_LIST = 9;
+
 const STREAM_TYPES: Record<number, string> = {
   0: 'UnusedStream',
   1: 'ReservedStream0',
@@ -304,22 +312,22 @@ function parseStream(
   out: MinidumpSummary,
 ): void {
   switch (entry.streamType) {
-    case 3:
+    case STREAM_THREAD_LIST:
       parseThreadList(f, entry.locationRva, out);
       break;
-    case 4:
+    case STREAM_MODULE_LIST:
       parseModuleList(f, entry.locationRva, out);
       break;
-    case 5:
+    case STREAM_MEMORY_LIST:
       parseMemoryList(f, entry.locationRva, out);
       break;
-    case 6:
+    case STREAM_EXCEPTION:
       parseException(f, entry.locationRva, out);
       break;
-    case 7:
+    case STREAM_SYSTEM_INFO:
       parseSystemInfo(f, entry.locationRva, out);
       break;
-    case 9:
+    case STREAM_MEMORY64_LIST:
       parseMemory64List(f, entry.locationRva, out);
       out.hasMemory64 = true;
       break;

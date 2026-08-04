@@ -34,6 +34,18 @@ export const DEBUG_PORT_CANDIDATES = list('DEBUG_PORT_CANDIDATES', [9222, 9229, 
 /** Default port used when launching a process with `--remote-debugging-port`. */
 export const DEFAULT_DEBUG_PORT = int('DEFAULT_DEBUG_PORT', 9222);
 
+/** HTTP transport listen port for the MCP server (`MCP_PORT`). */
+export const MCP_HTTP_PORT = int('MCP_PORT', 3000);
+
+/** HTTP transport listen host for the MCP server (`MCP_HOST`). */
+export const MCP_HTTP_HOST = str('MCP_HOST', '127.0.0.1');
+
+/** Gate detailed health-check output behind MCP_HEALTH_VERBOSE. */
+export const MCP_HEALTH_VERBOSE = bool('MCP_HEALTH_VERBOSE', false);
+
+/** Permit non-localhost HTTP bindings without MCP_AUTH_TOKEN. */
+export const MCP_ALLOW_INSECURE = bool('MCP_ALLOW_INSECURE', false);
+
 /** Ghidra bridge REST endpoint. */
 export const GHIDRA_BRIDGE_ENDPOINT = str('GHIDRA_BRIDGE_URL', 'http://127.0.0.1:18080');
 
@@ -135,6 +147,13 @@ export const MCP_ARTIFACTS_HAR_DIR = 'artifacts/har';
 export const MCP_ARTIFACTS_REPORTS_DIR = 'artifacts/reports';
 
 /* ================================================================== */
+/*  Stdio transport                                                    */
+/* ================================================================== */
+
+/** Max time to wait for a single stdout write before treating it as broken. */
+export const STDIO_SEND_TIMEOUT_MS = int('STDIO_SEND_TIMEOUT_MS', 500);
+
+/* ================================================================== */
 /*  Compact tool schema (token optimization)                           */
 /* ================================================================== */
 
@@ -195,6 +214,18 @@ export const WORKER_POOL_MIN_WORKERS = int('WORKER_POOL_MIN_WORKERS', 2);
 export const WORKER_POOL_IDLE_TIMEOUT_MS = int('WORKER_POOL_IDLE_TIMEOUT_MS', 30_000);
 export const WORKER_POOL_JOB_TIMEOUT_MS = int('WORKER_POOL_JOB_TIMEOUT_MS', 15_000);
 
+/** Browser fleet: max local sessions the HTTP transport admits by default. */
+export const MCP_BROWSER_FLEET_MAX_LOCAL_LEASES = int('MCP_BROWSER_FLEET_MAX_LOCAL_LEASES', 4096);
+
+/** Browser fleet: HTTP session idle TTL before eviction (ms). */
+export const MCP_BROWSER_FLEET_LEASE_TTL_MS = int('MCP_BROWSER_FLEET_LEASE_TTL_MS', 600_000);
+
+/** Browser fleet: consistent-hash ring size for local session routing. */
+export const MCP_BROWSER_FLEET_VIRTUAL_NODES = int('MCP_BROWSER_FLEET_VIRTUAL_NODES', 128);
+
+/** MCP transport mode: 'stdio' (default) or 'http'. */
+export const MCP_TRANSPORT = str('MCP_TRANSPORT', 'stdio');
+
 export const PARALLEL_DEFAULT_CONCURRENCY = int('PARALLEL_DEFAULT_CONCURRENCY', 3);
 export const PARALLEL_DEFAULT_TIMEOUT_MS = int('PARALLEL_DEFAULT_TIMEOUT_MS', 60_000);
 export const PARALLEL_DEFAULT_MAX_RETRIES = int('PARALLEL_DEFAULT_MAX_RETRIES', 2);
@@ -219,6 +250,12 @@ export const OFFLOAD_FIELD_SANITIZE_THRESHOLD_BYTES = int(
   'OFFLOAD_FIELD_SANITIZE_THRESHOLD_BYTES',
   64 * 1024,
 );
+
+/** LargeDataOffloader: strings larger than this (bytes) go to DetailedDataManager. */
+export const OFFLOADER_DETAIL_THRESHOLD_BYTES = int('OFFLOADER_DETAIL_THRESHOLD', 512 * 1024);
+
+/** LargeDataOffloader: strings larger than this (bytes) go directly to a file. */
+export const OFFLOADER_FILE_THRESHOLD_BYTES = int('OFFLOADER_FILE_THRESHOLD', 4 * 1024 * 1024);
 
 /* ================================================================== */
 /*  Buffer sizes                                                       */

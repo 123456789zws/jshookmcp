@@ -42,6 +42,10 @@ const CAPTCHA_THRESHOLDS = {
   sliderMaxHeight: 200,
   /** How many ancestors are inspected for a captcha class/id. */
   maxParentDepth: 3,
+  /** Default wait budget before declaring the CAPTCHA unsolved (ms). */
+  defaultWaitTimeoutMs: 300000,
+  /** Poll interval while waiting for the CAPTCHA to clear (ms). */
+  waitPollIntervalMs: 2000,
 } as const;
 
 export class CaptchaDetector {
@@ -500,7 +504,10 @@ export class CaptchaDetector {
     return { detected: false, type: 'none', confidence: 0 };
   }
 
-  async waitForCompletion(page: Page, timeout: number = 300000): Promise<boolean> {
+  async waitForCompletion(
+    page: Page,
+    timeout: number = CAPTCHA_THRESHOLDS.defaultWaitTimeoutMs,
+  ): Promise<boolean> {
     logger.info('Waiting for CAPTCHA to be solved...');
 
     const startTime = Date.now();
@@ -513,7 +520,7 @@ export class CaptchaDetector {
         return true;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, CAPTCHA_THRESHOLDS.waitPollIntervalMs));
     }
 
     logger.error('Timed out while waiting for CAPTCHA completion');

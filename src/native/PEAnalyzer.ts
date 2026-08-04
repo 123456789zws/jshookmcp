@@ -41,6 +41,13 @@ const PE32PLUS_MAGIC = 0x20b;
 const SECTION_HEADER_SIZE = 40;
 const IMPORT_DESCRIPTOR_SIZE = 20;
 const COMPARE_BYTES = 16; // Bytes to compare for inline hook detection
+/** Safety caps on descriptor/thunk walks (malformed headers would loop forever). */
+const MAX_IMPORT_DESCRIPTORS = 500;
+const MAX_THUNK_ENTRIES = 2000;
+const MAX_EXPORTED_FUNCTIONS = 2000;
+/** Name buffer sizes for DLL/module names and hint/name import records. */
+const MAX_DLL_NAME_BYTES = 256;
+const MAX_HINT_NAME_BYTES = 258; // 2-byte hint + 256-byte name
 
 // PE header layout offsets (IMAGE_DOS_HEADER / IMAGE_NT_HEADERS, PE/COFF spec).
 const DOS_HEADER_SIZE = 64;
@@ -189,16 +196,17 @@ export class PEAnalyzer {
       let descOffset = importRva.rva;
 
       // Walk IMAGE_IMPORT_DESCRIPTOR chain (20 bytes each, terminated by all-zeros)
-      for (let i = 0; i < 500; i++) {
-        // Safety limit
+      for (let i = 0; i < MAX_IMPORT_DESCRIPTORS; i++) {
         const desc = ReadProcessMemory(hProcess, base + BigInt(descOffset), IMPORT_DESCRIPTOR_SIZE);
         const nameRva = desc.readUInt32LE(12);
         if (nameRva === 0) break; // Terminator
 
         // Read DLL name
-        const nameData = ReadProcessMemory(hProcess, base + BigInt(nameRva), 256);
+        const nameData = ReadProcessMemory(hProcess, base + BigInt(nameRva), MAX_DLL_NAME_BYTES);
         const nullIdx = nameData.indexOf(0);
-        const dllName = nameData.subarray(0, nullIdx > 0 ? nullIdx : 256).toString('ascii');
+        const dllName = nameData
+          .subarray(0, nullIdx > 0 ? nullIdx : MAX_DLL_NAME_BYTES)
+          .toString('ascii');
 
         // Read thunk array (simplified — just collect names)
         const originalFirstThunkRva = desc.readUInt32LE(0) || desc.readUInt32LE(16);
@@ -265,14 +273,16 @@ export class PEAnalyzer {
       numberOfNames * 2,
     );
 
-    for (let i = 0; i < Math.min(numberOfNames, 2000); i++) {
+    for (let i = 0; i < Math.min(numberOfNames, MAX_EXPORTED_FUNCTIONS); i++) {
       const nameRva = namesBuf.readUInt32LE(i * 4);
       const ordIndex = ordsBuf.readUInt16LE(i * 2);
 
       // Read function name
-      const nameBuf = ReadProcessMemory(hProcess, base + BigInt(nameRva), 256);
+      const nameBuf = ReadProcessMemory(hProcess, base + BigInt(nameRva), MAX_DLL_NAME_BYTES);
       const nullIdx = nameBuf.indexOf(0);
-      const name = nameBuf.subarray(0, nullIdx > 0 ? nullIdx : 256).toString('ascii');
+      const name = nameBuf
+        .subarray(0, nullIdx > 0 ? nullIdx : MAX_DLL_NAME_BYTES)
+        .toString('ascii');
 
       // Read function RVA
       const funcRva = ReadProcessMemory(
@@ -413,7 +423,7 @@ export class PEAnalyzer {
           let descOffset = importDir.rva;
 
           // Walk IMAGE_IMPORT_DESCRIPTOR chain (20 bytes each).
-          for (let i = 0; i < 500; i++) {
+          for (let i = 0; i < MAX_IMPORT_DESCRIPTORS; i++) {
             const desc = ReadProcessMemory(
               hProcess,
               base + BigInt(descOffset),
@@ -426,9 +436,15 @@ export class PEAnalyzer {
             const originalFirstThunkRva = desc.readUInt32LE(0); // INT (hint/name)
 
             // Read DLL name.
-            const nameData = ReadProcessMemory(hProcess, base + BigInt(nameRva), 256);
+            const nameData = ReadProcessMemory(
+              hProcess,
+              base + BigInt(nameRva),
+              MAX_DLL_NAME_BYTES,
+            );
             const nullIdx = nameData.indexOf(0);
-            const dllName = nameData.subarray(0, nullIdx > 0 ? nullIdx : 256).toString('ascii');
+            const dllName = nameData
+              .subarray(0, nullIdx > 0 ? nullIdx : MAX_DLL_NAME_BYTES)
+              .toString('ascii');
 
             // Resolve the declared source module's loaded range.
             const dllStem = dllName.toLowerCase().replace(/\.dll$/i, '');
@@ -457,7 +473,7 @@ export class PEAnalyzer {
             }
 
             // Walk IAT thunks.
-            for (let j = 0; j < 2000; j++) {
+            for (let j = 0; j < MAX_THUNK_ENTRIES; j++) {
               const iatAbs = base + BigInt(firstThunkRva + j * thunkSize);
               const thunkData = ReadProcessMemory(hProcess, iatAbs, thunkSize);
               const funcAddr = headers.isPE32Plus
@@ -483,10 +499,12 @@ export class PEAnalyzer {
                   const hintNameData = ReadProcessMemory(
                     hProcess,
                     base + BigInt(Number(intValue)),
-                    258,
+                    MAX_HINT_NAME_BYTES,
                   );
                   const ni = hintNameData.indexOf(0, 2);
-                  funcName = hintNameData.subarray(2, ni > 2 ? ni : 258).toString('ascii');
+                  funcName = hintNameData
+                    .subarray(2, ni > 2 ? ni : MAX_HINT_NAME_BYTES)
+                    .toString('ascii');
                 }
               }
 
@@ -641,8 +659,7 @@ export class PEAnalyzer {
     const functions: ImportFunction[] = [];
     const ordinal = ordinalFlag(isPE32Plus);
 
-    for (let i = 0; i < 2000; i++) {
-      // Safety limit
+    for (let i = 0; i < MAX_THUNK_ENTRIES; i++) {
       const thunkData = ReadProcessMemory(
         hProcess,
         base + BigInt(thunkRva + i * thunkSize),
@@ -665,10 +682,16 @@ export class PEAnalyzer {
       } else {
         // Import by name — read IMAGE_IMPORT_BY_NAME
         const hintNameRva = Number(thunkValue);
-        const hintNameData = ReadProcessMemory(hProcess, base + BigInt(hintNameRva), 258);
+        const hintNameData = ReadProcessMemory(
+          hProcess,
+          base + BigInt(hintNameRva),
+          MAX_HINT_NAME_BYTES,
+        );
         const hint = hintNameData.readUInt16LE(0);
         const nullIdx = hintNameData.indexOf(0, 2);
-        const name = hintNameData.subarray(2, nullIdx > 2 ? nullIdx : 258).toString('ascii');
+        const name = hintNameData
+          .subarray(2, nullIdx > 2 ? nullIdx : MAX_HINT_NAME_BYTES)
+          .toString('ascii');
 
         functions.push({
           name,

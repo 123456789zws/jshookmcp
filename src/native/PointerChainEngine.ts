@@ -144,38 +144,24 @@ export class PointerChainEngine {
   async validateChain(pid: number, chain: PointerChain): Promise<ChainValidationResult> {
     const handle = this.provider.openProcess(pid, false);
     try {
-      let currentAddr = parseAddress(chain.baseAddress);
-
-      for (let i = 0; i < chain.links.length; i++) {
-        const link = chain.links[i]!;
-
-        // Read pointer at current address
-        let ptrValue: bigint;
-        try {
-          const buf = this.provider.readMemory(handle, currentAddr, 8).data;
-          ptrValue = buf.readBigUInt64LE(0);
-        } catch {
-          return {
-            chainId: chain.id,
-            isValid: false,
-            resolvedAddress: null,
-            expectedAddress: chain.targetAddress,
-            brokenAt: i,
-          };
-        }
-
-        // Apply offset to reach next address
-        currentAddr = ptrValue + BigInt(link.offset);
+      const resolved = this.resolveChainInternal(handle, chain);
+      if (resolved.brokenAt !== undefined) {
+        return {
+          chainId: chain.id,
+          isValid: false,
+          resolvedAddress: null,
+          expectedAddress: chain.targetAddress,
+          brokenAt: resolved.brokenAt,
+        };
       }
 
-      const resolvedStr = formatAddress(currentAddr);
       const expectedAddr = parseAddress(chain.targetAddress);
-      const isValid = currentAddr === expectedAddr;
+      const isValid = resolved.currentAddr === expectedAddr;
 
       return {
         chainId: chain.id,
         isValid,
-        resolvedAddress: resolvedStr,
+        resolvedAddress: formatAddress(resolved.currentAddr),
         expectedAddress: chain.targetAddress,
         brokenAt: isValid ? undefined : chain.links.length - 1,
       };
@@ -201,23 +187,38 @@ export class PointerChainEngine {
   async resolveChain(pid: number, chain: PointerChain): Promise<string | null> {
     const handle = this.provider.openProcess(pid, false);
     try {
-      let currentAddr = parseAddress(chain.baseAddress);
-
-      for (const link of chain.links) {
-        let ptrValue: bigint;
-        try {
-          const buf = this.provider.readMemory(handle, currentAddr, 8).data;
-          ptrValue = buf.readBigUInt64LE(0);
-        } catch {
-          return null;
-        }
-        currentAddr = ptrValue + BigInt(link.offset);
-      }
-
-      return formatAddress(currentAddr);
+      const resolved = this.resolveChainInternal(handle, chain);
+      return resolved.brokenAt === undefined ? formatAddress(resolved.currentAddr) : null;
     } finally {
       this.provider.closeProcess(handle);
     }
+  }
+
+  /**
+   * Walk a chain link-by-link, dereferencing each pointer. Returns the final
+   * address plus the index of the first link whose read failed (undefined when
+   * the whole chain resolved). Shared by {@link validateChain} and
+   * {@link resolveChain} — previously two verbatim copies of this loop.
+   */
+  private resolveChainInternal(
+    handle: ProcessHandle,
+    chain: PointerChain,
+  ): { currentAddr: bigint; brokenAt?: number } {
+    let currentAddr = parseAddress(chain.baseAddress);
+
+    for (let i = 0; i < chain.links.length; i++) {
+      const link = chain.links[i]!;
+      let ptrValue: bigint;
+      try {
+        const buf = this.provider.readMemory(handle, currentAddr, 8).data;
+        ptrValue = buf.readBigUInt64LE(0);
+      } catch {
+        return { currentAddr, brokenAt: i };
+      }
+      currentAddr = ptrValue + BigInt(link.offset);
+    }
+
+    return { currentAddr };
   }
 
   /**

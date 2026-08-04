@@ -674,7 +674,7 @@ describe('MCPServer', () => {
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        "Telemetry Alert [ERR-03]: Tool execution hung (>30s) for 'slow_tool'",
+        "Telemetry Alert [ERR-03]: Tool execution hung (30s) for 'slow_tool'",
       ),
     );
 
@@ -702,7 +702,7 @@ describe('MCPServer', () => {
     });
     await vi.advanceTimersByTimeAsync(31_000);
     expect(warnSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining("Tool execution hung (>30s) for 'browser_status'"),
+      expect.stringContaining("Tool execution hung (30s) for 'browser_status'"),
     );
 
     releaseActive();
@@ -947,7 +947,12 @@ describe('MCPServer', () => {
 
   it('HTTP transport mode startup', async () => {
     process.env.MCP_TRANSPORT = 'http';
-    const server = new MCPServer(baseConfig);
+    // MCP_TRANSPORT is resolved into a constant at module load time, so the
+    // module must be re-imported after setting the env var for the constant to
+    // see 'http' (vi.mock registrations survive vi.resetModules).
+    vi.resetModules();
+    const { MCPServer: ReloadedMCPServer } = await import('@server/MCPServer');
+    const server = new ReloadedMCPServer(baseConfig);
     server.registerCaches = vi.fn(); // avoid importing cache adapters
     // mock HTTP transport to avoid actually starting a listener
     const mockStartHttp = vi.fn();

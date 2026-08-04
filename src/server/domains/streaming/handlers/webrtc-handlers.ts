@@ -22,7 +22,13 @@ import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
 } from '@modules/collector/PageController';
-import { STREAMING_MAX_EVENTS } from '@src/constants/streaming';
+import {
+  STREAMING_MAX_EVENTS,
+  STREAMING_MAX_EVENTS_CAP,
+  STREAMING_QUERY_LIMIT_DEFAULT,
+  STREAMING_QUERY_LIMIT_MAX,
+  WS_PAYLOAD_PREVIEW_LIMIT,
+} from '@src/constants/streaming';
 
 type ExportFormat = 'json' | 'ndjson';
 
@@ -48,6 +54,8 @@ function webrtcInjectionFn(config: {
   urlFilterRaw?: string;
   /** Persistent-disable localStorage key; canonical value WEBRTC_DISABLED_MARKER. */
   disableMarkerKey?: string;
+  /** Data preview truncation limit; canonical value WS_PAYLOAD_PREVIEW_LIMIT. */
+  previewLimit?: number;
 }): unknown {
   type WEvent = {
     pcId: number;
@@ -87,6 +95,11 @@ function webrtcInjectionFn(config: {
   } catch {
     // localStorage can throw in sandboxed iframes — treat as enabled.
   }
+
+  // Preview truncation limit, supplied by the handler from the streaming
+  // constants module (WS_PAYLOAD_PREVIEW_LIMIT); the fallback keeps the
+  // serialized script self-contained.
+  const previewLimit = config.previewLimit ?? 200;
 
   const gw = window as Window &
     typeof globalThis & {
@@ -142,7 +155,8 @@ function webrtcInjectionFn(config: {
     const dataString = safeString(
       isBinary ? `[binary ${String((rawData as ArrayBuffer).byteLength ?? 0)} bytes]` : rawData,
     );
-    const preview = dataString.length > 200 ? `${dataString.slice(0, 200)}…` : dataString;
+    const preview =
+      dataString.length > previewLimit ? `${dataString.slice(0, previewLimit)}…` : dataString;
     state.events.push({
       pcId,
       label,
@@ -331,6 +345,7 @@ export class WebRtcHandlers {
       maxEvents,
       urlFilterRaw,
       disableMarkerKey: WEBRTC_DISABLED_MARKER,
+      previewLimit: WS_PAYLOAD_PREVIEW_LIMIT,
     };
     if (options?.persistent) {
       await evaluateOnNewDocumentWithTimeout(page, webrtcInjectionFn, injectionConfig);
@@ -350,7 +365,7 @@ export class WebRtcHandlers {
     const maxEvents = parseNumberArg(args.maxEvents, {
       defaultValue: STREAMING_MAX_EVENTS,
       min: 1,
-      max: 50000,
+      max: STREAMING_MAX_EVENTS_CAP,
       integer: true,
     });
     const urlFilterRaw = parseOptionalStringArg(args.urlFilter);
@@ -402,9 +417,9 @@ export class WebRtcHandlers {
     const direction = parseOptionalStringArg(args.direction);
     const fullData = parseBooleanArg(args.fullData, false);
     const limit = parseNumberArg(args.limit, {
-      defaultValue: 100,
+      defaultValue: STREAMING_QUERY_LIMIT_DEFAULT,
       min: 1,
-      max: 5000,
+      max: STREAMING_QUERY_LIMIT_MAX,
       integer: true,
     });
     const offset = parseNumberArg(args.offset, {

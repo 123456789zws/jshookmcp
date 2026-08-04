@@ -215,12 +215,18 @@ export class ScriptManager {
 
     this.ensureSessionPromise = (async () => {
       try {
+        // Keep the probe timer handle so it can be cleared once the race
+        // settles — a dangling timer would keep the event loop alive until
+        // the 3s timeout fires on an already-healthy session.
+        let probeTimer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           this.cdpSession!.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('session_unreachable')), 3000),
-          ),
-        ]);
+          new Promise<never>((_, reject) => {
+            probeTimer = setTimeout(() => reject(new Error('session_unreachable')), 3000);
+          }),
+        ]).finally(() => {
+          if (probeTimer) clearTimeout(probeTimer);
+        });
         this.lastHealthProbeAt = Date.now();
       } catch {
         logger.warn('ScriptManager CDP session unresponsive (zombie), reinitializing...');

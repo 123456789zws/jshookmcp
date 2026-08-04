@@ -55,6 +55,9 @@ export const ADB_SCREENRECORD_DURATION_CLAMP_MIN = int('ADB_SCREENRECORD_DURATIO
 export const ADB_SCREENRECORD_DURATION_CLAMP_MAX = int('ADB_SCREENRECORD_DURATION_CLAMP_MAX', 180);
 export const ADB_SCREENRECORD_DURATION_DEFAULT = int('ADB_SCREENRECORD_DURATION_DEFAULT', 10);
 
+/** Extra seconds added to the screenrecord exec timeout beyond --time-limit. */
+export const ADB_SCREENRECORD_TIMEOUT_PAD_SEC = int('ADB_SCREENRECORD_TIMEOUT_PAD_SEC', 10);
+
 /* ================================================================== */
 /*  ADB logcat                                                         */
 /* ================================================================== */

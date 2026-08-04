@@ -89,12 +89,21 @@ export class WatchExpressionManager {
       if (!watch.enabled) continue;
 
       try {
+        // Keep the timeout timer handle so it can be cleared once the
+        // evaluation settles — a dangling timer would otherwise keep the
+        // event loop (and thus the process) alive until it fires.
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         const value: WatchValue = await Promise.race([
           this.runtimeInspector.evaluate(watch.expression, callFrameId),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Evaluation timeout after ${timeout}ms`)), timeout),
-          ),
-        ]);
+          new Promise<never>((_, reject) => {
+            timeoutTimer = setTimeout(
+              () => reject(new Error(`Evaluation timeout after ${timeout}ms`)),
+              timeout,
+            );
+          }),
+        ]).finally(() => {
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+        });
 
         const valueChanged = !this.deepEqual(value, watch.lastValue);
 
