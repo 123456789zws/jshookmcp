@@ -196,4 +196,20 @@ describe('constants env parsing', () => {
         .PAGE_EVALUATE_TIMEOUT_MS,
     ).toBe(45_000);
   });
+
+  it('parses MEMORY_SCAN_REGION_GUARD_BYTES env with 1 GiB fallback', async () => {
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: undefined }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(1024 * 1024 * 1024);
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: '536870912' }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(536870912);
+    // Invalid values fall back to the 1 GiB default
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: 'abc' }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(1024 * 1024 * 1024);
+  });
 });
