@@ -6,6 +6,7 @@ import { logger } from '@utils/logger';
 import {
   DEBUG_PORT_CANDIDATES,
   DEFAULT_DEBUG_PORT,
+  PROCESS_EXEC_MAX_BUFFER_BYTES,
   PROCESS_LIST_MAX_BUFFER_BYTES,
   WIN_DEBUG_PORT_POLL_ATTEMPTS,
   WIN_DEBUG_PORT_POLL_INTERVAL_MS,
@@ -187,7 +188,7 @@ export class ProcessManager {
 
       const { stdout } = await execAsync(
         `${this.powershellPath} -NoProfile -Command "${psCommand}"`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       if (!stdout.trim() || stdout.trim() === 'null') {
@@ -220,7 +221,7 @@ export class ProcessManager {
 
       const { stdout } = await execAsync(
         `${this.powershellPath} -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -TargetPid ${pid}`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       if (!stdout.trim() || stdout.trim() === 'null') {
@@ -286,7 +287,7 @@ export class ProcessManager {
 
       const { stdout } = await execAsync(
         `${this.powershellPath} -NoProfile -Command "${psCommand}"`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       if (!stdout.trim() || stdout.trim() === 'null') {
@@ -321,12 +322,12 @@ export class ProcessManager {
       }
 
       const psCommand =
-        `Get-NetTCPConnection -OwningProcess ${pid} -State Listen -ErrorAction SilentlyContinue` +
+        `Get-NetTCPConnection -OwningProcess ${pid} -State Listen -ErrorAction SilentlyContinue ` +
         'Select-Object LocalPort | ConvertTo-Json -Compress';
 
       const { stdout } = await execAsync(
         `${this.powershellPath} -NoProfile -Command "${psCommand}"`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       if (stdout.trim() && stdout.trim() !== 'null') {
@@ -354,11 +355,11 @@ export class ProcessManager {
   private async findPidByListeningPort(port: number): Promise<number | null> {
     try {
       const psCommand =
-        `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue` +
+        `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue ` +
         'Select-Object -First 1 OwningProcess | ConvertTo-Json -Compress';
       const { stdout } = await execAsync(
         `${this.powershellPath} -NoProfile -Command "${psCommand}"`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       if (!stdout.trim() || stdout.trim() === 'null') {
@@ -473,7 +474,7 @@ export class ProcessManager {
       await execAsync(
         `${this.powershellPath} -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -TargetPid ${normalizedPid} ` +
           `-DllPath '${escapedDllPath}'`,
-        { maxBuffer: 1024 * 1024 },
+        { maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES },
       );
 
       logger.warn('DLL injection is disabled for safety in this implementation');
@@ -501,7 +502,7 @@ export class ProcessManager {
         ` killed"`;
 
       await execAsync(`${this.powershellPath} -NoProfile -Command "${psCommand}"`, {
-        maxBuffer: 1024 * 1024,
+        maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES,
       });
 
       logger.info(`Process ${normalizedPid} killed successfully`);

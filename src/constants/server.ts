@@ -265,6 +265,9 @@ export const OFFLOADER_FILE_THRESHOLD_BYTES = int('OFFLOADER_FILE_THRESHOLD', 4 
 
 export const PROCESS_LIST_MAX_BUFFER_BYTES = int('PROCESS_LIST_MAX_BUFFER_BYTES', 1024 * 1024 * 10);
 
+/** Single-process PowerShell exec: max captured stdout (getProcessByPid, windows, command-line, ports, kill). */
+export const PROCESS_EXEC_MAX_BUFFER_BYTES = int('PROCESS_EXEC_MAX_BUFFER_BYTES', 1024 * 1024);
+
 /* ================================================================== */
 /*  Tool execution pipeline                                            */
 /* ================================================================== */

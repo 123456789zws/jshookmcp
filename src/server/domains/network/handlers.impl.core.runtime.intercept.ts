@@ -41,7 +41,7 @@ export class AdvancedToolHandlersIntercept extends AdvancedToolHandlersReplay {
               responseBody:
                 typeof rawRule.responseBody === 'string'
                   ? rawRule.responseBody
-                  : typeof rawRule.responseBody === 'object'
+                  : typeof rawRule.responseBody === 'object' && rawRule.responseBody !== null
                     ? JSON.stringify(rawRule.responseBody)
                     : undefined,
             });

@@ -56,6 +56,7 @@ vi.mock('@src/utils/logger', () => ({
 }));
 
 import { ProcessManager } from '@modules/process/ProcessManager';
+import { PROCESS_EXEC_MAX_BUFFER_BYTES } from '@src/constants';
 import { mockAs } from '../../test-utils';
 
 function createSpawnChild(pid = 9999) {
@@ -165,7 +166,30 @@ describe('ProcessManager', () => {
       stdio: 'ignore',
     });
     expect(result?.pid).toBe(5000);
+
+    // Listener-PID lookup must be a syntactically valid PowerShell pipeline
+    // (a missing space would concatenate the -ErrorAction value with Select-Object).
+    const [command, options] = state.execAsync.mock.calls[0] as [string, unknown];
+    expect(command).toContain('-State Listen -ErrorAction SilentlyContinue Select-Object -First 1');
+    expect(options).toEqual({ maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES });
     vi.useRealTimers();
+  });
+
+  it('checkDebugPort port scan builds a valid Get-NetTCPConnection pipeline', async () => {
+    state.execAsync.mockResolvedValue({
+      stdout: JSON.stringify([{ LocalPort: 9222 }]),
+      stderr: '',
+    });
+    const manager = new ProcessManager();
+    vi.spyOn(manager, 'getProcessCommandLine').mockResolvedValue({});
+
+    const port = await manager.checkDebugPort(77);
+
+    expect(port).toBe(9222);
+    const [command, options] = state.execAsync.mock.calls[0] as [string, unknown];
+    expect(command).toContain('-ErrorAction SilentlyContinue Select-Object LocalPort');
+    expect(command).toContain('Get-NetTCPConnection -OwningProcess 77');
+    expect(options).toEqual({ maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES });
   });
 
   it('delegates browser discovery APIs', async () => {
