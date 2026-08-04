@@ -293,7 +293,9 @@ export class NativeEmulatorHandlers {
 
       // Per-session bump allocator for vtables (starts at 0x40010000, bumps by 0x10000 per call)
       const vtSession = session as { _vtableBump?: number };
+      // eslint-disable-next-line no-underscore-dangle
       const bump = vtSession._vtableBump ?? 0x40010000;
+      // eslint-disable-next-line no-underscore-dangle
       vtSession._vtableBump = bump + 0x10000;
 
       // Allocate or reuse return-0 host stub
@@ -362,8 +364,10 @@ export class NativeEmulatorHandlers {
         throw new Error('Missing required args: vtableAddr, slotIndex');
       }
       // Bump allocator for custom stub addresses
+      // eslint-disable-next-line no-underscore-dangle
       const stubBump = (session as { _stubBump?: number })._stubBump ?? 0;
       const stubAddr = 0x68002000 + stubBump;
+      // eslint-disable-next-line no-underscore-dangle
       (session as { _stubBump?: number })._stubBump = stubBump + 8;
 
       const wrapper = new Function(
@@ -622,16 +626,16 @@ export class NativeEmulatorHandlers {
           case 'nemu_call_address': {
             const addr = a.address as number | undefined;
             if (addr === undefined) throw new Error('call_address: missing address');
-            const args = (a.args as number[] | undefined) ?? [];
-            session.emulator.callAddress(addr, args);
+            const callArgs = (a.args as number[] | undefined) ?? [];
+            session.emulator.callAddress(addr, callArgs);
             steps.push(`call_address: 0x${addr.toString(16)}`);
             break;
           }
           case 'nemu_call_symbol': {
             const sym = a.symbol as string | undefined;
             if (!sym) throw new Error('call_symbol: missing symbol');
-            const args = (a.args as number[] | undefined) ?? [];
-            session.emulator.call(sym, args);
+            const callArgs = (a.args as number[] | undefined) ?? [];
+            session.emulator.call(sym, callArgs);
             steps.push(`call_symbol: ${sym}`);
             break;
           }
@@ -696,21 +700,21 @@ export class NativeEmulatorHandlers {
                 setCarry: (v: boolean) => hctx.setCarry?.(v),
                 saveRegs: () => hctx.saveRegs?.(),
                 restoreRegs: (h: number) => hctx.restoreRegs?.(h),
-                read: (a: number, l: number) => hctx.read(a, l),
-                readU64: (a: number) =>
-                  new DataView(hctx.read(a, 8).buffer, 0, 8).getBigUint64(0, true),
-                readU32: (a: number) =>
-                  new DataView(hctx.read(a, 4).buffer, 0, 4).getUint32(0, true),
-                write: (a: number, b: Uint8Array) => hctx.write(a, b),
-                writeU64: (a: number, v: bigint | number) => {
-                  const buf = new Uint8Array(8);
-                  new DataView(buf.buffer).setBigUint64(0, BigInt(v), true);
-                  hctx.write(a, buf);
+                read: (guestAddr: number, l: number) => hctx.read(guestAddr, l),
+                readU64: (guestAddr: number) =>
+                  new DataView(hctx.read(guestAddr, 8).buffer, 0, 8).getBigUint64(0, true),
+                readU32: (guestAddr: number) =>
+                  new DataView(hctx.read(guestAddr, 4).buffer, 0, 4).getUint32(0, true),
+                write: (guestAddr: number, b: Uint8Array) => hctx.write(guestAddr, b),
+                writeU64: (guestAddr: number, v: bigint | number) => {
+                  const buf8 = new Uint8Array(8);
+                  new DataView(buf8.buffer).setBigUint64(0, BigInt(v), true);
+                  hctx.write(guestAddr, buf8);
                 },
-                writeU32: (a: number, v: number) => {
-                  const buf = new Uint8Array(4);
-                  new DataView(buf.buffer).setUint32(0, v, true);
-                  hctx.write(a, buf);
+                writeU32: (guestAddr: number, v: number) => {
+                  const buf4 = new Uint8Array(4);
+                  new DataView(buf4.buffer).setUint32(0, v, true);
+                  hctx.write(guestAddr, buf4);
                 },
                 sp: hctx.sp,
               };
@@ -762,21 +766,21 @@ export class NativeEmulatorHandlers {
                       x: (n: number) => hctx.x(n),
                       setX: (n: number, v: bigint | number) => hctx.setX(n, BigInt(v)),
                       setD: (n: number, v: number) => hctx.setD(n, v),
-                      read: (a: number, l: number) => hctx.read(a, l),
-                      readU64: (a: number) =>
-                        new DataView(hctx.read(a, 8).buffer, 0, 8).getBigUint64(0, true),
-                      readU32: (a: number) =>
-                        new DataView(hctx.read(a, 4).buffer, 0, 4).getUint32(0, true),
-                      write: (a: number, b: Uint8Array) => hctx.write(a, b),
-                      writeU64: (a: number, v: bigint | number) => {
-                        const buf = new Uint8Array(8);
-                        new DataView(buf.buffer).setBigUint64(0, BigInt(v), true);
-                        hctx.write(a, buf);
+                      read: (guestAddr: number, l: number) => hctx.read(guestAddr, l),
+                      readU64: (guestAddr: number) =>
+                        new DataView(hctx.read(guestAddr, 8).buffer, 0, 8).getBigUint64(0, true),
+                      readU32: (guestAddr: number) =>
+                        new DataView(hctx.read(guestAddr, 4).buffer, 0, 4).getUint32(0, true),
+                      write: (guestAddr: number, b: Uint8Array) => hctx.write(guestAddr, b),
+                      writeU64: (guestAddr: number, v: bigint | number) => {
+                        const buf8 = new Uint8Array(8);
+                        new DataView(buf8.buffer).setBigUint64(0, BigInt(v), true);
+                        hctx.write(guestAddr, buf8);
                       },
-                      writeU32: (a: number, v: number) => {
-                        const buf = new Uint8Array(4);
-                        new DataView(buf.buffer).setUint32(0, v, true);
-                        hctx.write(a, buf);
+                      writeU32: (guestAddr: number, v: number) => {
+                        const buf4 = new Uint8Array(4);
+                        new DataView(buf4.buffer).setUint32(0, v, true);
+                        hctx.write(guestAddr, buf4);
                       },
                       sp: hctx.sp,
                     };
@@ -1654,15 +1658,6 @@ export class NativeEmulatorHandlers {
         throw new Error('table array is required');
       }
 
-      const parseVal = (v: string): bigint => {
-        const trimmed = v.trim();
-        if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) {
-          return BigInt(trimmed);
-        }
-        // decimal string or number
-        return BigInt(trimmed);
-      };
-
       const writeU64 = (addr: number, val: bigint): void => {
         const buf = new Uint8Array(8);
         new DataView(buf.buffer).setBigUint64(0, val, true);
@@ -1730,14 +1725,6 @@ export class NativeEmulatorHandlers {
         const bytes = session.emulator.readGuestMemory(addr, 8);
         return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
       };
-
-      const parseVal = (v: string): bigint => {
-        const trimmed = v.trim();
-        if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) return BigInt(trimmed);
-        return BigInt(trimmed);
-      };
-
-      const fmtHex = (v: bigint): string => `0x${v.toString(16).toUpperCase().padStart(16, '0')}`;
 
       // Compare ctx
       const ctxDiffs: Array<{ index: number; native: string; expected: string }> = [];
@@ -2208,9 +2195,6 @@ export class NativeEmulatorHandlers {
           (bytes[off + 2]! << 16) |
           (bytes[off + 3]! << 24)) >>>
         0;
-      const fmt = (v: bigint | number) =>
-        `0x${BigInt(v).toString(16).toUpperCase().padStart(16, '0')}`;
-
       return {
         sessionId: session.id,
         frameAddr: `0x${addr.toString(16)}`,
@@ -2400,6 +2384,23 @@ export class NativeEmulatorHandlers {
   private requireSession(args: ToolArgs): EmulatorSession {
     return this.sessions.requireSession(argStringRequired(args, 'sessionId'));
   }
+}
+
+/** Parse a hex or decimal string into a BigInt (used by vm_state_load + vm_state_compare). */
+function parseVal(v: string): bigint {
+  const trimmed = v.trim();
+  if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) return BigInt(trimmed);
+  return BigInt(trimmed);
+}
+
+/** Format a BigInt as a 16-digit uppercase hex string (used by vm_state_compare + dump_frame). */
+function fmtHex(v: bigint): string {
+  return `0x${v.toString(16).toUpperCase().padStart(16, '0')}`;
+}
+
+/** Format a BigInt or number as a 16-digit uppercase hex string (used by dump_frame). */
+function fmt(v: bigint | number): string {
+  return `0x${BigInt(v).toString(16).toUpperCase().padStart(16, '0')}`;
 }
 
 function decodeBionicOptions(
