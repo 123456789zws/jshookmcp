@@ -130,6 +130,8 @@ export const COMPOUND_LONG_WINDOW_MS = int('COMPOUND_LONG_WINDOW_MS', 300_000);
 
 export const EXTENSION_GIT_CLONE_TIMEOUT_MS = int('EXTENSION_GIT_CLONE_TIMEOUT_MS', 60_000);
 export const EXTENSION_GIT_CHECKOUT_TIMEOUT_MS = int('EXTENSION_GIT_CHECKOUT_TIMEOUT_MS', 30_000);
+/** Lower bound for the install/build phase after a clone (never below the clone timeout). */
+export const EXTENSION_INSTALL_TIMEOUT_MS = int('EXTENSION_INSTALL_TIMEOUT_MS', 120_000);
 
 /* ================================================================== */
 /*  CDP Protocol                                                       */

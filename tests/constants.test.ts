@@ -168,4 +168,32 @@ describe('constants env parsing', () => {
       (await loadConstants({ CACHE_LOW_HIT_RATE_THRESHOLD: 'abc' })).CACHE_LOW_HIT_RATE_THRESHOLD,
     ).toBe(0.3);
   });
+
+  it('parses PageController operation/evaluate timeout envs with 30s fallback', async () => {
+    expect(
+      (
+        await loadConstants({
+          PAGE_OPERATION_TIMEOUT_MS: undefined,
+          PAGE_EVALUATE_TIMEOUT_MS: undefined,
+        })
+      ).PAGE_OPERATION_TIMEOUT_MS,
+    ).toBe(30_000);
+    expect(
+      (
+        await loadConstants({
+          PAGE_OPERATION_TIMEOUT_MS: undefined,
+          PAGE_EVALUATE_TIMEOUT_MS: undefined,
+        })
+      ).PAGE_EVALUATE_TIMEOUT_MS,
+    ).toBe(30_000);
+    expect(
+      (await loadConstants({ PAGE_OPERATION_TIMEOUT_MS: '15000', PAGE_EVALUATE_TIMEOUT_MS: 'abc' }))
+        .PAGE_OPERATION_TIMEOUT_MS,
+    ).toBe(15_000);
+    // Invalid values fall back to the 30s default
+    expect(
+      (await loadConstants({ PAGE_OPERATION_TIMEOUT_MS: 'abc', PAGE_EVALUATE_TIMEOUT_MS: '45000' }))
+        .PAGE_EVALUATE_TIMEOUT_MS,
+    ).toBe(45_000);
+  });
 });

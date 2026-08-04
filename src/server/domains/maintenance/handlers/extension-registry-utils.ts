@@ -10,7 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { logger } from '@utils/logger';
 import { getConfig } from '@utils/config';
-import { EXTENSION_GIT_CLONE_TIMEOUT_MS, EXTENSION_GIT_CHECKOUT_TIMEOUT_MS } from '@src/constants';
+import {
+  EXTENSION_GIT_CLONE_TIMEOUT_MS,
+  EXTENSION_GIT_CHECKOUT_TIMEOUT_MS,
+  EXTENSION_INSTALL_TIMEOUT_MS,
+} from '@src/constants';
 import {
   INSTALLED_EXTENSION_METADATA_FILENAME,
   type InstalledExtensionMetadata,
@@ -514,5 +518,6 @@ export async function findRegistryEntryBySlug(
 export {
   EXTENSION_GIT_CLONE_TIMEOUT_MS,
   EXTENSION_GIT_CHECKOUT_TIMEOUT_MS,
+  EXTENSION_INSTALL_TIMEOUT_MS,
   assertPublishedExtensionSdkDependency,
 };
