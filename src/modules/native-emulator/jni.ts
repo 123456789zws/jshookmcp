@@ -186,6 +186,8 @@ export class JniEnvironment {
 
   /** handle → host value (class/string/byte-array/etc.). */
   readonly handles = new Map<number, unknown>();
+  /** JNI table index → stub guest address. Populated by bind(). */
+  private readonly stubAddresses = new Map<number, number>();
   private readonly classes = new Map<string, number>(); // name → jclass handle
   private readonly classByHandle = new Map<number, JavaClass>();
   /** "className#method#sig" → fnAddr, populated by RegisterNatives. */
@@ -317,6 +319,9 @@ export class JniEnvironment {
     // Reset stub allocators
     this.stubBump = STUB_BASE;
     this.vmStubBump = VM_STUB_BASE;
+
+    // Clear stub address map
+    this.stubAddresses.clear();
 
     // Clear pending exception
     this.pendingException = 0;
@@ -547,6 +552,20 @@ export class JniEnvironment {
     this.stubBump += POINTER_SIZE;
     this.engine.registerHostFunction(stubAddr, fn);
     this.writePointer(ENV_TABLE_ADDR + index * POINTER_SIZE, stubAddr);
+    this.stubAddresses.set(index, stubAddr);
+  }
+
+  /**
+   * Return the guest stub address for a JNI table index.
+   * Returns 0 for indices that were never bound (no stub exists).
+   */
+  getJniStubAddress(index: number): number {
+    return this.stubAddresses.get(index) ?? 0;
+  }
+
+  /** Return all bound JNI index → stub address mappings. */
+  getJniStubAddresses(): ReadonlyMap<number, number> {
+    return this.stubAddresses;
   }
 
   private bindVm(index: number, fn: (ctx: HostContext) => bigint | number | void): void {

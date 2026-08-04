@@ -51,6 +51,7 @@ const registrations = defineMethodRegistrations<H, (typeof nativeEmulatorTools)[
     // JNI diagnostics
     { tool: 'nemu_jni_diag', method: 'handleJniDiag' },
     { tool: 'nemu_jni_handles', method: 'handleJniHandles' },
+    { tool: 'nemu_get_jni_stub', method: 'handleGetJniStub' },
     // Code discovery
     { tool: 'nemu_dlsym_diag', method: 'handleDlsymDiag' },
     // VM state bridge

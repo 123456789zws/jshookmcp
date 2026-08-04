@@ -235,6 +235,16 @@ export class NativeEmulator {
     return this.jni?.jniDiagnostics?.();
   }
 
+  /** Return the guest stub address for a JNI table index. Returns 0 for unbound indices. */
+  getJniStubAddress(index: number): number {
+    return this.jni.getJniStubAddress(index);
+  }
+
+  /** Return all bound JNI index → stub address mappings. */
+  getJniStubAddresses(): ReadonlyMap<number, number> {
+    return this.jni.getJniStubAddresses();
+  }
+
   /** Non-destructive snapshot (for trace handlers). */
   jniDiagSnapshot(): string[] | undefined {
     return this.jni?.snapshotJniDiag?.();

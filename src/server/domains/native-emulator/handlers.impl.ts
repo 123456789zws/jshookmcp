@@ -1453,6 +1453,26 @@ export class NativeEmulatorHandlers {
     });
   }
 
+  /** nemu_get_jni_stub — return stub addresses for JNI table indices. */
+  async handleGetJniStub(args: ToolArgs): Promise<ToolResponse> {
+    return handleSafe(async () => {
+      const session = this.requireSession(args);
+      const index = argNumber(args, 'index');
+      if (index !== undefined) {
+        // Single index lookup
+        const addr = session.emulator.getJniStubAddress(index);
+        return { sessionId: session.id, index, stubAddress: `0x${addr.toString(16)}`, bound: addr !== 0 };
+      }
+      // Return all bound stub addresses
+      const all = session.emulator.getJniStubAddresses();
+      const entries: Array<{ index: number; stubAddress: string }> = [];
+      for (const [idx, addr] of all) {
+        entries.push({ index: idx, stubAddress: `0x${addr.toString(16)}` });
+      }
+      return { sessionId: session.id, stubs: entries, count: entries.length };
+    });
+  }
+
   /** nemu_jni_handles — list all JNI object handles. */
   async handleJniHandles(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => {

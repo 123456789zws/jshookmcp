@@ -579,6 +579,19 @@ export const nativeEmulatorTools: Tool[] = [
       .required('sessionId')
       .query(),
   ),
+  tool('nemu_get_jni_stub', (t) =>
+    t
+      .desc(
+        'Get the guest stub address for a JNI table index. Pass a specific `index` to look up one entry (returns 0 + bound=false if the index was never bound), or omit to return all bound index→stubAddress mappings. Use to read stub addresses from a session so they can be written into SO caches or external tooling that expects specific JNI function addresses (especially the extended indices 280-336 used by obfuscation VM dispatch bridges).',
+      )
+      .string('sessionId', 'Session id to query JNI stub addresses from')
+      .number(
+        'index',
+        'JNI table index to look up (e.g. 6=FindClass, 280=ExtFunc_280). Omit to return all bound entries.',
+      )
+      .required('sessionId')
+      .query(),
+  ),
   // ── Code discovery ─────────────────────────────────────────────────
   tool('nemu_dlsym_diag', (t) =>
     t
