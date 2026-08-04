@@ -42,6 +42,18 @@ export const PAGE_OPERATION_TIMEOUT_MS = int('PAGE_OPERATION_TIMEOUT_MS', 30_000
 export const PAGE_EVALUATE_TIMEOUT_MS = int('PAGE_EVALUATE_TIMEOUT_MS', 30_000);
 
 /* ================================================================== */
+/*  CDP session                                                        */
+/* ================================================================== */
+
+/**
+ * Watchdog for CDP session operations (createCDPSession / liveness ping) so a
+ * hanging session cannot block monitor setup. After debugger pause/resume a
+ * session can sit in a zombie state where send() hangs indefinitely without
+ * firing 'disconnected' (used by PerformanceMonitor + ConsoleMonitor).
+ */
+export const CDP_SESSION_TIMEOUT_MS = int('CDP_SESSION_TIMEOUT_MS', 500);
+
+/* ================================================================== */
 /*  DOM inspection                                                     */
 /* ================================================================== */
 

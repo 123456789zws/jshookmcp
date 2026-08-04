@@ -1,6 +1,7 @@
 import type { CDPSession, Page } from 'rebrowser-puppeteer-core';
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import { logger } from '@utils/logger';
+import { CDP_SESSION_TIMEOUT_MS } from '@src/constants';
 import type {
   PerformanceMetrics,
   PerformanceTimelineEntry,
@@ -21,7 +22,9 @@ import { takeHeapSnapshot } from './PerformanceMonitor.snapshot';
 async function PING(cdp: CDPSession): Promise<void> {
   await Promise.race([
     cdp.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('cdp_unreachable')), 500)),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('cdp_unreachable')), CDP_SESSION_TIMEOUT_MS),
+    ),
   ]);
 }
 
@@ -43,7 +46,7 @@ export class PerformanceMonitor {
       this.cdpSession = await Promise.race([
         page.createCDPSession() as Promise<CDPSession>,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('cdp_session_timeout')), 500),
+          setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
         ),
       ]);
       return this.cdpSession;
@@ -69,7 +72,7 @@ export class PerformanceMonitor {
       this.cdpSession = await Promise.race([
         page.createCDPSession() as Promise<CDPSession>,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('cdp_session_timeout')), 500),
+          setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
         ),
       ]);
       return this.cdpSession;
