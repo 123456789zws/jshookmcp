@@ -42,16 +42,13 @@ export function execLoadStore(
   // reports status 0 in Rs. This is what lets a stdlib guarding shared state
   // with LDAXR/STLXR (or a refcount) run to completion here.
   //
-  // o1 (bit21) must be clear and Rt2 (bits[14:10]) must be 0b11111: the
-  // v8.1 atomics (CAS/CASP set o1; LDADD/STADD/… leave o1 clear but use Rt2 as
-  // a real register) share the same 001000 prefix, and silently running one as
-  // an ordinary exclusive load/store would drop its atomic semantics. o2
-  // (bit23) is deliberately NOT checked — it distinguishes LDAXR/STLXR from
-  // LDXR/STXR, and in the single-threaded model both behave identically.
+  // o2 (bit23) and o1 (bit21) must both be clear: the v8.1 atomics (CAS/CASP,
+  // LDADD/SWP/…) set o2 and share the same 001000 prefix, and silently running
+  // one as an ordinary exclusive load/store would drop its atomic semantics.
   if (
     ((insn >>> 24) & 0b111111) === 0b001000 &&
-    ((insn >>> 21) & 1) === 0 &&
-    ((insn >>> 14) & 0b11111) === 0b11111
+    ((insn >>> 23) & 1) === 0 &&
+    ((insn >>> 21) & 1) === 0
   ) {
     const size = insn >>> 30;
     const bytes = 1 << size;

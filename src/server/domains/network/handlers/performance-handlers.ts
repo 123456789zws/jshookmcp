@@ -14,7 +14,6 @@ import {
   asOptionalString,
   asOptionalStringArray,
   toCpuProfilePayload,
-  type CpuProfilePayload,
 } from '../handlers.base.types';
 import { handleSafe, R } from '@server/domains/shared/ResponseBuilder';
 import type { ToolResponse } from '@server/types';
@@ -156,7 +155,14 @@ export class PerformanceHandlers {
       const monitor = this.deps.getPerformanceMonitor();
       const profileRaw = await monitor.stopCPUProfiling();
 
-      const profile = toCpuProfilePayload(profileRaw) || (profileRaw as CpuProfilePayload);
+      const profile = toCpuProfilePayload(profileRaw);
+      if (!profile) {
+        // Never fall through with an unvalidated cast — nodes/startTime/endTime
+        // may be missing and the shape validation exists for a reason.
+        throw new Error(
+          'CPU profile has an unexpected shape (expected nodes + startTime + endTime)',
+        );
+      }
 
       const { writeFile } = await import('node:fs/promises');
       const { resolveArtifactPath } = await import('@utils/artifacts');
