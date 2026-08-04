@@ -21,7 +21,7 @@ In-process, dependency-free self-built ARM64 interpreter for emulating Android `
 - native-emulator + binary-instrument
 - native-emulator + dart-inspector
 
-## Full tool list (50)
+## Full tool list (54)
 
 | Tool | Description |
 | --- | --- |
@@ -63,6 +63,8 @@ In-process, dependency-free self-built ARM64 interpreter for emulating Android `
 | `nemu_set_registers` | Set arbitrary CPU registers by index. Pass an object mapping register number to value (e.g. {0: 0x60000000, 10: 0, 11: 0x55150}). Supports x0-x30 and floating-point d0-d31. Use to fix up loop variables or inject context pointers before/after host function calls. |
 | `nemu_jni_diag` | Read the JNI diagnostic log for a session. Tracks every JNI function call (FindClass, GetMethodID, CallIntMethod, etc.) and unimplemented stub invocations. Use after nemu_call_symbol or nemu_trace to see what Java methods the native code tried to call. Actions: "read" (default) reads and clears the log; "snapshot" reads without clearing; "clear" clears without returning. |
 | `nemu_jni_handles` | List all JNI object handles allocated in a session, with their kind and summary. Handles are opaque IDs (jclass, jstring, jbyteArray, jobject) that native code passes around. Use to verify mock setups and debug handle leaks. Optionally filter by kind (e.g. "class", "string", "bytes", "method", "field", "auto-object", "mock-int", "mock-string", "mock-boolean", "objarray") or by specific handle number. |
+| `nemu_get_jni_stub` | Get the guest stub address for a JNI table index. Pass a specific `index` to look up one entry (returns 0 + bound=false if the index was never bound), or omit to return all bound index→stubAddress mappings. Use to read stub addresses from a session so they can be written into SO caches or external tooling that expects specific JNI function addresses (especially the extended indices 280-336 used by obfuscation VM dispatch bridges). |
+| `nemu_dlsym_diag` | Read the dlsym resolution log from the current session. Tracks every symbol lookup the emulated code requested via dlsym() — essential for discovering which VM handler names an obfuscated dispatch engine tries to resolve. Actions: read (default, reads+clears), snapshot (read-only), clear. |
 | `nemu_vm_state_dump` | Dump LiteVM state from guest memory at specified base addresses. Reads ctx (32×64-bit), table (32×64-bit), and optional output buffer. Returns structured hex values suitable for comparison with Python LiteVM dumps. Use after nemu_call_symbol to inspect native VM execution results. |
 | `nemu_vm_state_load` | Load VM state into guest memory. Takes ctx values and table values as hex strings and writes them at the specified base addresses. Use to bridge Python LiteVM state into native VM: run Python vm.run(), dump ctx/table as hex, then load into nemu guest memory before calling bb2i34u32clsb. |
 | `nemu_vm_state_compare` | Compare native VM state (read from guest memory) against an expected state (e.g. Python LiteVM dump). For each of ctx, table, and output, reports whether they match and lists the first mismatches. Use to cross-validate native VM execution against the known-good Python implementation. |
@@ -75,3 +77,5 @@ In-process, dependency-free self-built ARM64 interpreter for emulating Android `
 | `nemu_patch_apply` | Apply multiple memory patches in a single call. Each patch is {address, dataBase64, writeProtect?}. Faster than repeated nemu_write_memory calls — essential for atomic code patches that must be applied together to avoid intermediate corrupt states. |
 | `nemu_regs_save` | Save a named snapshot of current GPR registers (x0-x30, sp). Returns a snapshot id usable with nemu_regs_restore. The snapshot persists until the session is destroyed or the name is overwritten. Use to preserve registers before calling an obfuscated function that corrupts callee-saved state. |
 | `nemu_regs_restore` | Restore GPR registers from a previously-saved snapshot (created by nemu_regs_save). Partially restores: only registers that were saved are written back. Use after an obfuscated function call to recover decode/context registers. |
+| `nemu_scan_memory` | Scan emulated memory for a byte pattern (like Volatility). Searches a guest address range for an exact byte match using Boyer-Moore-Horspool. Returns a list of matched addresses. Skips unmapped regions silently — use nemu_mem_map to extend the scan range if needed. |
+| `nemu_xor_region` | XOR a region of emulated memory with a single-byte key. Returns the XOR result as base64. Use for quick decryption testing — XOR a buffer with a candidate key byte and inspect the preview without modifying guest state. Set dryRun=false to write the XOR result back into guest memory. |
