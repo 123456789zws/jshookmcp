@@ -34,6 +34,18 @@ export const DEBUG_PORT_CANDIDATES = list('DEBUG_PORT_CANDIDATES', [9222, 9229, 
 /** Default port used when launching a process with `--remote-debugging-port`. */
 export const DEFAULT_DEBUG_PORT = int('DEFAULT_DEBUG_PORT', 9222);
 
+/** HTTP transport listen port for the MCP server (`MCP_PORT`). */
+export const MCP_HTTP_PORT = int('MCP_PORT', 3000);
+
+/** HTTP transport listen host for the MCP server (`MCP_HOST`). */
+export const MCP_HTTP_HOST = str('MCP_HOST', '127.0.0.1');
+
+/** Gate detailed health-check output behind MCP_HEALTH_VERBOSE. */
+export const MCP_HEALTH_VERBOSE = bool('MCP_HEALTH_VERBOSE', false);
+
+/** Permit non-localhost HTTP bindings without MCP_AUTH_TOKEN. */
+export const MCP_ALLOW_INSECURE = bool('MCP_ALLOW_INSECURE', false);
+
 /** Ghidra bridge REST endpoint. */
 export const GHIDRA_BRIDGE_ENDPOINT = str('GHIDRA_BRIDGE_URL', 'http://127.0.0.1:18080');
 
@@ -118,6 +130,8 @@ export const COMPOUND_LONG_WINDOW_MS = int('COMPOUND_LONG_WINDOW_MS', 300_000);
 
 export const EXTENSION_GIT_CLONE_TIMEOUT_MS = int('EXTENSION_GIT_CLONE_TIMEOUT_MS', 60_000);
 export const EXTENSION_GIT_CHECKOUT_TIMEOUT_MS = int('EXTENSION_GIT_CHECKOUT_TIMEOUT_MS', 30_000);
+/** Lower bound for the install/build phase after a clone (never below the clone timeout). */
+export const EXTENSION_INSTALL_TIMEOUT_MS = int('EXTENSION_INSTALL_TIMEOUT_MS', 120_000);
 
 /* ================================================================== */
 /*  CDP Protocol                                                       */
@@ -133,6 +147,13 @@ export const CDP_LOOPBACK_HOST = '127.0.0.1';
 
 export const MCP_ARTIFACTS_HAR_DIR = 'artifacts/har';
 export const MCP_ARTIFACTS_REPORTS_DIR = 'artifacts/reports';
+
+/* ================================================================== */
+/*  Stdio transport                                                    */
+/* ================================================================== */
+
+/** Max time to wait for a single stdout write before treating it as broken. */
+export const STDIO_SEND_TIMEOUT_MS = int('STDIO_SEND_TIMEOUT_MS', 500);
 
 /* ================================================================== */
 /*  Compact tool schema (token optimization)                           */
@@ -158,6 +179,9 @@ export const HTTP_CLEANUP_INTERVAL_MS = int('HTTP_CLEANUP_INTERVAL_MS', 5 * 60_0
 /** Default SSE heartbeat interval (comment frames to keep the stream open). */
 export const SSE_HEARTBEAT_MS = int('SSE_HEARTBEAT_MS', 30_000);
 
+/** Retry-After (ms) returned by the HTTP transport when at session capacity. */
+export const HTTP_CAPACITY_RETRY_AFTER_MS = int('HTTP_CAPACITY_RETRY_AFTER_MS', 1_000);
+
 /* ================================================================== */
 /*  MCP structured logging                                             */
 /* ================================================================== */
@@ -172,12 +196,37 @@ export const MCP_LOG_LEVEL = str('MCP_LOG_LEVEL', 'info');
 export const MCP_LOG_FILE_DIR = str('MCP_LOG_FILE_DIR', '');
 
 /* ================================================================== */
+/*  V8 heap snapshot retention                                         */
+/* ================================================================== */
+
+/**
+ * Retention caps for persisted v8_inspector heap snapshots. Both default to 0
+ * (no eviction) so persistence never surprises the user with deletions; set
+ * MCP_V8_HEAP_SNAPSHOT_MAX_COUNT / MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB to bound
+ * the on-disk and in-memory snapshot store.
+ */
+export const MCP_V8_HEAP_SNAPSHOT_MAX_COUNT = int('MCP_V8_HEAP_SNAPSHOT_MAX_COUNT', 0);
+export const MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB = int('MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB', 0);
+
+/* ================================================================== */
 /*  Concurrency & resource limits                                      */
 /* ================================================================== */
 
 export const WORKER_POOL_MIN_WORKERS = int('WORKER_POOL_MIN_WORKERS', 2);
 export const WORKER_POOL_IDLE_TIMEOUT_MS = int('WORKER_POOL_IDLE_TIMEOUT_MS', 30_000);
 export const WORKER_POOL_JOB_TIMEOUT_MS = int('WORKER_POOL_JOB_TIMEOUT_MS', 15_000);
+
+/** Browser fleet: max local sessions the HTTP transport admits by default. */
+export const MCP_BROWSER_FLEET_MAX_LOCAL_LEASES = int('MCP_BROWSER_FLEET_MAX_LOCAL_LEASES', 4096);
+
+/** Browser fleet: HTTP session idle TTL before eviction (ms). */
+export const MCP_BROWSER_FLEET_LEASE_TTL_MS = int('MCP_BROWSER_FLEET_LEASE_TTL_MS', 600_000);
+
+/** Browser fleet: consistent-hash ring size for local session routing. */
+export const MCP_BROWSER_FLEET_VIRTUAL_NODES = int('MCP_BROWSER_FLEET_VIRTUAL_NODES', 128);
+
+/** MCP transport mode: 'stdio' (default) or 'http'. */
+export const MCP_TRANSPORT = str('MCP_TRANSPORT', 'stdio');
 
 export const PARALLEL_DEFAULT_CONCURRENCY = int('PARALLEL_DEFAULT_CONCURRENCY', 3);
 export const PARALLEL_DEFAULT_TIMEOUT_MS = int('PARALLEL_DEFAULT_TIMEOUT_MS', 60_000);
@@ -204,8 +253,54 @@ export const OFFLOAD_FIELD_SANITIZE_THRESHOLD_BYTES = int(
   64 * 1024,
 );
 
+/** LargeDataOffloader: strings larger than this (bytes) go to DetailedDataManager. */
+export const OFFLOADER_DETAIL_THRESHOLD_BYTES = int('OFFLOADER_DETAIL_THRESHOLD', 512 * 1024);
+
+/** LargeDataOffloader: strings larger than this (bytes) go directly to a file. */
+export const OFFLOADER_FILE_THRESHOLD_BYTES = int('OFFLOADER_FILE_THRESHOLD', 4 * 1024 * 1024);
+
 /* ================================================================== */
 /*  Buffer sizes                                                       */
 /* ================================================================== */
 
 export const PROCESS_LIST_MAX_BUFFER_BYTES = int('PROCESS_LIST_MAX_BUFFER_BYTES', 1024 * 1024 * 10);
+
+/** Single-process PowerShell exec: max captured stdout (getProcessByPid, windows, command-line, ports, kill). */
+export const PROCESS_EXEC_MAX_BUFFER_BYTES = int('PROCESS_EXEC_MAX_BUFFER_BYTES', 1024 * 1024);
+
+/* ================================================================== */
+/*  Tool execution pipeline                                            */
+/* ================================================================== */
+
+/** Watchdog: warn when a tool execution exceeds this duration (ms). */
+export const TOOL_EXEC_HANG_WATCHDOG_MS = int('TOOL_EXEC_HANG_WATCHDOG_MS', 30_000);
+
+/** Circuit-breaker retry-after (seconds) fallback when no breaker state exists. */
+export const DEFAULT_RETRY_AFTER_SEC = int('RETRY_AFTER_SEC', 30);
+
+/**
+ * Browser session cost-hint table (EWMA cold-start estimates, ms).
+ * Estimated durations for tool classes without an explicit duration arg:
+ *   - COST_HINT_SEARCH     navigation / wait-heavy tools
+ *   - COST_HINT_FEEDBACK   human-mouse motion
+ *   - COST_HINT_SECURITY   human scroll
+ *   - COST_HINT_DEFAULT    quick read-only tools (get/list/status/...)
+ *   - COST_HINT_WORKFLOW   everything else
+ *   - COST_HINT_MULTIPLIER timeout args are upper bounds; scale them down
+ */
+export const COST_HINT_SEARCH = int('COST_HINT_SEARCH', 7_500);
+export const COST_HINT_FEEDBACK = int('COST_HINT_FEEDBACK', 600);
+export const COST_HINT_SECURITY = int('COST_HINT_SECURITY', 1_500);
+export const COST_HINT_DEFAULT = int('COST_HINT_DEFAULT', 50);
+export const COST_HINT_WORKFLOW = int('COST_HINT_WORKFLOW', 250);
+export const COST_HINT_MULTIPLIER = float('COST_HINT_MULTIPLIER', 0.25);
+
+/** Preview length (chars) for the args payload in hung-tool watchdog logs. */
+export const ARGS_PREVIEW_MAX_CHARS = int('ARGS_PREVIEW_MAX_CHARS', 500);
+
+/* ================================================================== */
+/*  Time units                                                         */
+/* ================================================================== */
+
+/** Milliseconds in one minute (pure unit constant, not env-configurable). */
+export const MS_PER_MINUTE = 60_000;

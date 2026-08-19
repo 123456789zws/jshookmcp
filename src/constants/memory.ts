@@ -28,6 +28,12 @@ export const MEMORY_SCAN_MAX_BUFFER_BYTES = int('MEMORY_SCAN_MAX_BUFFER_BYTES', 
 export const MEMORY_SCAN_MAX_RESULTS = int('MEMORY_SCAN_MAX_RESULTS', 10_000);
 export const MEMORY_SCAN_MAX_REGIONS = int('MEMORY_SCAN_MAX_REGIONS', 50_000);
 export const MEMORY_SCAN_REGION_MAX_BYTES = int('MEMORY_SCAN_REGION_MAX_BYTES', 16_777_216);
+/** Regions larger than this (bytes) are skipped by the PowerShell scan fallback (1 GiB).
+ *  Oversized regions are usually shared/system mappings; scanning them wastes time. */
+export const MEMORY_SCAN_REGION_GUARD_BYTES = int(
+  'MEMORY_SCAN_REGION_GUARD_BYTES',
+  1024 * 1024 * 1024,
+);
 export const MEMORY_ENUM_REGIONS_RETURN_LIMIT = int('MEMORY_ENUM_REGIONS_RETURN_LIMIT', 10_000);
 export const MEMORY_ENUM_REGIONS_MAX_BUFFER_BYTES = int(
   'MEMORY_ENUM_REGIONS_MAX_BUFFER_BYTES',
@@ -119,6 +125,12 @@ export const POINTER_CHAIN_MAX_OFFSET = int('POINTER_CHAIN_MAX_OFFSET', 4096);
 export const POINTER_CHAIN_MAX_RESULTS = int('POINTER_CHAIN_MAX_RESULTS', 500);
 /** Chunk size (bytes) for reading memory during pointer chain scans. */
 export const POINTER_CHAIN_SCAN_CHUNK_SIZE = int('POINTER_CHAIN_SCAN_CHUNK_SIZE', 16_777_216);
+/** Default pointer alignment for pointer chain scans. */
+export const POINTER_CHAIN_DEFAULT_ALIGNMENT = int('POINTER_CHAIN_DEFAULT_ALIGNMENT', 8);
+/** Max BFS breadth — distinct pointer addresses carried into the next level. */
+export const POINTER_CHAIN_MAX_BFS_BREADTH = int('POINTER_CHAIN_MAX_BFS_BREADTH', 50_000);
+/** Max matches collected per scan level. */
+export const POINTER_CHAIN_MAX_MATCHES = int('POINTER_CHAIN_MAX_MATCHES', 100_000);
 
 /* ================================================================== */
 /*  Structure analysis                                                 */
@@ -152,6 +164,19 @@ export const HEAP_SUSPICIOUS_BLOCK_SIZE = int('HEAP_SUSPICIOUS_BLOCK_SIZE', 10_4
 
 /** Minimum size to consider a run of 0x00/0xCC as a code cave. */
 export const CODE_CAVE_MIN_SIZE = int('CODE_CAVE_MIN_SIZE', 16);
+
+/* ================================================================== */
+/*  Code injection                                                     */
+/* ================================================================== */
+
+/** x86 NOP opcode used to fill patched-out instruction ranges. */
+export const NOP_OPCODE = int('NOP_OPCODE', 0x90);
+/** Max bytes read per executable region during code-cave discovery. */
+export const INJECT_CHUNK_SIZE = int('INJECT_CHUNK_SIZE', 4 * 1024 * 1024);
+/** Section label attached to found code caves. VirtualQueryEx does not expose
+ *  section names — this is a best-effort placeholder label, not a real
+ *  section name from the PE section table. */
+export const CODE_CAVE_SECTION_LABEL = '.text';
 
 /** Timeout waiting for a hardware breakpoint hit (ms). */
 export const BREAKPOINT_HIT_TIMEOUT_MS = int('BREAKPOINT_HIT_TIMEOUT_MS', 10_000);

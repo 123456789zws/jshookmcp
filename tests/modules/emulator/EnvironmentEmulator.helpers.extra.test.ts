@@ -65,7 +65,9 @@ describe('EnvironmentEmulator helper coverage', () => {
     const emulator = new EnvironmentEmulator() as any;
     const missing = emulator.identifyMissingAPIs(
       {
-        window: ['window.customValue', 'window.customFunc()'],
+        // Detected paths are bare member strings; invocation info arrives
+        // via functionPaths from AST analysis.
+        window: ['window.customValue', 'window.customFunc'],
         document: ['document.customElement', 'document.customList'],
         navigator: [],
         location: [],
@@ -73,6 +75,7 @@ describe('EnvironmentEmulator helper coverage', () => {
         other: [],
       },
       { 'window.customValue': undefined },
+      new Set(['window.customFunc']),
     );
 
     expect(missing).toEqual(
@@ -83,9 +86,9 @@ describe('EnvironmentEmulator helper coverage', () => {
           suggestion: 'null: window.customValue = null',
         }),
         expect.objectContaining({
-          path: 'window.customFunc()',
+          path: 'window.customFunc',
           type: 'function',
-          suggestion: ': window.customFunc() = function() {}',
+          suggestion: ': window.customFunc = function() {}',
         }),
         expect.objectContaining({
           path: 'document.customElement',

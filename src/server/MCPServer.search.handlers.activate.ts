@@ -14,6 +14,7 @@ import { normalizeToolName, validateToolNameArray } from '@server/MCPServer.sear
 import { getActiveToolNames } from '@server/MCPServer.search.helpers';
 import { loadSearchCatalog } from '@server/registry/SearchCatalog';
 import { ensureDomainLoaded, getRegistrationByName } from '@server/registry/index';
+import { deactivateToolCore } from '@server/tool-lifecycle';
 
 interface ActivationSummary {
   activated: string[];
@@ -169,9 +170,12 @@ export async function handleDeactivateTools(
         },
       });
     } else {
-      ctx.router.removeHandler(name);
-      ctx.activatedToolNames.delete(name);
-      ctx.activatedRegisteredTools.delete(name);
+      deactivateToolCore(name, {
+        activatedToolNames: ctx.activatedToolNames,
+        activatedRegisteredTools: ctx.activatedRegisteredTools,
+        router: ctx.router,
+        extensionToolsByName: ctx.extensionToolsByName,
+      });
     }
     deactivated.push(name);
   }

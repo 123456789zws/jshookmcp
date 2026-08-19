@@ -54,6 +54,7 @@ describe('ProtocolAnalysisHandlers — handleProtoFingerprint behavioral tests',
       const json = parseContent(res);
       const fp = json.fingerprints[0];
       expect(fp.protocolMatches[0].protocol).toBe('DNS');
+      expect(fp.protocolMatches[0].confidence).toBe(0.85);
     });
 
     it('accepts DNS query headers where only the 16-bit txid and flags are zero', async () => {
@@ -288,6 +289,27 @@ describe('ProtocolAnalysisHandlers — handleProtoFingerprint behavioral tests',
       const fp = json.fingerprints[0];
       expect(fp.protocolMatches.some((m: any) => m.protocol === 'TLS ClientHello')).toBe(false);
       expect(fp.protocolMatches.some((m: any) => m.protocol === 'TLS Record')).toBe(false);
+    });
+
+    it('falls back to TLS Record for a complete non-ClientHello record', async () => {
+      // content_type=0x16, version=0x0301 (TLS 1.0), declared length=0 (valid empty
+      // record), 8 payload bytes. Not a ClientHello (no handshake type byte 0x01)
+      // and not a DNS-shaped header (qdcount+ancount=0).
+      const rec = '1603010000000000000000000000';
+      const res = await handlers.handleProtoFingerprint({ hexPayloads: [rec] });
+      const json = parseContent(res);
+      const fp = json.fingerprints[0];
+      expect(fp.protocolMatches[0].protocol).toBe('TLS Record');
+      expect(fp.protocolMatches[0].confidence).toBe(0.9);
+    });
+
+    it('matches the HTTP/2 connection preface magic as HTTP/2 PRI', async () => {
+      const preface = '505249202a20485454502f322e300d0a0d0a534d0d0a0d0a';
+      const res = await handlers.handleProtoFingerprint({ hexPayloads: [preface] });
+      const json = parseContent(res);
+      const fp = json.fingerprints[0];
+      expect(fp.protocolMatches[0].protocol).toBe('HTTP/2 PRI');
+      expect(fp.protocolMatches[0].confidence).toBe(0.9);
     });
 
     it('returns unknown for unrecognized payloads', async () => {

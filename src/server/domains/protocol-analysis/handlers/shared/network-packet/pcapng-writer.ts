@@ -9,8 +9,11 @@
 import type { PacketEndianness } from './types';
 import {
   OPT_IF_NAME,
+  OPT_IF_TSRESOL,
   PCAPNG_BLOCK_TYPE,
   PCAPNG_BYTE_ORDER_MAGIC,
+  PCAPNG_DEFAULT_SNAPLEN,
+  PCAPNG_SECTION_LENGTH_UNSPECIFIED,
   padTo4,
   type PcapngWriteInput,
   type PcapngWriteInterface,
@@ -71,9 +74,9 @@ function buildSectionHeader(
   writeU32(body, 0, PCAPNG_BYTE_ORDER_MAGIC, endian);
   writeU16(body, 4, majorVersion, endian);
   writeU16(body, 6, minorVersion, endian);
-  // Section length unspecified (0xFFFFFFFFFFFFFFFF).
-  writeU32(body, 8, 0xffffffff, endian);
-  writeU32(body, 12, 0xffffffff, endian);
+  // Section length unspecified (0xFFFFFFFFFFFFFFFF, written as two words).
+  writeU32(body, 8, PCAPNG_SECTION_LENGTH_UNSPECIFIED, endian);
+  writeU32(body, 12, PCAPNG_SECTION_LENGTH_UNSPECIFIED, endian);
   return wrapBlock(PCAPNG_BLOCK_TYPE.SECTION_HEADER, body, endian);
 }
 
@@ -82,11 +85,19 @@ function buildInterfaceDescription(entry: PcapngWriteInterface, endian: PacketEn
   if (entry.name) {
     optionEntries.push({ code: OPT_IF_NAME, value: Buffer.from(entry.name, 'utf8') });
   }
+  // if_tsresol (code 9): 1-byte value; base-2 resolutions set the 0x80 flag.
+  if (entry.tsresol !== undefined) {
+    const resol = Math.max(0, Math.min(255, Math.trunc(entry.tsresol)));
+    optionEntries.push({
+      code: OPT_IF_TSRESOL,
+      value: Buffer.from([entry.tsresolBase2 ? 0x80 | resol : resol]),
+    });
+  }
   const options = buildOptions(optionEntries);
   const body = Buffer.alloc(8 + options.length);
   writeU16(body, 0, entry.linkType, endian);
   writeU16(body, 2, 0, endian); // reserved
-  writeU32(body, 4, entry.snapLen ?? 0x00040000, endian); // default 262144
+  writeU32(body, 4, entry.snapLen ?? PCAPNG_DEFAULT_SNAPLEN, endian);
   options.copy(body, 8);
   return wrapBlock(PCAPNG_BLOCK_TYPE.INTERFACE_DESCRIPTION, body, endian);
 }

@@ -24,7 +24,15 @@ import type { DomainTtlEntry } from '@server/MCPServer.activation.ttl';
 import { closeServer, startHttpTransport, startStdioTransport } from '@server/MCPServer.transport';
 import { McpLogTransport } from '@server/transport/McpLogTransport';
 import type { McpLogLevel } from '@server/transport/McpLogTransport';
-import { MCP_LOG_ENABLED, MCP_LOG_FILE_DIR, MCP_LOG_LEVEL } from '@src/constants';
+import {
+  MCP_BROWSER_FLEET_LEASE_TTL_MS,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+  MCP_BROWSER_FLEET_VIRTUAL_NODES,
+  MCP_LOG_ENABLED,
+  MCP_LOG_FILE_DIR,
+  MCP_LOG_LEVEL,
+  MCP_TRANSPORT,
+} from '@src/constants';
 import { ActivationController } from '@server/activation/ActivationController';
 import { SearchQualityTracker } from '@server/search/SearchQualityTracker';
 import { registerSingleTool as registerSingleToolImpl } from '@server/MCPServer.tools';
@@ -343,8 +351,17 @@ export class MCPServer implements MCPServerContext {
       return null;
     });
 
-    // Large-data offloader: writes payloads >512KB to disk / DetailedDataManager
-    this.largeDataOffloader = new LargeDataOffloader(this.detailedData);
+    // Large-data offloader: writes payloads >threshold to disk / DetailedDataManager.
+    // Thresholds come from config (OFFLOADER_* envs); previously the offloader
+    // was constructed with zero config, leaving every knob at its default.
+    this.largeDataOffloader = new LargeDataOffloader(this.detailedData, {
+      detailThreshold: config.offloader?.detailThreshold,
+      fileThreshold: config.offloader?.fileThreshold,
+      outputDir: config.offloader?.outputDir,
+      excludeTools: config.offloader?.excludeTools
+        ? new Set(config.offloader.excludeTools)
+        : undefined,
+    });
 
     this.server = new McpServer(
       { name: config.mcp.name, version: config.mcp.version },
@@ -429,11 +446,13 @@ export class MCPServer implements MCPServerContext {
           config.mcp.browserFleetWorkers?.length > 0
             ? config.mcp.browserFleetWorkers
             : [{ id: browserFleetWorkerId }],
-        virtualNodes: config.mcp.browserFleetVirtualNodes ?? 128,
-        leaseTtlMs: config.mcp.browserFleetLeaseTtlMs ?? 600_000,
+        virtualNodes: config.mcp.browserFleetVirtualNodes ?? MCP_BROWSER_FLEET_VIRTUAL_NODES,
+        leaseTtlMs: config.mcp.browserFleetLeaseTtlMs ?? MCP_BROWSER_FLEET_LEASE_TTL_MS,
       },
       configuredLeaseStore ??
-        new InMemoryBrowserFleetLeaseStore(config.mcp.browserFleetMaxLocalLeases ?? 4096),
+        new InMemoryBrowserFleetLeaseStore(
+          config.mcp.browserFleetMaxLocalLeases ?? MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+        ),
     );
     const browserSessionCoordinator = new BrowserSessionCoordinator(() => this.collector, {
       maxPending: config.mcp.browserSessionQueueMaxPending,
@@ -594,7 +613,7 @@ export class MCPServer implements MCPServerContext {
         registeredTool.remove();
       } catch (e) {
         logger.warn(`CircuitBreaker: failed to remove tool "${toolName}":`, e);
-        return;
+        return; // Preserve retry path — don't add to circuitBrokenTools on transient error.
       }
     } else if (!this.activatedToolNames.has(toolName)) {
       return;
@@ -642,7 +661,7 @@ export class MCPServer implements MCPServerContext {
   async start(): Promise<void> {
     await this.registerCaches();
     await this.cache.init();
-    const transportMode = (process.env.MCP_TRANSPORT ?? 'stdio').toLowerCase();
+    const transportMode = MCP_TRANSPORT.toLowerCase();
     if (transportMode === 'http') {
       await startHttpTransport(this);
     } else {

@@ -17,6 +17,7 @@
 import type { ExecutionContext } from '../cpu/ExecutionContext';
 import type { SimdContext } from '../simd';
 import { executeSimdLoadStore } from '../simd';
+import { signExtend7, signExtend9, signExtend19 } from '../simd-utils';
 
 /**
  * Try to execute a Loads and Stores instruction.
@@ -40,7 +41,15 @@ export function execLoadStore(
   // by another agent: a load reads normally, and a store always succeeds and
   // reports status 0 in Rs. This is what lets a stdlib guarding shared state
   // with LDAXR/STLXR (or a refcount) run to completion here.
-  if (((insn >>> 24) & 0b111111) === 0b001000) {
+  //
+  // o2 (bit23) and o1 (bit21) must both be clear: the v8.1 atomics (CAS/CASP,
+  // LDADD/SWP/…) set o2 and share the same 001000 prefix, and silently running
+  // one as an ordinary exclusive load/store would drop its atomic semantics.
+  if (
+    ((insn >>> 24) & 0b111111) === 0b001000 &&
+    ((insn >>> 23) & 1) === 0 &&
+    ((insn >>> 21) & 1) === 0
+  ) {
     const size = insn >>> 30;
     const bytes = 1 << size;
     const isLoad = ((insn >>> 22) & 1) === 1;
@@ -96,7 +105,17 @@ export function execLoadStore(
       const option = (insn >>> 13) & 0b111;
       const s = (insn >>> 12) & 1;
       const shift = s === 1 ? size : 0;
-      const offset = ctx.extendReg(ctx.readGpr(rm), option, shift, 1);
+      let rmValue = ctx.readGpr(rm);
+      // BUGFIX: For uxtw (0b010), zero-extend the 32-bit W-register value to
+      // 64-bit by masking garbage in the upper 32 bits of the X-register.
+      // In ARM64, Wn aliases the low 32 bits of Xn, and a prior 64-bit write
+      // to Xn may leave stale data in the upper word that corrupts the
+      // effective address when the register is used with uxtw extension.
+      // Same class of bug as the previously-fixed LDRSW sign-extend issue.
+      if (option === 0b010) {
+        rmValue &= 0xffffffffn;
+      }
+      const offset = ctx.extendReg(rmValue, option, shift, 1);
       // BUGFIX: Do address arithmetic in bigint space. Offset is ALREADY
       // correctly extended by extendReg (sign or zero), so just add as-is.
       const base = ctx.readGprSp(rn);
@@ -116,7 +135,7 @@ export function execLoadStore(
       // pre-index only, so every STUR/LDUR with a non-zero offset hit the wrong
       // address and silently lost the access.)
       const imm9raw = (insn >>> 12) & 0x1ff;
-      const imm9 = imm9raw & 0x100 ? imm9raw - 0x200 : imm9raw;
+      const imm9 = signExtend9(imm9raw);
       const idx = (insn >>> 10) & 0b11;
       const base = ctx.readGprSp(rn);
       // BUGFIX: Do address arithmetic in bigint space
@@ -130,32 +149,46 @@ export function execLoadStore(
     }
   }
 
-  // LDR (literal): opc(31:30) | 011 | V(26)=0 | 00 | imm19 | Rt
-  //   PC-relative load: Rt = *(PC + SignExtend(imm19 << 2)). opc 00 → 32-bit,
-  //   01 → 64-bit. Used for large constants the compiler pools after a function.
-  if (((insn >>> 24) & 0b111111) === 0b011000 && ((insn >>> 26) & 1) === 0) {
+  // LDR / LDRSW (literal): opc(31:30) | 011 | V(26)=0 | 00 | imm19 | Rt
+  //   PC-relative load: Rt = *(PC + SignExtend(imm19 << 2)).
+  //   opc 00 → 32-bit zero-extend,  01 → 64-bit,
+  //   10 → 32-bit sign-extend (LDRSW). Also matches the canonical LDRSW
+  //   encoding (bit 29 = 0, mask 0b_0011_0000 at bits [29:24]).
+  if (((insn >>> 24) & 0b111111) === 0b011000 || ((insn >>> 24) & 0b111111) === 0b001100) {
     const opc = insn >>> 30;
+    // opc=11 encodes PRFM (literal) — a prefetch hint with no architectural
+    // effect on GPRs or memory. Consume it as a no-op instead of executing a
+    // bogus 4-byte load into Rt (which would fault on unmapped addresses).
+    if (opc === 0b11) return true;
+    const signExtend = opc === 0b10; // LDRSW
     const bytes = opc === 0b01 ? 8 : 4;
     const rt = insn & 0b11111;
     const imm19 = (insn >>> 5) & 0x7ffff;
-    const offset = (imm19 & 0x40000 ? imm19 - 0x80000 : imm19) * 4;
+    const offset = signExtend19(imm19) * 4;
     const addr = ctx.pc + offset;
-    ctx.writeGpr(rt, ctx.loadValue(addr, bytes));
+    const raw = ctx.loadValue(addr, bytes);
+    if (signExtend && bytes === 4) {
+      ctx.writeGpr(rt, BigInt.asIntN(32, raw));
+    } else {
+      ctx.writeGpr(rt, raw);
+    }
     return true;
   }
 
   // LDP/STP (load/store pair): opc | 101 | V(0) | idx(24:23) | L | imm7 | Rt2 | Rn | Rt
-  //   bits 29:25 === 0b10100 (V=0, integer); opc(31:30): 0b00 = 32-bit, 0b10 = 64-bit.
-  //   idx(24:23): 0b01 post-index, 0b11 pre-index, 0b10 signed offset.
+  //   bits 29:25 === 0b10100 (V=0, integer); opc(31:30): 0b00 = STP 32-bit,
+  //   0b01 = LDP 32-bit, 0b10 = STP 64-bit, 0b11 = LDP 64-bit.
+  //   idx(24:23): 0b00 non-temporal (LDNP/STNP, signed offset, no writeback),
+  //   0b01 post-index, 0b11 pre-index, 0b10 signed offset.
   //   L(bit22): 0 store, 1 load. imm7 signed, scaled by access size.
   if (((insn >>> 25) & 0b11111) === 0b10100) {
     const opc = insn >>> 30;
-    const is64 = opc === 0b10;
+    const is64 = opc === 0b10 || opc === 0b11; // 64-bit LDP is opc=11, not just STP's 10
     const bytes = is64 ? 8 : 4;
     const idx = (insn >>> 23) & 0b11;
     const isLoad = ((insn >>> 22) & 1) === 1;
     const imm7raw = (insn >>> 15) & 0x7f;
-    const imm7 = (imm7raw & 0x40 ? imm7raw - 0x80 : imm7raw) * bytes;
+    const imm7 = signExtend7(imm7raw) * bytes;
     const rt2 = (insn >>> 10) & 0b11111;
     const rn = (insn >>> 5) & 0b11111;
     const rt = insn & 0b11111;
@@ -169,8 +202,9 @@ export function execLoadStore(
       ctx.storeValue(addr, bytes, ctx.readGpr(rt));
       ctx.storeValue(addr + bytes, bytes, ctx.readGpr(rt2));
     }
-    if (idx !== 0b10) {
-      // pre/post-index write the updated base back; signed-offset (0b10) does not.
+    // Only pre/post-index (0b01/0b11) write the updated base back; signed
+    // offset (0b10) and non-temporal LDNP/STNP (0b00) do not.
+    if (idx === 0b01 || idx === 0b11) {
       ctx.writeGprSp(rn, BigInt.asUintN(64, base + BigInt(imm7)));
     }
     return true;

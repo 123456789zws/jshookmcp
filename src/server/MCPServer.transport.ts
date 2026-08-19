@@ -2,10 +2,17 @@ import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
+  HTTP_CAPACITY_RETRY_AFTER_MS,
   MCP_HTTP_REQUEST_TIMEOUT_MS,
   MCP_HTTP_HEADERS_TIMEOUT_MS,
   MCP_HTTP_KEEPALIVE_TIMEOUT_MS,
   MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS,
+  MCP_HTTP_HOST,
+  MCP_HTTP_PORT,
+  MCP_HEALTH_VERBOSE,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+  MCP_BROWSER_FLEET_LEASE_TTL_MS,
+  STDIO_SEND_TIMEOUT_MS,
 } from '@src/constants';
 import {
   checkAuth,
@@ -33,7 +40,7 @@ export async function startStdioTransport(ctx: MCPServerContext): Promise<void> 
         const timeout = setTimeout(() => {
           logger.warn('transport.send() timed out — stdout broken, skipping write');
           resolve();
-        }, 500);
+        }, STDIO_SEND_TIMEOUT_MS);
         origSend(message)
           .then(() => clearTimeout(timeout))
           .catch(() => clearTimeout(timeout))
@@ -79,15 +86,15 @@ export async function startStdioTransport(ctx: MCPServerContext): Promise<void> 
 }
 
 export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
-  const port = parseInt(process.env.MCP_PORT ?? '3000', 10);
-  const host = process.env.MCP_HOST ?? '127.0.0.1';
+  const port = MCP_HTTP_PORT;
+  const host = MCP_HTTP_HOST;
   const getDomainInstance =
     typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
 
   const transport = new MultiplexedStreamableHttpTransport({
-    maxSessions: ctx.config?.mcp?.browserFleetMaxLocalLeases ?? 4096,
-    capacityRetryAfterMs: 1_000,
-    sessionIdleTtlMs: ctx.config?.mcp?.browserFleetLeaseTtlMs ?? 600_000,
+    maxSessions: ctx.config?.mcp?.browserFleetMaxLocalLeases ?? MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+    capacityRetryAfterMs: HTTP_CAPACITY_RETRY_AFTER_MS,
+    sessionIdleTtlMs: ctx.config?.mcp?.browserFleetLeaseTtlMs ?? MCP_BROWSER_FLEET_LEASE_TTL_MS,
     onSessionOpened: async (sessionId) => {
       const fleetRouter = getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter');
       if (fleetRouter && typeof fleetRouter.claimLocalSession === 'function') {
@@ -229,7 +236,7 @@ function handleHealthCheck(ctx: MCPServerContext, res: HttpServerResponse): void
   // Minimal output by default to avoid exposing internal state (domains, tool
   // counts, token budget). Full details are gated behind MCP_AUTH_TOKEN or
   // MCP_HEALTH_VERBOSE=true for trusted environments.
-  const verbose = ['1', 'true'].includes((process.env.MCP_HEALTH_VERBOSE ?? '').toLowerCase());
+  const verbose = MCP_HEALTH_VERBOSE;
 
   const body: Record<string, unknown> = {
     status: 'ok',

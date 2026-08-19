@@ -247,6 +247,23 @@ export class CamoufoxBrowserManager {
         ]);
         logger.info('Camoufox browser closed');
       }
+
+      // A WebSocket server launched via launchAsServer must be closed too —
+      // otherwise its process/port leak after close().
+      const server = this.browserServer;
+      this.browserServer = null;
+      if (server) {
+        await Promise.race([
+          server.close(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('camoufox server.close() timed out')),
+              CamoufoxBrowserManager.BROWSER_CLOSE_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+        logger.info('Camoufox server closed');
+      }
     } finally {
       this.isClosing = false;
     }

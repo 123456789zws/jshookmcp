@@ -31,7 +31,10 @@ XHR.open = function(method, url, async, user, password) {
     async: async !== false
   });
 
-  ${action === 'block' ? 'return;' : ''}
+  // A bare return; here would leave the XHR in UNSENT state — a later
+  // send() then throws InvalidStateError inside page code. Throwing at open()
+  // is the same explicit block contract the fetch/WebSocket hooks use.
+  ${action === 'block' ? 'throw new Error("XHR blocked by hook");' : ''}
 
   return originalOpen.apply(this, arguments);
 };

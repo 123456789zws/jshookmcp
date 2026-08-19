@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const ORIGINAL_PLATFORM = process.platform;
 const mockReadFileSync = vi.fn();
 const mockExecFile = vi.fn();
+const mockLoggerWarn = vi.fn();
 
 vi.mock('node:fs', () => ({
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -16,6 +17,10 @@ vi.mock('node:fs', () => ({
 
 vi.mock('node:child_process', () => ({
   execFile: (...args: unknown[]) => mockExecFile(...args),
+}));
+
+vi.mock('@utils/logger', () => ({
+  logger: { warn: (...args: unknown[]) => mockLoggerWarn(...args) },
 }));
 
 import { checkSyscallPermission } from '@server/domains/syscall-hook/permission-check';
@@ -84,6 +89,23 @@ describe('checkSyscallPermission — linux', () => {
     } finally {
       process.geteuid = orig;
     }
+  });
+
+  it('logs the probe failure when fail-opening (no silent mis-authorization)', async () => {
+    const orig = process.geteuid;
+    process.geteuid = (() => 1000) as never;
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+    try {
+      await checkSyscallPermission();
+    } finally {
+      process.geteuid = orig;
+    }
+    // The logger must have recorded why the check fail-opened.
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.stringMatching(/permission probe failed|fail-open/i),
+    );
   });
 });
 

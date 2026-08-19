@@ -65,11 +65,72 @@ export type {
  * empty/absent `files` map means a clean device: every fopen returns NULL.
  */
 /** Bump-allocator heap base — distinct from typical code/data vaddrs. */
-const HEAP_BASE = 0x100000;
+let HEAP_BASE = 0x41000000;
+/** Override the heap base at runtime (one-shot, before first allocation). */
+export function setBionicHeapBase(addr: number): void {
+  HEAP_BASE = addr;
+}
 /** Allocation granularity (bytes); keeps returned pointers naturally aligned. */
 const HEAP_ALIGN = 16;
+
+// ===========================================================================
+//  Shared bionic stubs — used by both createBionicLibrary (name→fn map) and
+//  installBionicStubs (address-keyed registration).  Single source of truth
+//  prevents the bit-level drift that bit the installBionicStubs malloc
+//  (missing 16-byte pointer alignment — now fixed).
+// ===========================================================================
+
+/** strlen stub — stateless, safe to share across both code paths. */
+function stubStrlen(ctx: HostContext): bigint {
+  return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
+}
+
+/** memcpy stub — stateless. */
+function stubMemcpy(ctx: HostContext): bigint {
+  const dst = Number(ctx.x(0));
+  ctx.write(dst, ctx.read(Number(ctx.x(1)), Number(ctx.x(2))));
+  return ctx.x(0);
+}
+
+/** memset stub — stateless. */
+function stubMemset(ctx: HostContext): bigint {
+  const buf = Number(ctx.x(0));
+  const value = Number(ctx.x(1) & 0xffn);
+  const n = Number(ctx.x(2));
+  ctx.write(buf, new Uint8Array(n).fill(value));
+  return ctx.x(0);
+}
+
+/**
+ * Create a bump-allocator-backed malloc/free pair.
+ *
+ * All pointers are 16-byte aligned (ARM64 ABI requirement).  The returned
+ * free() is a no-op — the bump allocator never reclaims.
+ */
+function createBumpAllocator(
+  engine: { mapMemory(addr: number, size: number): void },
+  heapBase: number,
+): { malloc(ctx: HostContext): bigint; free(ctx: HostContext): void } {
+  let bump = heapBase;
+  return {
+    malloc: (ctx: HostContext): bigint => {
+      const size = Number(ctx.x(0));
+      const roundedSize = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));
+      const ptr = Math.ceil(bump / HEAP_ALIGN) * HEAP_ALIGN;
+      engine.mapMemory(ptr, roundedSize);
+      bump = ptr + roundedSize;
+      return BigInt(ptr);
+    },
+    free: (): void => {
+      // bump allocator never reclaims
+    },
+  };
+}
 /** Default emulated page size returned by libc/sysconf imports. */
 const PAGE_SIZE = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;
+/** Fake pid/uid reported by getpid/getuid/geteuid — stable so emulated code
+ *  that caches the value (or writes it into logs/state) is deterministic. */
+const FAKE_PID_UID = 10000n;
 /** Linux/Android-ish sysconf names used by common bionic callers. */
 const SC_PAGE_SIZE_NAMES = new Set([30, 47]);
 const SC_NPROCESSORS_ONLN_NAMES = new Set([84]);
@@ -91,7 +152,7 @@ export function createBionicLibrary(
   options: BionicOptions = {},
 ): BionicLibrary {
   const lib = new BionicLibrary();
-  let bump = HEAP_BASE;
+  let bump = options.heapBase ?? HEAP_BASE;
   // Track allocation sizes so realloc can copy the old contents forward.
   const sizes = new Map<number, number>();
 
@@ -122,14 +183,8 @@ export function createBionicLibrary(
     return out;
   };
 
-  lib.set('strlen', (ctx) => {
-    return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
-  });
-  lib.set('memcpy', (ctx) => {
-    const dst = Number(ctx.x(0));
-    ctx.write(dst, ctx.read(Number(ctx.x(1)), Number(ctx.x(2))));
-    return ctx.x(0);
-  });
+  lib.set('strlen', stubStrlen);
+  lib.set('memcpy', stubMemcpy);
   lib.set('memmove', (ctx) => {
     // Copy via an intermediate buffer so overlapping ranges stay correct.
     const dst = Number(ctx.x(0));
@@ -137,13 +192,7 @@ export function createBionicLibrary(
     ctx.write(dst, copy);
     return ctx.x(0);
   });
-  lib.set('memset', (ctx) => {
-    const buf = Number(ctx.x(0));
-    const value = Number(ctx.x(1) & 0xffn);
-    const n = Number(ctx.x(2));
-    ctx.write(buf, new Uint8Array(n).fill(value));
-    return ctx.x(0);
-  });
+  lib.set('memset', stubMemset);
   lib.set('memcmp', (ctx) => {
     const a = ctx.read(Number(ctx.x(0)), Number(ctx.x(2)));
     const b = ctx.read(Number(ctx.x(1)), Number(ctx.x(2)));
@@ -323,8 +372,8 @@ export function createBionicLibrary(
   lib.set('mprotect', () => 0n);
   lib.set('munmap', () => 0n);
   lib.set('prctl', () => 0n);
-  lib.set('getpid', () => 10000n);
-  lib.set('getuid', () => 10000n);
+  lib.set('getpid', () => FAKE_PID_UID);
+  lib.set('getuid', () => FAKE_PID_UID);
   lib.set('sleep', () => 0n);
   lib.set('usleep', () => 0n);
 
@@ -385,25 +434,37 @@ export function createBionicLibrary(
     const symbol = readCString(ctx, Number(ctx.x(1)));
     if (!symbol) {
       lastDlError = 'dlsym: empty symbol';
+      lib.dlsymLog.push(`dlsym: (empty) → NULL`);
       return 0n;
     }
     const exported = engine.lookupSymbol(symbol);
     if (exported !== undefined) {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${exported.toString(16)} (exported)`);
       return BigInt(exported);
     }
     const resolved = lib.resolveSymbol(symbol);
     if (resolved?.kind === 'data') {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${resolved.address.toString(16)} (data)`);
       return BigInt(resolved.address);
     }
     const stub =
       resolved?.kind === 'function' ? engine.bindImportStub(symbol, resolved.fn) : undefined;
     if (stub !== undefined) {
       lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → stub @0x${stub.toString(16)}`);
       return BigInt(stub);
     }
+    // Optional extra symbol table (caller-provided, e.g. VM handler addresses).
+    const extraAddr = options.extraSymbols?.get(symbol);
+    if (extraAddr !== undefined) {
+      lastDlError = '';
+      lib.dlsymLog.push(`dlsym: ${symbol} → 0x${extraAddr.toString(16)} (extra)`);
+      return BigInt(extraAddr);
+    }
     lastDlError = `dlsym: symbol not found: ${symbol}`;
+    lib.dlsymLog.push(`dlsym: ${symbol} → NULL (NOT FOUND)`);
     return 0n;
   });
   lib.set('dlerror', (ctx) => writeDlError(ctx));
@@ -573,7 +634,7 @@ export function createBionicLibrary(
   });
 
   lib.set('dlclose', () => 0n); // succeed (no-op: handles never freed)
-  lib.set('geteuid', () => 10000n); // same as getuid
+  lib.set('geteuid', () => FAKE_PID_UID); // same as getuid
   lib.set('mremap', () => BigInt(-1)); // fail: not implemented
 
   installFortifiedMemoryStubs(lib);
@@ -597,6 +658,252 @@ export function createBionicLibrary(
   installStringExtensionStubs(lib);
 
   installAndroidAssetStubs(lib, options);
+
+  // ── Stubs for libsgmainso unresolved imports ──
+
+  // --- string/memory helpers ---
+  lib.set('strndup', (ctx) => {
+    const body = readGuestCStringBytes(ctx, Number(ctx.x(0)), Number(ctx.x(1)));
+    const ptr = alloc(body.length + 1);
+    const out = new Uint8Array(body.length + 1);
+    out.set(body);
+    ctx.write(ptr, out);
+    return BigInt(ptr);
+  });
+  lib.set('strnlen', (ctx) => {
+    const body = readGuestCStringBytes(ctx, Number(ctx.x(0)), Number(ctx.x(1)));
+    return BigInt(body.length);
+  });
+  lib.set('strsep', (ctx) => {
+    const sptr = Number(ctx.x(0));
+    const delim = Number(ctx.x(1));
+    if (sptr === 0) return 0n;
+    const strPtrVal = Number(ctx.loadValue!(sptr, 8));
+    if (strPtrVal === 0) return 0n;
+    const s = readGuestCStringBytes(ctx, strPtrVal);
+    const d = ctx.read(delim, 1)[0]!;
+    const idx = s.indexOf(d);
+    if (idx < 0) {
+      ctx.storeValue!(sptr, 8, 0n);
+      return BigInt(strPtrVal);
+    }
+    ctx.write(strPtrVal + idx, new Uint8Array([0]));
+    ctx.storeValue!(sptr, 8, BigInt(strPtrVal + idx + 1));
+    return BigInt(strPtrVal);
+  });
+  lib.set('strtok_r', (ctx) => {
+    // char *strtok_r(char *str, const char *delim, char **saveptr). str=NULL
+    // resumes tokenisation from *saveptr; the delimiter set is every byte of
+    // the delim string. Leading delimiters are skipped; the token's trailing
+    // delimiter is replaced by NUL and *saveptr advanced past it (or cleared
+    // at end of string).
+    const str = Number(ctx.x(0));
+    const delimPtr = Number(ctx.x(1));
+    const saveptr = Number(ctx.x(2));
+    if (delimPtr === 0) return 0n;
+    const dset = new Set(readGuestCStringBytes(ctx, delimPtr));
+    let cursor = str !== 0 ? str : Number(ctx.loadValue!(saveptr, 8));
+    if (cursor === 0) return 0n;
+    // Skip leading delimiters.
+    while (true) {
+      const byte = ctx.read(cursor, 1)[0];
+      if (byte === undefined || byte === 0 || !dset.has(byte)) break;
+      cursor += 1;
+    }
+    if (ctx.read(cursor, 1)[0] === 0) {
+      ctx.storeValue!(saveptr, 8, 0n);
+      return 0n; // only delimiters left → no more tokens
+    }
+    // Find the end of the token (a delimiter or the NUL terminator).
+    let end = cursor;
+    while (true) {
+      const byte = ctx.read(end, 1)[0];
+      if (byte === undefined || byte === 0 || dset.has(byte)) break;
+      end += 1;
+    }
+    const token = BigInt(cursor);
+    if (ctx.read(end, 1)[0] === 0) {
+      ctx.storeValue!(saveptr, 8, 0n);
+    } else {
+      ctx.write(end, new Uint8Array([0]));
+      ctx.storeValue!(saveptr, 8, BigInt(end + 1));
+    }
+    return token;
+  });
+  lib.set('strcat', (ctx) => {
+    const dst = Number(ctx.x(0));
+    const srcBody = readGuestCStringBytes(ctx, Number(ctx.x(1)));
+    const dstBody = readGuestCStringBytes(ctx, dst);
+    const off = dstBody.length;
+    ctx.write(dst + off, srcBody);
+    ctx.write(dst + off + srcBody.length, new Uint8Array([0]));
+    return BigInt(dst);
+  });
+  lib.set('strsignal', (ctx) => {
+    const msg = `Signal ${Number(ctx.x(0))}`;
+    const ptr = alloc(msg.length + 1);
+    ctx.write(ptr, new TextEncoder().encode(msg + '\0'));
+    return BigInt(ptr);
+  });
+
+  // --- ctype predicates (C semantics; arg is an int masked to unsigned char,
+  //     matching the isalpha/isdigit family in install-libc-extensions) ---
+  lib.set('iscntrl', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value < 0x20 || value === 0x7f ? 1n : 0n;
+  });
+  lib.set('isgraph', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value >= 0x21 && value <= 0x7e ? 1n : 0n;
+  });
+  lib.set('isprint', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    return value >= 0x20 && value <= 0x7e ? 1n : 0n;
+  });
+  lib.set('ispunct', (ctx) => {
+    const value = Number(ctx.x(0) & 0xffn);
+    const alnum =
+      (value >= 0x30 && value <= 0x39) ||
+      (value >= 0x41 && value <= 0x5a) ||
+      (value >= 0x61 && value <= 0x7a);
+    return value >= 0x21 && value <= 0x7e && !alnum ? 1n : 0n;
+  });
+
+  // --- stdlib math/conv ---
+  lib.set('abs', (ctx) => {
+    const v = Number(ctx.x(0));
+    return BigInt(v < 0 ? -v : v);
+  });
+  lib.set('labs', (ctx) => {
+    const v = Number(ctx.x(0));
+    return BigInt(v < 0n ? -v : v);
+  });
+  lib.set('div', (ctx) => {
+    const num = Number(ctx.x(0));
+    const den = Number(ctx.x(1));
+    const ptr = alloc(8);
+    ctx.storeValue!(ptr, 4, BigInt(num / den));
+    ctx.storeValue!(ptr + 4, 4, BigInt(num % den));
+    return BigInt(ptr);
+  });
+  lib.set('ldiv', (ctx) => {
+    const num = Number(ctx.x(0));
+    const den = Number(ctx.x(1));
+    const ptr = alloc(16);
+    ctx.storeValue!(ptr, 8, BigInt(Math.trunc(num / den)));
+    ctx.storeValue!(ptr + 8, 8, BigInt(num % den));
+    return BigInt(ptr);
+  });
+  lib.set('atof', () => 0n);
+  lib.set('atoll', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    const txt = new TextDecoder().decode(s);
+    return BigInt(parseInt(txt, 10) || 0);
+  });
+  lib.set('strtoul', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    return BigInt(parseInt(new TextDecoder().decode(s), 10) || 0);
+  });
+  lib.set('strtoull', (ctx) => {
+    const s = readGuestCStringBytes(ctx, Number(ctx.x(0)));
+    return BigInt(parseInt(new TextDecoder().decode(s), 10) || 0);
+  });
+  lib.set('sscanf', () => 0n);
+  lib.set('fscanf', () => 0n);
+  lib.set('crc32', () => 0n);
+
+  // --- posix I/O (fail gracefully) ---
+  for (const name of ['fgetpos', 'fsetpos', 'setvbuf', 'setbuf']) {
+    lib.set(name, () => 0n);
+  }
+  for (const name of ['getc', 'putc', 'ungetc', 'ferror']) {
+    lib.set(name, () => BigInt(-1)); // EOF
+  }
+  lib.set('remove', () => BigInt(-1));
+  lib.set('rename', () => BigInt(-1));
+  lib.set('popen', () => 0n); // NULL
+  lib.set('pclose', () => BigInt(-1));
+  lib.set('freopen', () => 0n);
+  lib.set('chmod', () => 0n);
+  lib.set('closedir', () => BigInt(-1));
+  lib.set('opendir', () => 0n);
+  lib.set('readdir', () => 0n);
+
+  // --- time ---
+  for (const name of ['mktime', 'asctime', 'ctime', 'gmtime_r', 'strftime']) {
+    lib.set(name, () => 0n);
+  }
+
+  // --- network (fail gracefully) ---
+  for (const name of [
+    'socket',
+    'bind',
+    'accept',
+    'connect',
+    'send',
+    'recv',
+    'sendto',
+    'recvfrom',
+  ]) {
+    lib.set(name, () => BigInt(-1));
+  }
+  lib.set('inet_aton', () => 0n);
+
+  // --- threading / sync ---
+  for (const name of [
+    'sem_init',
+    'sem_wait',
+    'sem_post',
+    'sem_destroy',
+    'pthread_rwlock_init',
+    'pthread_rwlock_rdlock',
+    'pthread_rwlock_wrlock',
+    'pthread_rwlock_unlock',
+    'pthread_rwlock_destroy',
+    'pthread_sigmask',
+    'sigemptyset',
+    'sigaddset',
+    'sigaltstack',
+  ]) {
+    lib.set(name, () => 0n);
+  }
+  lib.set('pthread_setname_np', () => 0n);
+  lib.set('pthread_exit', () => {
+    throw new Error('bionic: pthread_exit called');
+  });
+
+  // --- zlib (fail gracefully) ---
+  for (const name of [
+    'deflate',
+    'deflateInit_',
+    'deflateInit2_',
+    'deflateEnd',
+    'deflateBound',
+    'inflate',
+    'inflateInit_',
+    'inflateInit2_',
+    'inflateEnd',
+  ]) {
+    lib.set(name, () => BigInt(-2)); // Z_STREAM_ERROR
+  }
+
+  // --- random ---
+  let rand48State = 1n;
+  lib.set('srand48', (ctx) => {
+    rand48State = BigInt(ctx.x(0));
+    return undefined;
+  });
+  lib.set('lrand48', () => {
+    rand48State = (rand48State * 25214903917n + 11n) & 0xffffffffffffn;
+    return BigInt(Number(rand48State >> 16n));
+  });
+  lib.set('srand', () => undefined);
+  lib.set('rand', () => BigInt(Math.floor(Math.random() * 2147483647)));
+  lib.set('srandom', () => undefined);
+  lib.set('random', () => BigInt(Math.floor(Math.random() * 2147483647)));
+
+  // --- stack guard ---
+  lib.set('__stack_chk_guard', () => 0xdeadbeefcafebaben);
 
   return lib;
 }
@@ -623,48 +930,31 @@ export function hasBionicSymbol(symbol: string): boolean {
   return SUPPORTED_BIONIC_SYMBOLS.has(symbol);
 }
 
-export function installBionicStubs(engine: CpuEngine, addrs: BionicStubAddresses): void {
+export function installBionicStubs(
+  engine: CpuEngine,
+  addrs: BionicStubAddresses,
+  heapBase = HEAP_BASE,
+): void {
   if (addrs.strlen !== undefined) {
-    engine.registerHostFunction(addrs.strlen, (ctx: HostContext) => {
-      return BigInt(readGuestCStringBytes(ctx, Number(ctx.x(0))).length);
-    });
+    engine.registerHostFunction(addrs.strlen, stubStrlen);
   }
 
   if (addrs.memcpy !== undefined) {
-    engine.registerHostFunction(addrs.memcpy, (ctx: HostContext) => {
-      const dst = Number(ctx.x(0));
-      const src = Number(ctx.x(1));
-      const n = Number(ctx.x(2));
-      ctx.write(dst, ctx.read(src, n));
-      return ctx.x(0); // memcpy returns dest
-    });
+    engine.registerHostFunction(addrs.memcpy, stubMemcpy);
   }
 
   if (addrs.memset !== undefined) {
-    engine.registerHostFunction(addrs.memset, (ctx: HostContext) => {
-      const buf = Number(ctx.x(0));
-      const value = Number(ctx.x(1) & 0xffn);
-      const n = Number(ctx.x(2));
-      ctx.write(buf, new Uint8Array(n).fill(value));
-      return ctx.x(0); // memset returns dest
-    });
+    engine.registerHostFunction(addrs.memset, stubMemset);
   }
 
-  if (addrs.malloc !== undefined) {
-    let bump = HEAP_BASE;
-    engine.registerHostFunction(addrs.malloc, (ctx: HostContext) => {
-      const size = Number(ctx.x(0));
-      const rounded = Math.max(HEAP_ALIGN, (size + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1));
-      const ptr = bump;
-      engine.mapMemory(ptr, rounded); // lazily back each allocation
-      bump += rounded;
-      return BigInt(ptr);
-    });
-  }
-
-  if (addrs.free !== undefined) {
-    // The bump allocator never reclaims, so free is a no-op.
-    engine.registerHostFunction(addrs.free, () => undefined);
+  if (addrs.malloc !== undefined || addrs.free !== undefined) {
+    const allocator = createBumpAllocator(engine, heapBase);
+    if (addrs.malloc !== undefined) {
+      engine.registerHostFunction(addrs.malloc, allocator.malloc);
+    }
+    if (addrs.free !== undefined) {
+      engine.registerHostFunction(addrs.free, allocator.free);
+    }
   }
 }
 

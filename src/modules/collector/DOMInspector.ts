@@ -1,15 +1,15 @@
 import type { CDPSession } from 'rebrowser-puppeteer-core';
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import {
+  buildFindByTextEvaluation,
   buildFindClickableEvaluation,
   buildQueryAllEvaluation,
-  findByTextEvaluation,
+  buildQuerySelectorEvaluation,
   getComputedStyleEvaluation,
   getStructureEvaluation,
   getXPathEvaluation,
   isInViewportEvaluation,
   observeDOMChangesEvaluation,
-  querySelectorEvaluation,
   stopObservingDOMEvaluation,
   type DOMInspectorClickableElement,
   type DOMInspectorElementInfo,
@@ -60,11 +60,18 @@ type DOMFindClickableEvaluationResult = {
 export class DOMInspector {
   protected cdpSession: CDPSession | null = null;
 
+  /** Default wait for the page to reach readyState 'complete' (ms). */
+  private static readonly READY_STATE_POLL_INTERVAL_MS = 100;
+  /** Retry delay before re-running an empty query after readyState 'complete' (ms). */
+  private static readonly EMPTY_RESULT_RETRY_DELAY_MS = 500;
+  /** Default readyState wait budget when the caller does not supply one (ms). */
+  private static readonly DEFAULT_READY_STATE_TIMEOUT_MS = 3000;
+
   constructor(protected collector: CodeCollector) {}
 
   private async waitForReadyState(
     page: { evaluate: <T>(fn: () => T) => Promise<T>; frames?: () => unknown[] },
-    timeoutMs = 3000,
+    timeoutMs = DOMInspector.DEFAULT_READY_STATE_TIMEOUT_MS,
   ): Promise<{ readyState: string; waitedForReadyState: boolean; frameCount: number }> {
     const deadline = Date.now() + timeoutMs;
     let waitedForReadyState = false;
@@ -74,7 +81,9 @@ export class DOMInspector {
       readyState = await page.evaluate(() => document.readyState).catch(() => 'unknown');
       if (readyState === 'complete') break;
       waitedForReadyState = true;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) =>
+        setTimeout(resolve, DOMInspector.READY_STATE_POLL_INTERVAL_MS),
+      );
     }
 
     return {
@@ -84,10 +93,39 @@ export class DOMInspector {
     };
   }
 
+  /**
+   * Run an evaluate query, retrying once when it returns zero elements on a
+   * 'complete' document (late-rendered content). Shared by querySelectorAll
+   * and findClickable — previously the wait/retry/diagnostics block was
+   * duplicated verbatim.
+   */
+  private async runQueryWithRetry<
+    T extends { elements: unknown[]; diagnostics: { readyState: string } },
+  >(
+    page: { evaluate: <R>(fn: () => R) => Promise<R> },
+    runQuery: () => Promise<T>,
+  ): Promise<{
+    result: T;
+    retried: boolean;
+    readyStateStatus: Awaited<ReturnType<DOMInspector['waitForReadyState']>>;
+  }> {
+    const readyStateStatus = await this.waitForReadyState(page);
+    let result = await runQuery();
+    let retried = false;
+    if (result.elements.length === 0 && result.diagnostics.readyState === 'complete') {
+      retried = true;
+      await new Promise((resolve) => setTimeout(resolve, DOMInspector.EMPTY_RESULT_RETRY_DELAY_MS));
+      result = await runQuery();
+    }
+    return { result, retried, readyStateStatus };
+  }
+
   async querySelector(selector: string, _getAttributes = true): Promise<ElementInfo> {
     try {
       const page = await this.collector.getActivePage();
-      const elementInfo = await page.evaluate(querySelectorEvaluation, selector);
+      const elementInfo = await page.evaluate(
+        new Function(buildQuerySelectorEvaluation(selector)) as () => ElementInfo,
+      );
       logger.info(`querySelector: ${selector} - ${elementInfo.found ? 'found' : 'not found'}`);
       return elementInfo;
     } catch (error) {
@@ -102,7 +140,6 @@ export class DOMInspector {
   ): Promise<DOMQueryAllResult> {
     try {
       const page = await this.collector.getActivePage();
-      const readyStateStatus = await this.waitForReadyState(page);
       const runQuery = async () =>
         page.evaluate(
           new Function(
@@ -110,13 +147,7 @@ export class DOMInspector {
           ) as () => DOMQueryAllEvaluationResult,
         );
 
-      let result = await runQuery();
-      let retried = false;
-      if (result.elements.length === 0 && result.diagnostics.readyState === 'complete') {
-        retried = true;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        result = await runQuery();
-      }
+      const { result, retried, readyStateStatus } = await this.runQueryWithRetry(page, runQuery);
 
       const diagnostics: DOMQueryDiagnostics = {
         readyState: result.diagnostics.readyState ?? readyStateStatus.readyState,
@@ -161,7 +192,6 @@ export class DOMInspector {
   async findClickable(filterText?: string): Promise<DOMFindClickableResult> {
     try {
       const page = await this.collector.getActivePage();
-      const readyStateStatus = await this.waitForReadyState(page);
       const runQuery = async () =>
         page.evaluate(
           new Function(
@@ -169,13 +199,7 @@ export class DOMInspector {
           ) as () => DOMFindClickableEvaluationResult,
         );
 
-      let result = await runQuery();
-      let retried = false;
-      if (result.elements.length === 0 && result.diagnostics.readyState === 'complete') {
-        retried = true;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        result = await runQuery();
-      }
+      const { result, retried, readyStateStatus } = await this.runQueryWithRetry(page, runQuery);
 
       const diagnostics: DOMQueryDiagnostics = {
         readyState: result.diagnostics.readyState ?? readyStateStatus.readyState,
@@ -247,7 +271,11 @@ export class DOMInspector {
   async findByText(text: string, tag?: string): Promise<ElementInfo[]> {
     try {
       const page = await this.collector.getActivePage();
-      const elements = await page.evaluate(findByTextEvaluation, text, tag);
+      const elements = await page.evaluate(
+        new Function(buildFindByTextEvaluation(text, tag)) as () => Array<
+          ElementInfo & { selector: string }
+        >,
+      );
       logger.info(`findByText: "${text}" - found ${elements.length} elements`);
       return elements;
     } catch (error) {

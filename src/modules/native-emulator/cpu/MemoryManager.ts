@@ -14,6 +14,8 @@ interface MappedRegion {
   data: Uint8Array;
 }
 
+export type ReadHook = (address: number, length: number) => Uint8Array | null;
+
 export class MemoryManager {
   private readonly regions: MappedRegion[] = [];
   private readonly regionsByBase: MappedRegion[] = [];
@@ -21,6 +23,14 @@ export class MemoryManager {
   private regionFastPathSafe = true;
   /** Exported dynamic symbols (name → vaddr), populated by loadElf. */
   private readonly symbols = new Map<string, number>();
+  /** Optional read hook for shadow memory. If returns non-null, use shadow data. */
+  readHook: ReadHook | null = null;
+
+  /**
+   * Write-protected address ranges. Any store/STR to these ranges is silently dropped.
+   * Each entry: { base: number, size: number }
+   */
+  private readonly writeProtectRegions: { base: number; size: number }[] = [];
 
   // ── Memory region management ──
 
@@ -39,6 +49,7 @@ export class MemoryManager {
    * @param bytes - Data to write
    */
   writeCode(address: number, bytes: Uint8Array): void {
+    if (this.isWriteProtected(address, bytes.length)) return;
     const region = this.findRegion(address, bytes.length);
     region.data.set(bytes, address - region.base);
   }
@@ -65,6 +76,11 @@ export class MemoryManager {
    * @throws Error if no region contains the range
    */
   findRegion(address: number, length: number): MappedRegion {
+    // Check read hook (shadow memory) first
+    if (this.readHook) {
+      const shadow = this.readHook(address, length);
+      if (shadow) return { base: address, size: shadow.length, data: shadow };
+    }
     const cached = this.lastRegion;
     if (
       this.regionFastPathSafe &&
@@ -116,6 +132,7 @@ export class MemoryManager {
    * @param value - Value to write
    */
   storeValue(address: number, bytes: number, value: bigint): void {
+    if (this.isWriteProtected(address, bytes)) return;
     const region = this.findRegion(address, bytes);
     const data = region.data;
     let offset = address - region.base;
@@ -147,6 +164,37 @@ export class MemoryManager {
     const region = this.findRegion(address, bytes.length);
     const offset = address - region.base;
     region.data.set(bytes, offset);
+  }
+
+  // ── Write-protect API ──
+
+  /**
+   * Add a write-protected address range. Any store/STR to this range is silently dropped.
+   * Useful for preventing runtime self-modifying code from corrupting patches.
+   * @param base - Start address of protected range
+   * @param size - Size in bytes
+   */
+  addWriteProtect(base: number, size: number): void {
+    this.writeProtectRegions.push({ base, size });
+  }
+
+  /**
+   * Clear all write-protected ranges.
+   */
+  clearWriteProtect(): void {
+    this.writeProtectRegions.length = 0;
+  }
+
+  /**
+   * Check if an address range overlaps any write-protected region.
+   */
+  private isWriteProtected(address: number, length: number): boolean {
+    for (const wp of this.writeProtectRegions) {
+      if (address < wp.base + wp.size && wp.base < address + length) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ── Symbol table ──

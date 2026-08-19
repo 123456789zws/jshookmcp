@@ -145,9 +145,14 @@ export const EOCD_SIGNATURE = 0x06054b50;
 export const BLOCK_ID_V2 = 0x7109871a;
 export const BLOCK_ID_V3 = 0xf05368c0;
 export const BLOCK_ID_V3_1 = 0x1b93ad61;
-export const BLOCK_ID_V4 = 0x42726577;
 export const BLOCK_ID_SOURCE_STAMP = 0x504b4453;
-export const BLOCK_ID_VERITY_PADDING = 0x42726577 ^ 0; // distinct alias slot reserved
+/**
+ * AOSP verity padding block ID (0x42726577, "Brew"). NOTE: this is NOT the
+ * APK Signature Scheme v4 — v4 signatures live in a separate `.idsig` file,
+ * not in the signing block. The previous code aliased this value as
+ * `BLOCK_ID_V4` (via `^ 0`), which made the two constants identical.
+ */
+export const BLOCK_ID_VERITY_PADDING = 0x42726577;
 export const BLOCK_ID_PROOF_OF_ROTATION_ATTR = 0x3ba06f8c;
 
 /** Non-standard block ID observed in some legacy tooling (not in any official spec). */

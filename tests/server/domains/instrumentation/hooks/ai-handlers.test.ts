@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AIHookToolHandlers } from '../../../../../src/server/domains/instrumentation/hooks/ai-handlers';
+import {
+  AIHookToolHandlers,
+  toCsvRows,
+} from '../../../../../src/server/domains/instrumentation/hooks/ai-handlers';
 import type { PageController } from '../../../../../src/server/domains/shared/modules/collector';
 import {
   evaluateWithTimeout,
@@ -309,6 +312,15 @@ describe('AIHookToolHandlers', () => {
       expect(res.content[0].text).toContain('"success": true');
     });
 
+    it('reports the resulting enabled state in the message', async () => {
+      const on = await handlers.handleAIHookToggle({ hookId: 'test1', enabled: true });
+      // @ts-expect-error
+      expect(JSON.parse(on.content[0].text).message).toBe('Hook enabled');
+      const off = await handlers.handleAIHookToggle({ hookId: 'test1', enabled: false });
+      // @ts-expect-error
+      expect(JSON.parse(off.content[0].text).message).toBe('Hook disabled');
+    });
+
     it('handles error bounds catch on evaluating page switch', async () => {
       vi.mocked(evaluateWithTimeout).mockRejectedValue(new Error('err'));
       const res = await handlers.handleAIHookToggle({ hookId: 'test1' });
@@ -373,6 +385,67 @@ describe('AIHookToolHandlers', () => {
       const res = await handlers.handleAIHookExport({});
       // @ts-expect-error
       expect(res.content[0].text).toContain('"success": false');
+    });
+
+    it('renders csv output for a single hook when format=csv', async () => {
+      vi.mocked(evaluateWithTimeout).mockResolvedValue({
+        hookId: 'test1',
+        records: [
+          { ts: 1, url: 'a?x=1', stack: ['f1', 'f2'] },
+          { ts: 2, url: 'b', stack: [] },
+        ],
+      });
+      const res = await handlers.handleAIHookExport({ hookId: 'test1', format: 'csv' });
+      // @ts-expect-error
+      const parsed = JSON.parse(res.content[0].text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.format).toBe('csv');
+      const csv = parsed.data as string;
+      expect(csv.split('\n')[0]).toBe('ts,url,stack');
+      expect(csv).toContain('"1","a?x=1"');
+      expect(csv).toContain('"2","b"');
+      // JSON cell values are escaped with doubled quotes
+      expect(csv).toContain('"[""f1"",""f2""]"');
+    });
+
+    it('renders csv output for all hooks with a hookId column when format=csv', async () => {
+      vi.mocked(evaluateWithTimeout).mockResolvedValue({
+        metadata: {},
+        records: { h1: [{ ts: 1 }], h2: [{ ts: 2 }] },
+      });
+      const res = await handlers.handleAIHookExport({ format: 'csv' });
+      // @ts-expect-error
+      const parsed = JSON.parse(res.content[0].text);
+      expect(parsed.format).toBe('csv');
+      const csv = parsed.data as string;
+      expect(csv.split('\n')[0]).toBe('hookId,ts');
+      expect(csv).toContain('"h1","1"');
+      expect(csv).toContain('"h2","2"');
+    });
+
+    it('keeps raw json object shape when format=json', async () => {
+      vi.mocked(evaluateWithTimeout).mockResolvedValue({
+        hookId: 'test1',
+        records: [{ ts: 1 }],
+      });
+      const res = await handlers.handleAIHookExport({ hookId: 'test1', format: 'json' });
+      // @ts-expect-error
+      const parsed = JSON.parse(res.content[0].text);
+      expect(parsed.format).toBe('json');
+      expect(parsed.data).toEqual({ hookId: 'test1', records: [{ ts: 1 }] });
+    });
+  });
+
+  describe('toCsvRows', () => {
+    it('returns empty string for empty or malformed input', () => {
+      expect(toCsvRows([])).toBe('');
+      expect(toCsvRows({})).toBe('');
+      expect(toCsvRows({ h1: 'not-an-array' } as unknown as Record<string, never[]>)).toBe('');
+    });
+
+    it('escapes embedded quotes per RFC 4180', () => {
+      const csv = toCsvRows([{ msg: 'say "hi"' }]);
+      expect(csv).toContain('"say ""hi"""');
     });
   });
 });

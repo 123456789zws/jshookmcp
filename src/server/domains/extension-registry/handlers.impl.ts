@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PluginRegistry, WebhookBridge } from '@modules/extension-registry';
 import type { RegisteredPluginManifest } from '@modules/extension-registry';
-import { CommandQueue, WebhookServer } from '@server/webhook';
+import { CommandQueueImpl, WebhookServer } from '@server/webhook';
 import {
   argObject,
   argString,
@@ -14,10 +14,13 @@ import { handleSafe } from '@server/domains/shared/ResponseBuilder';
 import { asJsonResponse } from '@server/domains/shared/response';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import { getProjectRoot } from '@utils/outputPaths';
+import { isRecord } from '@utils/type-guards';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+/**
+ * Fallback semantic version assigned to plugins that ship no `version` field
+ * (URL sources, bare JS files, or package.json without one).
+ */
+const DEFAULT_PLUGIN_VERSION = '0.0.0';
 
 function isCallable(value: unknown): value is (input: unknown) => unknown {
   return typeof value === 'function';
@@ -95,7 +98,6 @@ function toManifestCandidate(record: Record<string, unknown>): Partial<Registere
 
 export class ExtensionRegistryHandlers {
   private webhookServer?: WebhookServer;
-  private commandQueue?: CommandQueue;
 
   constructor(
     private registry?: PluginRegistry,
@@ -313,10 +315,11 @@ export class ExtensionRegistryHandlers {
 
   getWebhookServer(): WebhookServer {
     if (!this.webhookServer) {
-      this.commandQueue = new CommandQueue();
-      this.webhookServer = new WebhookServer({
-        commandQueue: this.commandQueue,
-      });
+      // The server owns its CommandQueue (see WebhookServerImpl): enqueues and
+      // the HTTP handler always share one instance, and stopping the server
+      // releases the queue with it — no orphaned queue can accumulate commands
+      // no server will ever drain.
+      this.webhookServer = new WebhookServer();
     }
     return this.webhookServer;
   }
@@ -332,7 +335,6 @@ export class ExtensionRegistryHandlers {
     if (this.webhookServer) {
       await this.webhookServer.stop();
       this.webhookServer = undefined;
-      this.commandQueue = undefined;
     }
   }
 
@@ -352,11 +354,10 @@ export class ExtensionRegistryHandlers {
     return this.webhook;
   }
 
-  private getCommandQueue(): CommandQueue {
-    if (!this.commandQueue) {
-      this.commandQueue = new CommandQueue();
-    }
-    return this.commandQueue;
+  private getCommandQueue(): CommandQueueImpl {
+    // Always the server-owned queue — a queue created here independently would
+    // be invisible to the HTTP handler and silently accumulate commands.
+    return this.getWebhookServer().getCommandQueue();
   }
 
   private async resolveInstallManifest(args: ToolArgs): Promise<RegisteredPluginManifest> {
@@ -386,7 +387,7 @@ export class ExtensionRegistryHandlers {
     return {
       id: merged.id ?? name,
       name,
-      version: merged.version ?? '0.0.0',
+      version: merged.version ?? DEFAULT_PLUGIN_VERSION,
       entry,
       permissions: merged.permissions ?? [],
     };
@@ -397,7 +398,7 @@ export class ExtensionRegistryHandlers {
       return {
         id: moduleNameFromSource(source),
         name: moduleNameFromSource(source),
-        version: '0.0.0',
+        version: DEFAULT_PLUGIN_VERSION,
         entry: source,
       };
     }
@@ -421,7 +422,7 @@ export class ExtensionRegistryHandlers {
     return {
       id: moduleNameFromSource(resolved),
       name: moduleNameFromSource(resolved),
-      version: '0.0.0',
+      version: DEFAULT_PLUGIN_VERSION,
       entry: pathToFileURL(resolved).href,
     };
   }
@@ -441,7 +442,7 @@ export class ExtensionRegistryHandlers {
     return {
       id: cleanString(pkg.id) ?? cleanString(pkg.name),
       name: cleanString(pkg.name),
-      version: cleanString(pkg.version) ?? '0.0.0',
+      version: cleanString(pkg.version) ?? DEFAULT_PLUGIN_VERSION,
       entry: resolvedEntry,
       permissions: extractPackagePermissions(pkg),
     };

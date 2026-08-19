@@ -6,6 +6,25 @@ import { logger } from '@utils/logger';
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
+/** Chunked-envelope format name used by compressStream. */
+const CHUNKED_FORMAT = 'code-compressor-chunks';
+/** JSON envelope marker used by compressStream to wrap per-chunk payloads. */
+const CHUNKED_FORMAT_PREFIX = `{"format":"${CHUNKED_FORMAT}"`;
+/** Base (ms) for the linear retry backoff: `base * attempt`. */
+const RETRY_BACKOFF_BASE_MS = 100;
+/** Compression-level selection tiers (bytes). */
+const LEVEL_SMALL_THRESHOLD_BYTES = 10 * 1024;
+const LEVEL_MEDIUM_THRESHOLD_BYTES = 100 * 1024;
+const LEVEL_LARGE_THRESHOLD_BYTES = 1024 * 1024;
+/** gzip levels chosen per size tier. */
+const LEVEL_SMALL = 1;
+const LEVEL_MEDIUM = 6;
+const LEVEL_LARGE = 9;
+/** Default compression level for compress() when no tier applies. */
+const DEFAULT_LEVEL = LEVEL_MEDIUM;
+/** Default `shouldCompress` threshold (bytes) — content below this is kept raw. */
+const COMPRESS_MIN_THRESHOLD_BYTES = 1024;
+
 export interface CompressedCode {
   compressed: string;
   originalSize: number;
@@ -52,7 +71,6 @@ interface CacheEntry {
 }
 
 export class CodeCompressor {
-  private readonly DEFAULT_LEVEL = 6;
   private readonly DEFAULT_CHUNK_SIZE = 100 * 1024;
   private readonly DEFAULT_CONCURRENCY = 5;
   private readonly DEFAULT_MAX_RETRIES = 3;
@@ -73,7 +91,7 @@ export class CodeCompressor {
 
   async compress(code: string, options: CompressOptions = {}): Promise<CompressedCode> {
     const startTime = Date.now();
-    const level = options.level ?? this.DEFAULT_LEVEL;
+    const level = options.level ?? DEFAULT_LEVEL;
     const useCache = options.useCache ?? true;
     const maxRetries = options.maxRetries ?? this.DEFAULT_MAX_RETRIES;
 
@@ -151,7 +169,9 @@ export class CodeCompressor {
         logger.warn(`Compression attempt ${attempt + 1}/${maxRetries} failed:`, error);
 
         if (attempt < maxRetries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+          await new Promise((resolve) =>
+            setTimeout(resolve, RETRY_BACKOFF_BASE_MS * (attempt + 1)),
+          );
         }
       }
     }
@@ -160,20 +180,40 @@ export class CodeCompressor {
     throw lastError || new Error('Compression failed');
   }
 
-  async decompress(compressed: string, maxRetries: number = 3): Promise<string> {
+  async decompress(compressed: string, maxRetries?: number): Promise<string> {
+    const retries = maxRetries ?? this.DEFAULT_MAX_RETRIES;
+    // Multi-chunk payload produced by compressStream: a JSON envelope whose
+    // chunks are individually gzip+base64 compressed.
+    if (compressed.startsWith(CHUNKED_FORMAT_PREFIX)) {
+      try {
+        const parsed = JSON.parse(compressed) as { chunks?: string[] };
+        if (parsed.chunks) {
+          const parts = await Promise.all(
+            parsed.chunks.map((chunk) => this.decompress(chunk, retries)),
+          );
+          return parts.join('');
+        }
+      } catch (error) {
+        logger.error('Failed to decompress chunked payload:', error);
+        throw new Error('Failed to decompress chunked payload', { cause: error });
+      }
+    }
+
     let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+    for (let attempt = 0; attempt < retries; attempt++) {
       try {
         const buffer = Buffer.from(compressed, 'base64');
         const decompressed = await gunzipAsync(buffer);
         return decompressed.toString('utf-8');
       } catch (error) {
         lastError = error as Error;
-        logger.warn(`Decompression attempt ${attempt + 1}/${maxRetries} failed:`, error);
+        logger.warn(`Decompression attempt ${attempt + 1}/${retries} failed:`, error);
 
-        if (attempt < maxRetries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        if (attempt < retries - 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, RETRY_BACKOFF_BASE_MS * (attempt + 1)),
+          );
         }
       }
     }
@@ -254,19 +294,19 @@ export class CodeCompressor {
     return results;
   }
 
-  shouldCompress(code: string, threshold: number = 1024): boolean {
+  shouldCompress(code: string, threshold: number = COMPRESS_MIN_THRESHOLD_BYTES): boolean {
     return code.length > threshold;
   }
 
   selectCompressionLevel(size: number): number {
-    if (size < 10 * 1024) {
-      return 1;
-    } else if (size < 100 * 1024) {
-      return 6;
-    } else if (size < 1024 * 1024) {
-      return 9;
+    if (size < LEVEL_SMALL_THRESHOLD_BYTES) {
+      return LEVEL_SMALL;
+    } else if (size < LEVEL_MEDIUM_THRESHOLD_BYTES) {
+      return LEVEL_MEDIUM;
+    } else if (size < LEVEL_LARGE_THRESHOLD_BYTES) {
+      return LEVEL_LARGE;
     } else {
-      return 6;
+      return LEVEL_MEDIUM;
     }
   }
 
@@ -290,11 +330,13 @@ export class CodeCompressor {
       }
     }
 
-    const combined = JSON.stringify(chunks);
-    const finalCompressed = Buffer.from(combined).toString('base64');
+    const combined = JSON.stringify({ format: CHUNKED_FORMAT, chunks });
+    // Emit the JSON envelope as-is (not re-base64'd): decompress() recognises
+    // the chunked format and restores each chunk individually.
+    const finalCompressed = combined;
 
     const originalSize = code.length;
-    const compressedSize = finalCompressed.length;
+    const compressedSize = Buffer.byteLength(finalCompressed, 'utf-8');
     const compressionRatio = (1 - compressedSize / originalSize) * 100;
     const compressionTime = Date.now() - startTime;
 
@@ -310,7 +352,7 @@ export class CodeCompressor {
       compressionRatio,
       chunks: chunks.length,
       metadata: {
-        hash: this.generateCacheKey(code, options.level ?? this.DEFAULT_LEVEL),
+        hash: this.generateCacheKey(code, options.level ?? DEFAULT_LEVEL),
         timestamp: Date.now(),
         compressionTime,
       },

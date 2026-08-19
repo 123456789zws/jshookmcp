@@ -15,6 +15,9 @@ export const GRAPHQL_MAX_QUERY_CHARS = int('GRAPHQL_MAX_QUERY_CHARS', 12_000);
 export const GRAPHQL_MAX_GRAPH_NODES = int('GRAPHQL_MAX_GRAPH_NODES', 2_000);
 export const GRAPHQL_MAX_GRAPH_EDGES = int('GRAPHQL_MAX_GRAPH_EDGES', 5_000);
 
+/** Abort timeout for a graphql_replay POST (Node-side fetch or in-page fetch). */
+export const GRAPHQL_REPLAY_FETCH_TIMEOUT_MS = int('GRAPHQL_REPLAY_FETCH_TIMEOUT_MS', 10_000);
+
 /* ================================================================== */
 /*  WASM                                                               */
 /* ================================================================== */

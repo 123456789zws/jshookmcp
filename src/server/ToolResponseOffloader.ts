@@ -18,11 +18,19 @@
  *
  * The placeholder format replaces large values in-place:
  *   { _offload: { type: 'detailId' | 'file', path?: string, detailId?: string, size: number } }
+ *
+ * offload() is async: file writes complete before the response is returned, so
+ * the placeholder always carries a real, readable path (the previous design
+ * deferred the write to an offloadAsync() pass that could never reconstruct the
+ * already-replaced payload — the placeholder never reached disk).
  */
 
+import { promises as fs } from 'node:fs';
 import { DetailedDataManager } from '@utils/DetailedDataManager';
-import { sanitizeForCache, formatSize, DATA_URI_RE } from '@utils/sanitizeForCache';
+import { sanitizeForCache, formatSize, DATA_URI_RE, getOffloadDir } from '@utils/sanitizeForCache';
+import { resolveArtifactPath } from '@utils/artifacts';
 import { logger } from '@utils/logger';
+import { OFFLOADER_DETAIL_THRESHOLD_BYTES, OFFLOADER_FILE_THRESHOLD_BYTES } from '@src/constants';
 
 export interface OffloaderConfig {
   /** Strings larger than this (bytes) go to DetailedDataManager. Default: 512KB */
@@ -38,7 +46,7 @@ export interface OffloaderConfig {
 interface OffloadPlaceholder {
   _offload: {
     type: 'detailId' | 'file';
-    /** Absolute path (type=file) */
+    /** Project-relative path (type=file) */
     path?: string;
     /** Detail ID (type=detailId) */
     detailId?: string;
@@ -55,14 +63,16 @@ export class LargeDataOffloader {
   private readonly detailThreshold: number;
   private readonly fileThreshold: number;
   private readonly excludeTools: Set<string>;
+  private readonly outputDir: string;
 
   constructor(
     private readonly detailedData: DetailedDataManager,
     config: OffloaderConfig = {},
   ) {
-    this.detailThreshold = config.detailThreshold ?? 512 * 1024; // 512KB
-    this.fileThreshold = config.fileThreshold ?? 4 * 1024 * 1024; // 4MB
+    this.detailThreshold = config.detailThreshold ?? OFFLOADER_DETAIL_THRESHOLD_BYTES;
+    this.fileThreshold = config.fileThreshold ?? OFFLOADER_FILE_THRESHOLD_BYTES;
     this.excludeTools = config.excludeTools ?? new Set();
+    this.outputDir = config.outputDir ?? getOffloadDir();
   }
 
   /**
@@ -88,6 +98,41 @@ export class LargeDataOffloader {
   }
 
   /**
+   * Write raw string bytes to the offload directory and return the
+   * project-relative path. Data URIs are persisted as decoded binary; anything
+   * else as UTF-8 text.
+   *
+   * Reuses the shared artifact path resolver from `src/utils/artifacts.ts`
+   * (same timestamped/shortId filename template), which also applies the
+   * PathGuard the previous local copy lacked — a configured outputDir that
+   * escapes the project root is rejected instead of silently writing outside.
+   */
+  private async writeOffloadedFile(
+    raw: string,
+    mimeType: string | undefined,
+  ): Promise<{ path: string; size: string }> {
+    const { absolutePath, displayPath } = await resolveArtifactPath({
+      category: 'offloaded',
+      toolName: 'offload',
+      ext: mimeType ? 'bin' : 'txt',
+      customDir: this.outputDir,
+    });
+
+    if (mimeType) {
+      const dataUriMatch = raw.match(DATA_URI_RE);
+      const base64 = dataUriMatch ? raw.slice(dataUriMatch[0].length) : raw;
+      await fs.writeFile(absolutePath, Buffer.from(base64, 'base64'));
+    } else {
+      await fs.writeFile(absolutePath, raw, 'utf8');
+    }
+
+    return {
+      path: displayPath,
+      size: formatSize(raw.length),
+    };
+  }
+
+  /**
    * Detect a "detail wrapper" response shape — an object carrying a string
    * `detailId` plus a `data` / `summary` / `preview` payload field. These come
    * from get_detailed_data and similar tools; their payload may contain
@@ -102,6 +147,8 @@ export class LargeDataOffloader {
 
   /**
    * Try to parse a string as JSON. Returns the parsed object or null.
+   * Parse failures are not errors — non-JSON strings simply fall through to
+   * the raw-string offload path.
    */
   private tryParseJson(str: string): unknown | null {
     try {
@@ -119,11 +166,15 @@ export class LargeDataOffloader {
   }
 
   /**
-   * Offload large data in a tool response. Mutates the response in-place.
+   * Offload large data in a tool response. Mutates the response in-place and
+   * actually writes offloaded files before returning.
    *
    * Returns the same response object (mutated) for chaining convenience.
    */
-  offload<T extends { content?: unknown[]; isError?: boolean }>(toolName: string, response: T): T {
+  async offload<T extends { content?: unknown[]; isError?: boolean }>(
+    toolName: string,
+    response: T,
+  ): Promise<T> {
     if (response.isError) return response;
     if (this.excludeTools.has(toolName)) return response;
 
@@ -163,22 +214,18 @@ export class LargeDataOffloader {
       if (DETAILID_RE.test(text)) continue;
 
       // ── Data URI (base64 image) → write binary file ──
-      if (DATA_URI_RE.test(text)) {
-        // Fire-and-forget: we can't make this async cleanly here without changing
-        // the return signature. We use a synchronous placeholder for now.
-        // The actual write is deferred — callers who need the path should use
-        // writeDataUriToFile() directly or await offloadAsync().
+      const dataUriMatch = text.match(DATA_URI_RE);
+      if (dataUriMatch) {
+        const file = await this.writeOffloadedFile(text, dataUriMatch[1]);
         content[i] = {
           ...record,
           text: JSON.stringify(
             {
               _offload: {
                 type: 'file',
-                pending: true,
-                dataUriLength: text.length,
-                hint: `Use get_detailed_data() or read file after async offload completes`,
-                size: formatSize(text.length),
-                mimeType: text.match(DATA_URI_RE)?.[1] ?? 'application/octet-stream',
+                path: file.path,
+                size: file.size,
+                mimeType: dataUriMatch[1],
               },
             },
             null,
@@ -202,15 +249,15 @@ export class LargeDataOffloader {
 
       // ── Large non-JSON string → file ──
       if (text.length >= this.fileThreshold) {
+        const file = await this.writeOffloadedFile(text, undefined);
         content[i] = {
           ...record,
           text: JSON.stringify(
             {
               _offload: {
                 type: 'file',
-                pending: true,
-                hint: 'Large raw string — use get_detailed_data() or await async offload',
-                size: formatSize(text.length),
+                path: file.path,
+                size: file.size,
               },
             },
             null,
@@ -225,57 +272,6 @@ export class LargeDataOffloader {
     if (changed) {
       logger.debug(`[Offloader] Offloaded large data from ${toolName}`);
     }
-    return response;
-  }
-
-  /**
-   * Async version — actually writes pending files.
-   * Call this after offload() to flush pending writes.
-   * Returns the same response (mutated).
-   */
-  async offloadAsync<T extends { content?: unknown[]; isError?: boolean }>(
-    toolName: string,
-    response: T,
-  ): Promise<T> {
-    if (response.isError) return response;
-    if (this.excludeTools.has(toolName)) return response;
-
-    const content = response.content;
-    if (!Array.isArray(content)) return response;
-
-    for (let i = 0; i < content.length; i++) {
-      const entry = content[i];
-      if (typeof entry !== 'object' || entry === null) continue;
-
-      const record = entry as Record<string, unknown>;
-      if (record.type !== 'text') continue;
-
-      const text = record.text as string | undefined;
-      if (typeof text !== 'string') continue;
-
-      // Check for pending offload placeholder
-      try {
-        const parsed = JSON.parse(text);
-        /* eslint-disable no-underscore-dangle */
-        if (parsed?._offload?.pending) {
-          // Actually write the file now
-          if (
-            DATA_URI_RE.test(
-              parsed._offload.mimeType ? `data:${parsed._offload.mimeType};base64,` : '',
-            )
-          ) {
-            /* eslint-enable no-underscore-dangle */
-            // Re-extract from original... but we already consumed it above.
-            // For simplicity: skip async write if we can't re-extract.
-            // The sync offload() already provided a placeholder.
-            logger.debug(`[Offloader] Skipping async write for already-placeholdered entry ${i}`);
-          }
-        }
-      } catch {
-        // Not JSON — ignore
-      }
-    }
-
     return response;
   }
 }

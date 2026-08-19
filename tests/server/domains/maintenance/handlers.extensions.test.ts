@@ -4,6 +4,7 @@ import {
   summarizeExtensionIntegrity,
   type ExtensionIntegrityEntry,
 } from '@server/domains/maintenance/handlers/extension-integrity-utils';
+import { EXTENSION_GIT_CLONE_TIMEOUT_MS, EXTENSION_INSTALL_TIMEOUT_MS } from '@src/constants';
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
@@ -665,6 +666,70 @@ describe('ExtensionManagementHandlers', () => {
       expect([installCall![0], ...((installCall![1] as string[]) || [])].join(' ')).toContain(
         '--ignore-workspace',
       );
+    });
+
+    it('applies the install timeout floor to install and build steps', async () => {
+      const mockFetch = global.fetch as any;
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          plugins: [
+            {
+              slug: 'pl-test',
+              id: '2',
+              meta: {},
+              source: { subpath: 'path', entry: 'a.js' },
+            },
+          ],
+        }),
+      });
+
+      vi.mocked(fs.existsSync).mockImplementation(((p: string) => {
+        if (
+          p.endsWith('a.js') ||
+          p.endsWith('pnpm-lock.yaml') ||
+          p.endsWith('package-lock.json') ||
+          p.endsWith('package.json')
+        )
+          return true;
+        return false;
+      }) as unknown as typeof fs.existsSync);
+      vi.mocked(fsPromises.readFile).mockImplementation((async (p: string) => {
+        if (p.endsWith('package.json')) {
+          return JSON.stringify({
+            dependencies: { '@jshookmcp/extension-sdk': '^0.3.2' },
+          });
+        }
+        return '{}';
+      }) as unknown as typeof fsPromises.readFile);
+
+      ctx.reloadExtensions.mockResolvedValue({
+        addedTools: 1,
+        autoActivatedTools: [],
+        pluginCount: 0,
+        workflowCount: 0,
+        toolCount: 1,
+        activeToolCount: 1,
+        currentProfile: 'workflow',
+        errors: [],
+        warnings: [],
+      });
+      const resPromise = handlers.handleInstallExtension('pl-test') as any;
+      vi.runAllTimers();
+      await resPromise;
+
+      const execCalls = vi.mocked(child_process.execFile).mock.calls;
+      const installCall = execCalls.find((c) =>
+        [c[0], ...((c[1] || []) as string[])].join(' ').includes('--ignore-workspace install'),
+      );
+      const buildCall = execCalls.find((c) =>
+        [c[0], ...((c[1] || []) as string[])].join(' ').includes('--if-present build'),
+      );
+      expect(installCall).toBeDefined();
+      expect(buildCall).toBeDefined();
+      const expected = Math.max(EXTENSION_GIT_CLONE_TIMEOUT_MS, EXTENSION_INSTALL_TIMEOUT_MS);
+      expect((installCall![2] as { timeout?: number }).timeout).toBe(expected);
+      expect((buildCall![2] as { timeout?: number }).timeout).toBe(expected);
     });
 
     it('resolves package manager npm if package-lock.json exists without pnpm', async () => {

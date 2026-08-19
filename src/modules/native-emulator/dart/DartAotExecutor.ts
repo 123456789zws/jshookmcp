@@ -14,7 +14,7 @@
 
 import { CpuEngine, type InstructionHook, type TraceEvent } from '../CpuEngine';
 import { DartAotLoader, type LoadedSnapshot } from './DartAotLoader';
-import { DartRuntime, DART_PP } from './DartRuntime';
+import { DartRuntime, DART_PP, DART_THR, DART_NULL, DART_HEAP_BASE } from './DartRuntime';
 import { ObjectPoolRegistry } from './ObjectPool';
 import { ToolError } from '@errors/ToolError';
 
@@ -104,13 +104,20 @@ export class DartAotExecutor {
 
     this.dartRuntime.initializeRuntime(threadPtr, 0n, nullObject, heapBase);
 
-    // Build ObjectPool registry
+    // Build ObjectPool registry. The registry stores pools as raw bytes in the
+    // ObjectPool on-disk layout (+0x00 u32 length, +0x04 padding, +0x08 8-byte
+    // entries), so serialise the parsed entries — an all-zero buffer would make
+    // every pool read as a header of zero entries.
     this.poolRegistry = new ObjectPoolRegistry();
     for (const { address, pool } of this.snapshot.objectPools) {
-      this.poolRegistry.register(
-        address,
-        pool.getAllEntries().length > 0 ? new Uint8Array(pool.getLength() * 8) : new Uint8Array(0),
-      );
+      const entries = pool.getAllEntries();
+      const data = new Uint8Array(8 + entries.length * 8);
+      const view = new DataView(data.buffer);
+      view.setUint32(0, entries.length, true);
+      for (let i = 0; i < entries.length; i++) {
+        view.setBigUint64(8 + i * 8, entries[i]!.value, true);
+      }
+      this.poolRegistry.register(address, data);
     }
 
     // Register Dart built-in stubs
@@ -152,15 +159,6 @@ export class DartAotExecutor {
       this.dartRuntime.setObjectPool(code.objectPool);
     }
 
-    // Set up arguments (x0, x1, x2, ...)
-    const args = options.args ?? [];
-    for (let i = 0; i < args.length && i < 8; i++) {
-      const arg = args[i];
-      if (arg !== undefined) {
-        this.cpu.writeGpr(i, arg);
-      }
-    }
-
     // Set up instruction trace if requested
     const trace: DartCallResult['trace'] = [];
 
@@ -190,10 +188,28 @@ export class DartAotExecutor {
     let error: string | undefined;
 
     try {
-      // In a real implementation, we'd call cpu.callSymbol(entryPoint)
-      // For now, simulate execution
-      returnValue = 0n; // Mock return value
-      steps = 1;
+      // callGuestFunction → invokeGuest zeros x0–x28 before every call.
+      // The Dart runtime registers (THR/PP/NULL/HEAP_BASE) MUST be passed
+      // as initRegisters so they survive the zeroing loop — without them every
+      // Dart AOT instruction that reads PP/THR would dereference address 0.
+      const rawResult = this.cpu.callGuestFunction(
+        Number(entryPoint),
+        options.args ?? [],
+        options.maxSteps,
+        this.dartRuntime
+          ? {
+              [DART_THR]: this.dartRuntime.readDartRegister(DART_THR) ?? 0n,
+              [DART_PP]: this.dartRuntime.readDartRegister(DART_PP) ?? 0n,
+              [DART_NULL]: this.dartRuntime.readDartRegister(DART_NULL) ?? 0n,
+              [DART_HEAP_BASE]: this.dartRuntime.readDartRegister(DART_HEAP_BASE) ?? 0n,
+            }
+          : undefined,
+      );
+      returnValue = BigInt(rawResult);
+      // callGuestFunction returns only x0; per-step count is not exposed
+      // through the public API. Use the trace length when available, otherwise
+      // report -1 to signal "executed but steps unknown".
+      steps = options.trace && trace.length > 0 ? trace.length : -1;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }

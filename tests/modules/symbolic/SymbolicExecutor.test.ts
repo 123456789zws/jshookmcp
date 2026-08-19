@@ -1,6 +1,4 @@
 import * as parser from '@babel/parser';
-import traverse, { type NodePath } from '@babel/traverse';
-import * as t from '@babel/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SymbolicExecutor, type Constraint } from '@modules/symbolic/SymbolicExecutor';
 
@@ -75,50 +73,36 @@ describe('SymbolicExecutor', () => {
       { sourceType: 'module', plugins: ['typescript'], errorRecovery: true },
     );
 
-    const nodes: { type: string; index: number }[] = [];
-    traverse(ast, {
-      enter(path: NodePath<t.Node>) {
-        nodes.push({ type: path.node.type, index: nodes.length });
-      },
-    });
+    // Statement table (blocks are containers, not steps):
+    // 0 let x, 1 if, 2 x=2, 3 x=3, 4 while, 5 break, 6 for, 7 continue, 8 x=4, 9 x++
+    const table = executor.buildStatementTable(ast);
+    expect(table.entries).toHaveLength(10);
 
-    const variableDeclarationIndex = nodes.find(
-      (node) => node.type === 'VariableDeclaration',
-    )?.index;
-    const ifStatementIndex = nodes.find((node) => node.type === 'IfStatement')?.index;
-    const whileStatementIndex = nodes.find((node) => node.type === 'WhileStatement')?.index;
-    const forStatementIndex = nodes.find((node) => node.type === 'ForStatement')?.index;
-    const assignmentIndex = nodes.find((node) => node.type === 'AssignmentExpression')?.index;
-    const numericLiteralIndex = nodes.find((node) => node.type === 'NumericLiteral')?.index;
+    expect(executor.executeStep(makeState(0), ast, table)).toHaveLength(1);
 
-    expect(variableDeclarationIndex).toBeDefined();
-    expect(ifStatementIndex).toBeDefined();
-    expect(whileStatementIndex).toBeDefined();
-    expect(forStatementIndex).toBeDefined();
-    expect(assignmentIndex).toBeDefined();
-    expect(numericLiteralIndex).toBeDefined();
-
-    expect(executor.executeStep(makeState(variableDeclarationIndex!), ast)).toHaveLength(1);
-
-    const ifStates = executor.executeStep(makeState(ifStatementIndex!), ast);
+    const ifStates = executor.executeStep(makeState(1), ast, table);
     expect(ifStates).toHaveLength(2);
     expect(ifStates[0].pathConstraints[0]?.expression).toContain('x');
+    expect(ifStates[0].pc).toBe(2);
+    expect(ifStates[1].pc).toBe(4);
 
-    const loopStates = executor.executeStep(makeState(whileStatementIndex!), ast);
+    const loopStates = executor.executeStep(makeState(4), ast, table);
     expect(loopStates).toHaveLength(2);
-    expect(loopStates[0].pc).toBe(whileStatementIndex! + 1);
-    expect(loopStates[1].pc).toBe(whileStatementIndex! + 2);
+    expect(loopStates[0].pc).toBe(5); // enter the while body
+    expect(loopStates[1].pc).toBe(6); // skip past the loop
 
-    const forStates = executor.executeStep(makeState(forStatementIndex!), ast);
+    const forStates = executor.executeStep(makeState(6), ast, table);
     expect(forStates).toHaveLength(2);
+    expect(forStates[0].pc).toBe(7);
+    expect(forStates[1].pc).toBe(8);
 
-    const assignmentStates = executor.executeStep(makeState(assignmentIndex!), ast);
+    const assignmentStates = executor.executeStep(makeState(8), ast, table);
     expect(assignmentStates).toHaveLength(1);
     expect(assignmentStates[0].memory.size).toBeGreaterThan(0);
 
-    const fallbackStates = executor.executeStep(makeState(numericLiteralIndex!), ast);
+    const fallbackStates = executor.executeStep(makeState(9), ast, table);
     expect(fallbackStates).toHaveLength(1);
-    expect(fallbackStates[0].pc).toBe(numericLiteralIndex! + 1);
+    expect(fallbackStates[0].pc).toBe(10);
 
     expect(executor.nodeToString(parser.parseExpression('a + 1'))).toBe('a + 1');
     expect(executor.nodeToString(parser.parseExpression('!flag'))).toBe('!flag');

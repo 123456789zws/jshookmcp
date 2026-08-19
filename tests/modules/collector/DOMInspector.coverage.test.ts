@@ -674,13 +674,13 @@ describe('DOMInspector – additional coverage', () => {
       documentElement: { clientHeight: 300, clientWidth: 400 },
       body: root,
       evaluate: vi.fn((xpath: string) => {
-        if (xpath.includes('contains(text(), "Click")')) {
+        if (xpath.includes("contains(text(), 'Click')")) {
           return {
             snapshotLength: 2,
             snapshotItem: (index: number) => (index === 0 ? visibleElement : hiddenElement),
           };
         }
-        if (xpath.includes('contains(text(), "Link")')) {
+        if (xpath.includes("contains(text(), 'Link')")) {
           return {
             snapshotLength: 1,
             snapshotItem: () => siblingTwo,
@@ -859,7 +859,8 @@ describe('DOMInspector – additional coverage', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0]?.nodeName).toBe('A');
-      expect(page.evaluate).toHaveBeenCalledWith(expect.any(Function), 'Link', 'a');
+      // String-built evaluation (single function arg, no text/tag args).
+      expect(page.evaluate).toHaveBeenCalledWith(expect.any(Function));
     });
 
     it('returns empty array on error', async () => {

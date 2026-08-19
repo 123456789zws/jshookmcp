@@ -6,6 +6,24 @@ export interface Config {
   performance: PerformanceConfig;
   search: SearchConfig;
   reverseEngineering: ReverseEngineeringConfig;
+  /** Large-data response offloading (LargeDataOffloader). Optional — omitted in tests. */
+  offloader?: OffloaderConfig;
+}
+
+/**
+ * Response-offloader tuning. Mirrors the OffloaderConfig accepted by
+ * LargeDataOffloader (@server/ToolResponseOffloader); excludeTools is
+ * expressed as a string[] here because it originates from a CSV env var.
+ */
+export interface OffloaderConfig {
+  /** Strings larger than this (bytes) go to DetailedDataManager. */
+  detailThreshold?: number;
+  /** Strings larger than this (bytes) go directly to a file. */
+  fileThreshold?: number;
+  /** Subdirectory under project root for offloaded files. */
+  outputDir?: string;
+  /** Tools excluded from offloading (comma-separated env). */
+  excludeTools?: string[];
 }
 
 export interface PuppeteerConfig {
@@ -106,9 +124,19 @@ export interface ReverseEngineeringConfig {
   binaryMagic: BinaryMagicConfig;
   nativeEmulator: NativeEmulatorConfig;
   apk: ApkAnalysisConfig;
+  jadx: JadxConfig;
   dex: DexAnalysisConfig;
   frida: FridaAnalysisConfig;
   androidRuntime: AndroidRuntimeConfig;
+  collector: CollectorConfig;
+}
+
+/** Code-collection tuning used by the collector when options omit values. */
+export interface CollectorConfig {
+  /** Default navigation/collection timeout (ms) when not otherwise configured. */
+  defaultTimeoutMs: number;
+  /** How long to wait after navigation for late-loading dynamic scripts (ms). */
+  dynamicScriptWaitMs: number;
 }
 
 export interface TransformWorkbenchConfig {
@@ -140,6 +168,17 @@ export interface NativeEmulatorConfig {
   syscallCStringLimitBytes: number;
   rawMemoryMaxBytes: number;
   rawMemoryPreviewBytes: number;
+}
+
+export interface JadxConfig {
+  /** Timeout for full APK decompile (jadx_decompile_apk), ms. */
+  decompileTimeoutMs: number;
+  /** Timeout for search-targeted decompile (jadx_search_code), ms. */
+  searchTimeoutMs: number;
+  /** Timeout for single-class decompile (jadx_decompile), ms. */
+  singleClassTimeoutMs: number;
+  /** JADX thread count (--threads-count / -j). */
+  threadsCount: number;
 }
 
 export interface ApkAnalysisConfig {

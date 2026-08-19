@@ -6,7 +6,9 @@ import { argStringArray } from '@server/domains/shared/parse-args';
 import { asJsonResponse } from '@server/domains/shared/response';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import {
+  PROTO_DNS_CONFIDENCE,
   PROTO_H2_CONFIDENCE,
+  PROTO_H2_PRI_CONFIDENCE,
   PROTO_HTTP_CONFIDENCE,
   PROTO_MQTT_CONFIDENCE,
   PROTO_QUIC_CONFIDENCE,
@@ -15,6 +17,7 @@ import {
   PROTO_STUN_CONFIDENCE,
   PROTO_TLS_CONFIDENCE,
   PROTO_TLS_MIN_RECORD_LEN,
+  PROTO_TLS_RECORD_CONFIDENCE,
   PROTO_WS_CONFIDENCE,
 } from '@src/constants';
 import {
@@ -231,7 +234,7 @@ export class ProtocolAnalysisFingerprintHandlers extends ProtocolAnalysisPacketH
           deepParse = isCmd ? { command: CMD_NAMES[b1] ?? b1 } : { authMethodCount: b1 };
         }
       } else if (isDns) {
-        matches.push({ protocol: 'DNS', layer: 'L7-DNS', confidence: 0.85 });
+        matches.push({ protocol: 'DNS', layer: 'L7-DNS', confidence: PROTO_DNS_CONFIDENCE });
         if (includeHints) {
           deepParse = parseDnsHeader(clean);
         }
@@ -329,10 +332,18 @@ export class ProtocolAnalysisFingerprintHandlers extends ProtocolAnalysisPacketH
 
       if (includeKnown && matches.length === 0) {
         if (hasCompleteTlsRecord && /^160301|^160302|^160303/i.test(clean.substring(0, 8))) {
-          matches.push({ protocol: 'TLS Record', layer: 'L6-TLS', confidence: 0.9 });
+          matches.push({
+            protocol: 'TLS Record',
+            layer: 'L6-TLS',
+            confidence: PROTO_TLS_RECORD_CONFIDENCE,
+          });
         }
         if (clean.substring(0, 8).startsWith('50524920')) {
-          matches.push({ protocol: 'HTTP/2 PRI', layer: 'L7-HTTP2', confidence: 0.9 });
+          matches.push({
+            protocol: 'HTTP/2 PRI',
+            layer: 'L7-HTTP2',
+            confidence: PROTO_H2_PRI_CONFIDENCE,
+          });
         }
       }
 

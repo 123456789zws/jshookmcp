@@ -7,7 +7,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CodeInjector } from '@native/CodeInjector';
-import { ReadProcessMemory } from '@native/Win32API';
+import { ReadProcessMemory, WriteProcessMemory, VirtualProtectEx } from '@native/Win32API';
+import { FlushInstructionCache } from '@native/Win32Debug';
 
 vi.mock('@native/Win32API', () => ({
   openProcessForMemory: vi.fn(() => 1n),
@@ -19,7 +20,10 @@ vi.mock('@native/Win32API', () => ({
     return buf;
   }),
   WriteProcessMemory: vi.fn((_h: bigint, _a: bigint, data: Buffer) => data.length),
-  VirtualProtectEx: vi.fn(() => ({ success: true, oldProtect: 0x40 })),
+  // oldProtect = PAGE_EXECUTE_READ (0x20) — distinct from the requested
+  // PAGE_EXECUTE_READWRITE (0x40) so tests can tell the make-writable call
+  // apart from the restore call.
+  VirtualProtectEx: vi.fn(() => ({ success: true, oldProtect: 0x20 })),
   VirtualAllocEx: vi.fn(() => 0x20000n),
   VirtualFreeEx: vi.fn(() => true),
   VirtualQueryEx: vi.fn((_h: bigint, addr: bigint) => {
@@ -59,6 +63,9 @@ vi.mock('@native/NativeMemoryManager.utils', () => ({
 
 vi.mock('@src/constants', () => ({
   CODE_CAVE_MIN_SIZE: 8,
+  NOP_OPCODE: 0x90,
+  INJECT_CHUNK_SIZE: 4 * 1024 * 1024,
+  CODE_CAVE_SECTION_LABEL: '.text',
 }));
 
 describe('CodeInjector', () => {
@@ -112,6 +119,76 @@ describe('CodeInjector', () => {
       const patch = await injector.patchBytes(1234, '0x10000', [0xcc]);
       await injector.unpatch(patch.id);
       expect(await injector.unpatch(patch.id)).toBe(false);
+    });
+  });
+
+  describe('protection restore (VirtualProtectEx failure hygiene)', () => {
+    it('patchBytes restores the old protection when WriteProcessMemory throws', async () => {
+      // First VirtualProtectEx call (the make-writable one) succeeds.
+      vi.mocked(WriteProcessMemory).mockImplementationOnce(() => {
+        throw new Error('write failed');
+      });
+
+      await expect(injector.patchBytes(1234, '0x10000', [0x90])).rejects.toThrow('write failed');
+
+      // Restore call must still happen with the captured oldProtect (0x40).
+      const restoreCall = vi.mocked(VirtualProtectEx).mock.calls.at(-1);
+      expect(restoreCall).toBeDefined();
+      expect(restoreCall![1]).toBe(0x10000n);
+      expect(restoreCall![3]).toBe(0x20); // oldProtect, not PAGE_EXECUTE_READWRITE
+    });
+
+    it('patchBytes restores the old protection when FlushInstructionCache throws', async () => {
+      vi.mocked(FlushInstructionCache).mockImplementationOnce(() => {
+        throw new Error('flush failed');
+      });
+
+      await expect(injector.patchBytes(1234, '0x10000', [0x90])).rejects.toThrow('flush failed');
+
+      const restoreCall = vi.mocked(VirtualProtectEx).mock.calls.at(-1);
+      expect(restoreCall![3]).toBe(0x20);
+    });
+
+    it('patchBytes skips the restore when VirtualProtectEx itself failed', async () => {
+      // Fail the make-writable VirtualProtectEx: nothing changed, nothing to restore.
+      vi.mocked(VirtualProtectEx).mockImplementationOnce(() => ({
+        success: false,
+        oldProtect: 0,
+      }));
+
+      const patch = await injector.patchBytes(1234, '0x10000', [0x90]);
+      expect(patch.isApplied).toBe(true);
+      // Exactly one VirtualProtectEx call — no bogus restore attempt.
+      expect(vi.mocked(VirtualProtectEx)).toHaveBeenCalledTimes(1);
+    });
+
+    it('unpatch restores the old protection when WriteProcessMemory throws', async () => {
+      const patch = await injector.patchBytes(1234, '0x10000', [0xcc]);
+      vi.mocked(WriteProcessMemory).mockImplementationOnce(() => {
+        throw new Error('restore write failed');
+      });
+
+      await expect(injector.unpatch(patch.id)).rejects.toThrow('restore write failed');
+
+      // Protection restored and the patch is still marked applied (not silently
+      // half-unpatched).
+      const restoreCall = vi.mocked(VirtualProtectEx).mock.calls.at(-1);
+      expect(restoreCall![3]).toBe(0x20);
+      expect(patch.isApplied).toBe(true);
+    });
+
+    it('unpatch aborts when VirtualProtectEx fails instead of writing blind', async () => {
+      const patch = await injector.patchBytes(1234, '0x10000', [0xcc]);
+      vi.mocked(VirtualProtectEx).mockImplementationOnce(() => ({
+        success: false,
+        oldProtect: 0,
+      }));
+
+      await expect(injector.unpatch(patch.id)).rejects.toThrow(/VirtualProtectEx failed/);
+      // No write attempted into a still-unwritable page.
+      const writesAfterFail = vi.mocked(WriteProcessMemory).mock.calls.length;
+      expect(writesAfterFail).toBe(1); // only the original patchBytes write
+      expect(patch.isApplied).toBe(true);
     });
   });
 

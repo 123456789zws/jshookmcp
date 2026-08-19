@@ -8,8 +8,12 @@ export function nativeDiagnostics(session: EmulatorSession): Record<string, unkn
     unresolvedImports: [...session.emulator.engine.unresolvedImports()],
     constructorFaults: [...session.emulator.engine.constructorFaultLog()],
   };
+  const patches = session.emulator.engine.nullCallPatches;
+  if (patches.length > 0) diag.autoNopPatches = [...patches];
   const jni = session.emulator.jniDiagnostics?.();
   if (jni && jni.length > 0) diag.jniStubCalls = jni;
+  const dlsym = session.emulator.bionicDlsymDiagnostics();
+  if (dlsym && dlsym.length > 0) diag.dlsymLookups = dlsym;
   return diag;
 }
 

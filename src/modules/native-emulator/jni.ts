@@ -86,6 +86,7 @@ export const JNI_INDEX = {
   ReleaseStringUTFChars: 170,
   GetArrayLength: 171,
   // Object arrays.
+  NewObject: 28,
   NewObjectArray: 172,
   GetObjectArrayElement: 173,
   SetObjectArrayElement: 174,
@@ -98,6 +99,17 @@ export const JNI_INDEX = {
   GetJavaVM: 219,
   NewWeakGlobalRef: 226,
   DeleteWeakGlobalRef: 227,
+  UnregisterNatives: 216,
+  MonitorEnter: 217,
+  MonitorExit: 218,
+  // Extended indices — custom functions beyond the standard Oracle JNI table
+  // (e.g. libmetasec_ml.so's VMP dispatch bridges into Java reflection at slots 280+)
+  ExtFunc_280: 280,
+  ExtFunc_300: 300,
+  ExtFunc_316: 316,
+  ExtFunc_322: 322,
+  ExtFunc_326: 326,
+  ExtFunc_336: 336,
   // Exceptions.
   Throw: 13,
   ThrowNew: 14,
@@ -127,7 +139,7 @@ export const JNI_INVOKE_INDEX = {
   AttachCurrentThreadAsDaemon: 7,
 } as const;
 
-const TABLE_SLOTS = 232; // ≥ highest index we touch (219) + headroom.
+const TABLE_SLOTS = 400; // ≥ highest extended index (336) + headroom for future custom stubs.
 const POINTER_SIZE = 8;
 
 // Guest memory layout for the JNI scaffolding (distinct high addresses).
@@ -173,7 +185,9 @@ export class JniEnvironment {
   private handleBump = HANDLE_BASE;
 
   /** handle → host value (class/string/byte-array/etc.). */
-  private readonly handles = new Map<number, unknown>();
+  readonly handles = new Map<number, unknown>();
+  /** JNI table index → stub guest address. Populated by bind(). */
+  private readonly stubAddresses = new Map<number, number>();
   private readonly classes = new Map<string, number>(); // name → jclass handle
   private readonly classByHandle = new Map<number, JavaClass>();
   /** "className#method#sig" → fnAddr, populated by RegisterNatives. */
@@ -306,6 +320,9 @@ export class JniEnvironment {
     this.stubBump = STUB_BASE;
     this.vmStubBump = VM_STUB_BASE;
 
+    // Clear stub address map
+    this.stubAddresses.clear();
+
     // Clear pending exception
     this.pendingException = 0;
   }
@@ -322,9 +339,21 @@ export class JniEnvironment {
     return copy;
   }
 
+  /** Return a snapshot WITHOUT clearing — for trace handlers that run
+   *  after execution but shouldn't consume the log. */
+  snapshotJniDiag(): string[] {
+    return [...this.jniDiagLog];
+  }
+
+  /** Clear diagnostic log. */
+  clearJniDiag(): void {
+    this.jniDiagLog.length = 0;
+  }
+
   private installEnvTable(): void {
     this.engine.mapMemory(ENV_PTR_ADDR, POINTER_SIZE);
     this.engine.mapMemory(ENV_TABLE_ADDR, TABLE_SLOTS * POINTER_SIZE);
+    this.engine.mapMemory(STUB_BASE, TABLE_SLOTS * POINTER_SIZE); // guest data reads (ldr) from stub area
     this.writePointer(ENV_PTR_ADDR, ENV_TABLE_ADDR); // *JNIEnv = table base
 
     // Track which slots we explicitly implement, then auto-fill the rest with
@@ -334,7 +363,14 @@ export class JniEnvironment {
 
     const b = (index: number, fn: (ctx: HostContext) => bigint | number | void) => {
       filled.add(index);
-      this.bind(index, fn);
+      const name = JNI_INDEX_NAMES[index] ?? `slot_${index}`;
+      const wrapped = (ctx: HostContext): bigint | number | void => {
+        this.jniDiagLog.push(
+          `JNI: ${name} x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)} x3=0x${ctx.x(3).toString(16)} x4=0x${ctx.x(4).toString(16)} x5=0x${ctx.x(5).toString(16)} x6=0x${ctx.x(6).toString(16)} x7=0x${ctx.x(7).toString(16)}`,
+        );
+        return fn(ctx);
+      };
+      this.bind(index, wrapped);
     };
 
     b(JNI_INDEX.GetVersion, () => BigInt(JNI_VERSION_1_6));
@@ -402,6 +438,13 @@ export class JniEnvironment {
     b(JNI_INDEX.SetStaticObjectField, () => undefined);
     b(JNI_INDEX.SetStaticIntField, () => undefined);
 
+    // Object creation
+    b(JNI_INDEX.NewObject, (_ctx) => {
+      // jobject NewObject(JNIEnv*, jclass, jmethodID, ...)
+      // Return a non-NULL auto-object handle so null-checks pass.
+      return BigInt(this.allocHandle({ kind: 'auto-object', desc: 'java/lang/Object' }));
+    });
+
     // Strings & arrays
     b(JNI_INDEX.GetStringUTFLength, (ctx) => this.jniGetStringUTFLength(ctx));
     b(JNI_INDEX.GetObjectClass, (ctx) => this.jniGetObjectClass(ctx));
@@ -432,8 +475,24 @@ export class JniEnvironment {
     b(JNI_INDEX.DeleteLocalRef, () => undefined);
     b(JNI_INDEX.NewWeakGlobalRef, (ctx) => ctx.x(1));
     b(JNI_INDEX.DeleteWeakGlobalRef, () => undefined);
+    b(JNI_INDEX.UnregisterNatives, () => 0n);
+    b(JNI_INDEX.MonitorEnter, () => 0n);
+    b(JNI_INDEX.MonitorExit, () => 0n);
     b(JNI_INDEX.IsSameObject, (ctx) => (ctx.x(1) === ctx.x(2) ? 1n : 0n));
     b(JNI_INDEX.IsInstanceOf, () => 1n);
+
+    // ── Extended index stubs (280+) — return identifiable values per slot ────
+    // Each returns its own index so native callers get a distinguishable signal.
+    // Later these will be replaced with real JNI impls (FindClass, GetMethodID, etc.).
+    // Extended slots for metasec_ml dispatcher (JNI cache entries 280-336).
+    // Map guesses based on observed JNI call patterns (CallBooleanMethodV in diag).
+    // If mapping is wrong, JNI diag will show the actual call; swap to match.
+    b(JNI_INDEX.ExtFunc_280, (ctx) => this.jniFindClass(ctx)); // FindClass
+    b(JNI_INDEX.ExtFunc_300, (ctx) => this.jniGetMethodID(ctx)); // GetMethodID
+    b(JNI_INDEX.ExtFunc_316, (ctx) => this.jniGetStringUTFChars(ctx)); // GetStringUTFChars
+    b(JNI_INDEX.ExtFunc_322, (ctx) => this.jniCallMethod(ctx)); // CallObjectMethod
+    b(JNI_INDEX.ExtFunc_326, (ctx) => this.jniNewStringUTF(ctx)); // NewStringUTF
+    b(JNI_INDEX.ExtFunc_336, (ctx) => this.jniCallMethod(ctx)); // CallBooleanMethodV
 
     // ── Auto-fill every remaining NULL slot with a diagnostic stub ──────────
     // Instead of pre-baking every JNI function, we fill unfilled table entries
@@ -446,7 +505,7 @@ export class JniEnvironment {
       const slotIdx = idx; // capture for closure
       this.bind(idx, (ctx) => {
         const name = JNI_INDEX_NAMES[slotIdx] ?? `unknown_${slotIdx}`;
-        const msg = `JNI stub: ${name} (slot ${slotIdx}) x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)}`;
+        const msg = `JNI stub: ${name} (slot ${slotIdx}) x1=0x${ctx.x(1).toString(16)} x2=0x${ctx.x(2).toString(16)} x3=0x${ctx.x(3).toString(16)} x4=0x${ctx.x(4).toString(16)} x5=0x${ctx.x(5).toString(16)} x6=0x${ctx.x(6).toString(16)} x7=0x${ctx.x(7).toString(16)}`;
         this.jniDiagLog.push(msg);
         return 0n;
       });
@@ -455,10 +514,32 @@ export class JniEnvironment {
 
   private installVmTable(): void {
     this.engine.mapMemory(VM_PTR_ADDR, POINTER_SIZE);
-    this.engine.mapMemory(VM_TABLE_ADDR, 16 * POINTER_SIZE);
+    this.engine.mapMemory(VM_TABLE_ADDR, 32 * POINTER_SIZE); // 32 entries (was 16)
+    this.engine.mapMemory(VM_STUB_BASE, 32 * POINTER_SIZE); // guest data reads from vm stub area
     this.writePointer(VM_PTR_ADDR, VM_TABLE_ADDR);
+
+    // DestroyJavaVM(vm) → JNI_OK
+    this.bindVm(JNI_INVOKE_INDEX.DestroyJavaVM, () => 0n);
+
+    // AttachCurrentThread(vm, JNIEnv** out, void* args): store JNIEnv*, return JNI_OK.
+    this.bindVm(JNI_INVOKE_INDEX.AttachCurrentThread, (ctx) => {
+      const out = Number(ctx.x(1));
+      this.writePointer(out, ENV_PTR_ADDR);
+      return 0n;
+    });
+
+    // DetachCurrentThread(vm) → JNI_OK
+    this.bindVm(JNI_INVOKE_INDEX.DetachCurrentThread, () => 0n);
+
     // GetEnv(vm, void** out, version): store the JNIEnv*, return 0 (JNI_OK).
     this.bindVm(JNI_INVOKE_INDEX.GetEnv, (ctx) => {
+      const out = Number(ctx.x(1));
+      this.writePointer(out, ENV_PTR_ADDR);
+      return 0n;
+    });
+
+    // AttachCurrentThreadAsDaemon(vm, JNIEnv** out, void* args): store JNIEnv*, return JNI_OK.
+    this.bindVm(JNI_INVOKE_INDEX.AttachCurrentThreadAsDaemon, (ctx) => {
       const out = Number(ctx.x(1));
       this.writePointer(out, ENV_PTR_ADDR);
       return 0n;
@@ -471,6 +552,20 @@ export class JniEnvironment {
     this.stubBump += POINTER_SIZE;
     this.engine.registerHostFunction(stubAddr, fn);
     this.writePointer(ENV_TABLE_ADDR + index * POINTER_SIZE, stubAddr);
+    this.stubAddresses.set(index, stubAddr);
+  }
+
+  /**
+   * Return the guest stub address for a JNI table index.
+   * Returns 0 for indices that were never bound (no stub exists).
+   */
+  getJniStubAddress(index: number): number {
+    return this.stubAddresses.get(index) ?? 0;
+  }
+
+  /** Return all bound JNI index → stub address mappings. */
+  getJniStubAddresses(): ReadonlyMap<number, number> {
+    return this.stubAddresses;
   }
 
   private bindVm(index: number, fn: (ctx: HostContext) => bigint | number | void): void {
@@ -484,13 +579,58 @@ export class JniEnvironment {
 
   /** jclass FindClass(JNIEnv*, const char* name): x1 = name. */
   private jniFindClass(ctx: HostContext): bigint {
-    const name = this.readCString(ctx, Number(ctx.x(1)));
+    const nameAddr = Number(ctx.x(1));
+    // NULL pointer → return NULL to fail fast
+    if (nameAddr === 0) {
+      this.jniDiagLog.push(`FindClass: NULL name ptr → returning NULL`);
+      return 0n;
+    }
+    const name = this.readCString(ctx, nameAddr);
+    this.jniDiagLog.push(`FindClass: ${name}`);
+    // Empty class name — log warning but still auto-define (old behavior,
+    // needed because JNI_OnLoad reads class names from memory that may not
+    // be initialized yet on first pass)
+    if (!name || name.length === 0) {
+      this.jniDiagLog.push(
+        `FindClass: WARNING empty name at 0x${nameAddr.toString(16)}, auto-defining`,
+      );
+    }
     return BigInt(this.defineClass(name)); // auto-define unknown classes
   }
 
-  /** jmethodID GetMethodID(JNIEnv*, jclass, const char* name, const char* sig). */
+  /** jclass GetObjectClass(JNIEnv*, jobject): x1 = object handle. */
+  private jniGetObjectClass(ctx: HostContext): bigint {
+    const handle = Number(ctx.x(1));
+    const info = this.handles.get(handle);
+    if (info && typeof info === 'object') {
+      // Resolve class name from handle metadata
+      const cls = (info as { cls?: string }).cls;
+      if (cls) return BigInt(this.defineClass(cls));
+      // Infer class from handle kind
+      const kind = (info as { kind?: string }).kind;
+      if (kind === 'mock-string') return BigInt(this.defineClass('java/lang/String'));
+      if (kind === 'mock-int' || kind === 'integer')
+        return BigInt(this.defineClass('java/lang/Integer'));
+      if (kind === 'mock-boolean' || kind === 'boolean')
+        return BigInt(this.defineClass('java/lang/Boolean'));
+      if (kind === 'bytes') return BigInt(this.defineClass('[B'));
+      if (kind === 'objarray') return BigInt(this.defineClass('[Ljava/lang/Object;'));
+      if (kind === 'object' || kind === 'auto-object') {
+        return BigInt(this.defineClass(cls ?? 'java/lang/Object'));
+      }
+    }
+    return BigInt(this.defineClass('java/lang/Object'));
+  }
+
+  /** jmethodID GetMethodID/GetStaticMethodID(JNIEnv*, jclass, const char* name, const char* sig). */
   private jniGetMethodID(ctx: HostContext): bigint {
-    const cls = this.classByHandle.get(Number(ctx.x(1)));
+    const clsHandle = Number(ctx.x(1));
+    // NULL class handle → fail fast
+    if (clsHandle === 0) {
+      this.jniDiagLog.push(`GetMethodID: NULL class → returning NULL`);
+      return 0n;
+    }
+    const cls = this.classByHandle.get(clsHandle);
     const name = this.readCString(ctx, Number(ctx.x(2)));
     const sig = this.readCString(ctx, Number(ctx.x(3)));
     const key = `${name}#${sig}`;
@@ -512,6 +652,9 @@ export class JniEnvironment {
     const cls = this.classByHandle.get(Number(ctx.x(1)));
     const methods = Number(ctx.x(2));
     const count = Number(ctx.x(3));
+    this.jniDiagLog.push(
+      `RegisterNatives: cls=${cls?.name ?? '?'} count=${count} table=0x${methods.toString(16)}`,
+    );
     for (let i = 0; i < count; i++) {
       const rec = methods + i * 24;
       const namePtr = this.readPointer(ctx, rec);
@@ -521,6 +664,7 @@ export class JniEnvironment {
       const signature = this.readCString(ctx, sigPtr);
       const className = cls?.name ?? '';
       this.natives.set(`${className}#${name}#${signature}`, { name, signature, fnAddr });
+      this.jniDiagLog.push(`  [${i}] ${className}#${name}#${signature} → 0x${fnAddr.toString(16)}`);
     }
     return 0n; // JNI_OK
   }
@@ -556,6 +700,10 @@ export class JniEnvironment {
     const value = this.handles.get(Number(ctx.x(1)));
     if (isBytesValue(value)) return BigInt(value.value.length);
     if (isObjArrayValue(value)) return BigInt(value.value.length);
+    // Auto-objects (from returnObject mocks) → return 1 so native code
+    // thinks the set/map has an entry and doesn't throw SecException.
+    if (value && typeof value === 'object' && (value as { kind?: string }).kind === 'auto-object')
+      return 1n;
     return 0n;
   }
 
@@ -617,8 +765,116 @@ export class JniEnvironment {
   private jniCallMethod(ctx: HostContext, mode: JniCallArgumentMode = 'registers'): bigint {
     const self = Number(ctx.x(1));
     const methodId = Number(ctx.x(2));
-    const entry = this.javaMethods.get(methodId);
-    if (!entry) return 0n;
+    let entry = this.javaMethods.get(methodId);
+    if (!entry) {
+      // Method ID not directly mocked — try to match by class+name+sig from
+      // the method handle (auto-allocated by an earlier GetMethodID call).
+      const mi = this.handles.get(methodId);
+      if (mi && typeof mi === 'object') {
+        const mCls = (mi as { cls?: string }).cls;
+        const mName = (mi as { name?: string }).name;
+        const mSig = (mi as { sig?: string }).sig;
+        if (mCls && mName && mSig) {
+          for (const [, mock] of this.javaMethods) {
+            if (mock.className === mCls && mock.name === mName && mock.sig === mSig) {
+              entry = mock;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!entry) {
+      // Check if `self` is a self-describing mock handle from a prior
+      // conditional HashMap.get/Map.get — auto-unbox mock-int, mock-boolean,
+      // mock-string, mock-bytes so intValue()/booleanValue()/toString() work
+      // without an explicit per-method mock registration.
+      const selfValue = this.handles.get(self);
+      if (selfValue && typeof selfValue === 'object') {
+        const sk = (selfValue as { kind?: string }).kind;
+        if (sk === 'mock-int') {
+          return BigInt((selfValue as { value: number }).value);
+        }
+        if (sk === 'mock-boolean') {
+          return BigInt((selfValue as { value: boolean }).value ? 1n : 0n);
+        }
+        // For mock-string: toString() returns self, getBytes() returns new byte[]
+        if (sk === 'mock-string') {
+          const mi2 = this.handles.get(methodId);
+          const mName = (mi2 as { name?: string } | undefined)?.name;
+          const mSig = (mi2 as { sig?: string } | undefined)?.sig;
+          if (mName === 'getBytes' || (mSig && mSig.endsWith(')[B'))) {
+            const str = (selfValue as { value: string }).value;
+            const bytes = new TextEncoder().encode(str);
+            return BigInt(this.allocHandle({ kind: 'bytes', value: bytes }));
+          }
+          return BigInt(self);
+        }
+        if (sk === 'mock-bytes') {
+          return BigInt(self);
+        }
+      }
+
+      // ── Auto-object method resolution ──────────────────────────
+      // When `self` is an auto-object (from a prior returnObject mock or
+      // fallback allocation), look for a mock registered for the auto-object's
+      // class + the called method. This enables chained iterator patterns:
+      //   HashMap.entrySet() → Set.iterator() → Iterator.hasNext()/next()
+      const selfValue2 = this.handles.get(self);
+      if (
+        selfValue2 &&
+        typeof selfValue2 === 'object' &&
+        (selfValue2 as { kind?: string }).kind === 'auto-object'
+      ) {
+        const mi3 = this.handles.get(methodId);
+        const mName3 = (mi3 as { name?: string } | undefined)?.name ?? '';
+        const mSig3 = (mi3 as { sig?: string } | undefined)?.sig ?? '';
+        // Extract the auto-object's class from the handle
+        const autoCls = (selfValue2 as { cls?: string }).cls ?? '';
+        if (autoCls && mName3) {
+          for (const [, mock] of this.javaMethods) {
+            if (mock.className === autoCls && mock.name === mName3 && mock.sig === mSig3) {
+              entry = mock;
+              break;
+            }
+          }
+        }
+        // If still no entry, check for self-describing mock-* kind handling
+        if (!entry) {
+          const sk2 = (selfValue2 as { kind?: string }).kind;
+          if (sk2 === 'mock-int') return BigInt((selfValue2 as { value: number }).value);
+          if (sk2 === 'mock-boolean')
+            return BigInt((selfValue2 as { value: boolean }).value ? 1n : 0n);
+          if (sk2 === 'mock-string') return BigInt(self);
+        }
+      }
+
+      // Fallback: auto-return non-zero handle for object-returning methods
+      // so native code's cbz null-checks pass.
+      const handleInfo2 = this.handles.get(methodId);
+      const sig2: string = (handleInfo2 as { sig?: string } | undefined)?.sig ?? '()V';
+      const returnType2 = sig2.substring(sig2.indexOf(')') + 1);
+      if (returnType2.startsWith('L') || returnType2.startsWith('[')) {
+        // Extract class name from return type for auto-object chaining
+        const retCls = returnType2.startsWith('L')
+          ? returnType2.substring(1, returnType2.indexOf(';'))
+          : returnType2;
+        return BigInt(this.allocHandle({ kind: 'auto-object', cls: retCls, desc: sig2 }));
+      }
+      // For boolean/int returns on auto-objects without mocks: log and return 0
+      const selfInfo3 = this.handles.get(self);
+      if (
+        selfInfo3 &&
+        typeof selfInfo3 === 'object' &&
+        (selfInfo3 as { kind?: string }).kind === 'auto-object'
+      ) {
+        const mi4 = this.handles.get(methodId);
+        const name4 = (mi4 as { name?: string } | undefined)?.name ?? '?';
+        const autoCls2 = (selfInfo3 as { cls?: string }).cls ?? '?';
+        this.jniDiagLog.push(`JNI: unmocked ${autoCls2}.${name4}() on auto-object`);
+      }
+      return 0n;
+    }
     const parameterTypes = parseJniParameterTypes(entry.sig);
     let args: bigint[];
     if (mode === 'jvalueArray') {
@@ -690,16 +946,6 @@ export class JniEnvironment {
     return BigInt(new TextEncoder().encode(str).length);
   }
 
-  /** jclass GetObjectClass(JNIEnv*, jobject): the object's class handle (best-effort). */
-  private jniGetObjectClass(ctx: HostContext): bigint {
-    const value = this.handles.get(Number(ctx.x(1)));
-    if (value && typeof value === 'object' && 'cls' in value) {
-      const clsName = (value as { cls?: string }).cls;
-      if (typeof clsName === 'string') return BigInt(this.defineClass(clsName));
-    }
-    return BigInt(this.defineClass('java/lang/Object'));
-  }
-
   /** jobjectArray NewObjectArray(JNIEnv*, jsize len, jclass, jobject init). */
   private jniNewObjectArray(ctx: HostContext): bigint {
     const length = Number(ctx.x(1));
@@ -712,7 +958,16 @@ export class JniEnvironment {
   private jniGetObjectArrayElement(ctx: HostContext): bigint {
     const value = this.handles.get(Number(ctx.x(1)));
     const idx = Number(ctx.x(2));
-    if (isObjArrayValue(value)) return value.value[idx] ?? 0n;
+    if (isObjArrayValue(value)) {
+      const el = value.value[idx] ?? 0n;
+      this.jniDiagLog.push(
+        `  → GetObjectArrayElement[${idx}] = 0x${el.toString(16)} (len=${value.value.length})`,
+      );
+      return el;
+    }
+    this.jniDiagLog.push(
+      `  → GetObjectArrayElement FAILED: not objarray, kind=${(value as { kind?: string } | null)?.kind ?? 'null'}`,
+    );
     return 0n;
   }
 

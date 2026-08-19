@@ -3,9 +3,18 @@ import type { JSONRPCRequest, JSONRPCResponse } from '@modelcontextprotocol/sdk/
 
 const mocks = vi.hoisted(() => {
   const innerTransports: any[] = [];
+  // When true, the next inner transport construction throws — simulates an
+  // inner-transport setup failure after the admission hook claimed a lease.
+  let failNextConstruct = false;
 
   return {
     innerTransports,
+    get failNextConstruct() {
+      return failNextConstruct;
+    },
+    set failNextConstruct(value: boolean) {
+      failNextConstruct = value;
+    },
   };
 });
 
@@ -32,6 +41,9 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
     });
 
     constructor(private readonly options: { sessionIdGenerator: () => string }) {
+      if (mocks.failNextConstruct) {
+        throw new Error('inner transport construction failed');
+      }
       mocks.innerTransports.push(this);
     }
 
@@ -444,6 +456,28 @@ describe('MultiplexedStreamableHttpTransport', () => {
         method: 'tools/list',
       }),
     ).rejects.toThrow('Ambiguous HTTP session for outbound request/response routing.');
+  });
+
+  it('releases the admission claim when inner transport construction fails', async () => {
+    const onSessionClosed = vi.fn();
+    const onSessionOpened = vi.fn(async () => undefined);
+    const transport = new MultiplexedStreamableHttpTransport({ onSessionOpened, onSessionClosed });
+    await transport.start();
+
+    mocks.failNextConstruct = true;
+    try {
+      await expect(transport.handleRequest(createReq('POST'), createRes(), {})).rejects.toThrow(
+        'inner transport construction failed',
+      );
+    } finally {
+      mocks.failNextConstruct = false;
+    }
+
+    // The admission hook claimed a fleet lease (admissionClaimed=true), so the
+    // failure must still release it — otherwise the lease leaks.
+    expect(onSessionOpened).toHaveBeenCalledOnce();
+    expect(onSessionClosed).toHaveBeenCalledWith(expect.any(String));
+    expect(transport.getStats().pendingAdmissions).toBe(0);
   });
 
   it('routes by relatedRequestId and clears session state on close', async () => {

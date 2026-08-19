@@ -113,6 +113,24 @@ describe('CpuEngine — exclusive load-store (LDXR/STXR)', () => {
     expect([...engine.readMemory(DATA, 4)]).toEqual([0x78, 0x56, 0, 0]);
   });
 
+  it('v8.1 CAS is not silently executed as a plain exclusive load', () => {
+    // CAS X3,X5,[X9] = 0xC8A3FD25 — the v8.1 atomic family (CAS/CASP/LDADD/SWP)
+    // sets o2 (bit23) and o1 (bit21), which the plain-exclusive prefix shares.
+    // The interpreter does not model compare-and-swap, so the instruction must
+    // fall through to the NOP catch-all rather than run as an LDXR/STXR (which
+    // would clobber Rs and read memory under load semantics).
+    const engine = new CpuEngine();
+    const DATA = 0x4000;
+    engine.mapMemory(DATA, 16);
+    engine.writeCode(DATA, Uint8Array.from(le(0x1122_3344)));
+    // movz x9,#0x4000 ; movz x3,#0xaaaa ; movz x5,#0xbbbb ; CAS X3,X5,[X9]
+    run(engine, [movz(9, 0x4000), movz(3, 0xaaaa), movz(5, 0xbbbb), 0xc8a3fd25]);
+    // NOP semantics: Rs, the register pair, and memory all stay untouched.
+    expect(engine.readRegister('x3')).toBe(0xaaaa);
+    expect(engine.readRegister('x5')).toBe(0xbbbb);
+    expect([...engine.readMemory(DATA, 4)]).toEqual([0x44, 0x33, 0x22, 0x11]);
+  });
+
   it('an LDXR/STXR pair round-trips a value through memory', () => {
     const engine = new CpuEngine();
     const DATA = 0x4000;

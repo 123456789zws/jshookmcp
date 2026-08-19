@@ -1,6 +1,11 @@
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import { logger } from '@utils/logger';
-import { PAGE_FRAME_SELECTOR_TIMEOUT_MS, PAGE_NETWORK_IDLE_TIMEOUT_MS } from '@src/constants';
+import {
+  PAGE_FRAME_SELECTOR_TIMEOUT_MS,
+  PAGE_NETWORK_IDLE_TIMEOUT_MS,
+  PAGE_OPERATION_TIMEOUT_MS,
+  PAGE_EVALUATE_TIMEOUT_MS,
+} from '@src/constants';
 import { setTimeout as asyncSetTimeout } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
 import type { Page, Frame, NewDocumentScriptEvaluation } from 'rebrowser-puppeteer-core';
@@ -189,7 +194,7 @@ export class PageController {
 
     await page.goto(url, {
       waitUntil: this.getChromeNavigationWaitUntil(options?.waitUntil),
-      timeout: options?.timeout || 30000,
+      timeout: options?.timeout || PAGE_OPERATION_TIMEOUT_MS,
     });
 
     const loadTime = Date.now() - startTime;
@@ -209,7 +214,7 @@ export class PageController {
     const page = await this.collector.getActivePage();
     await page.reload({
       waitUntil: this.getChromeNavigationWaitUntil(options?.waitUntil),
-      timeout: options?.timeout || 30000,
+      timeout: options?.timeout || PAGE_OPERATION_TIMEOUT_MS,
     });
     logger.info('Page reloaded');
   }
@@ -247,7 +252,7 @@ export class PageController {
       try {
         await context.click(selector, clickOptions);
       } finally {
-        page.setDefaultTimeout(this.collector['config']?.timeout ?? 30000);
+        page.setDefaultTimeout(this.collector['config']?.timeout ?? PAGE_OPERATION_TIMEOUT_MS);
       }
     } else {
       await context.click(selector, clickOptions);
@@ -309,7 +314,7 @@ export class PageController {
       const page = await this.collector.getActivePage();
 
       await page.waitForSelector(selector, {
-        timeout: timeout || 30000,
+        timeout: timeout || PAGE_OPERATION_TIMEOUT_MS,
       });
 
       const element = await page.evaluate((sel) => {
@@ -351,7 +356,7 @@ export class PageController {
     const page = await this.collector.getActivePage();
     await page.waitForNavigation({
       waitUntil: this.getChromeNavigationWaitUntil(),
-      timeout: timeout || 30000,
+      timeout: timeout || PAGE_OPERATION_TIMEOUT_MS,
     });
     logger.info('Navigation completed');
   }
@@ -650,8 +655,12 @@ export class PageController {
       const result = await new Promise<{ type: string; dialogMessage: string }>(
         (resolve, reject) => {
           const timeout = setTimeout(() => {
-            reject(new Error('Timed out waiting for a dialog (30s). No dialog appeared.'));
-          }, 30_000);
+            reject(
+              new Error(
+                `Timed out waiting for a dialog (${PAGE_OPERATION_TIMEOUT_MS / 1000}s). No dialog appeared.`,
+              ),
+            );
+          }, PAGE_OPERATION_TIMEOUT_MS);
 
           page.once('dialog', async (dialog) => {
             clearTimeout(timeout);
@@ -933,7 +942,13 @@ export class PageController {
  * 'disconnected'. Without this check, page.evaluate() blocks for the full 30 s
  * timeout — with this check we fail fast (~3 s) with a clear message.
  */
-async function checkPageCDPHealth(page: Page, timeoutMs = 500): Promise<void> {
+/** Fail-fast window for the pre-evaluate CDP health probe (see checkPageCDPHealth). */
+const PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS = 500;
+
+async function checkPageCDPHealth(
+  page: Page,
+  timeoutMs = PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS,
+): Promise<void> {
   // Use AbortSignal-based timeout so the interrupt is truly async at the node level.
   const ac = new AbortController();
   const timer = asyncSetTimeout(timeoutMs, undefined, { signal: ac.signal }).then(() => {
@@ -1006,7 +1021,7 @@ export async function evaluateOnContextWithTimeout<Args extends readonly unknown
   pageFunction: string | ((...args: never[]) => Result),
   ...args: Args
 ): Promise<Awaited<Result> | unknown> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
 
   // Fail fast: detect zombie CDP sessions before they block evaluate().
   await checkPageCDPHealth(page);
@@ -1067,7 +1082,7 @@ export async function evaluateOnNewDocumentWithTimeout<Args extends readonly unk
   pageFunction: string | ((...args: never[]) => Result),
   ...args: Args
 ): Promise<unknown> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
 
   // Fail fast: detect zombie CDP sessions before they block evaluateOnNewDocument().
   await checkPageCDPHealth(page);
@@ -1114,7 +1129,7 @@ export async function coverageStartJSWithTimeout(
   page: CoveragePage,
   options?: { resetOnNavigation?: boolean; reportAnonymousScripts?: boolean },
 ): Promise<void> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
   return Promise.race([
     page.coverage.startJSCoverage(options),
     new Promise<void>((_, reject) =>
@@ -1133,7 +1148,7 @@ export async function coverageStartCSSWithTimeout(
   page: CoveragePage,
   options?: { resetOnNavigation?: boolean },
 ): Promise<void> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
   return Promise.race([
     page.coverage.startCSSCoverage(options),
     new Promise<void>((_, reject) =>
@@ -1149,7 +1164,7 @@ export async function coverageStartCSSWithTimeout(
  * Wrap page.coverage.stopJSCoverage() with a timeout.
  */
 export async function coverageStopJSWithTimeout(page: CoveragePage): Promise<unknown> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
   return Promise.race([
     page.coverage.stopJSCoverage(),
     new Promise<unknown>((_, reject) =>
@@ -1165,7 +1180,7 @@ export async function coverageStopJSWithTimeout(page: CoveragePage): Promise<unk
  * Wrap page.coverage.stopCSSCoverage() with a timeout.
  */
 export async function coverageStopCSSWithTimeout(page: CoveragePage): Promise<unknown> {
-  const timeoutMs = 30000;
+  const timeoutMs = PAGE_EVALUATE_TIMEOUT_MS;
   return Promise.race([
     page.coverage.stopCSSCoverage(),
     new Promise<unknown>((_, reject) =>

@@ -20,6 +20,124 @@ interface SinkSite {
   line: number;
 }
 
+/** Cap on the monotonic taint fixpoint loop (taint only grows, so it converges). */
+const MAX_FIXPOINT_ITERATIONS = 100;
+
+/**
+ * Sanitizers / value-sinking builtins: taint identity drops when a value
+ * passes through one of these (or the call is safe to skip).
+ */
+const SANITIZERS = new Set([
+  'encodeURIComponent',
+  'encodeURI',
+  'escape',
+  'decodeURIComponent',
+  'decodeURI',
+  'htmlentities',
+  'htmlspecialchars',
+  'escapeHtml',
+  'escapeHTML',
+  'he.encode',
+  'he.escape',
+  'validator.escape',
+  'validator.unescape',
+  'validator.stripLow',
+  'validator.blacklist',
+  'validator.whitelist',
+  'validator.trim',
+  'validator.isEmail',
+  'validator.isURL',
+  'validator.isInt',
+  'DOMPurify.sanitize',
+  'DOMPurify.addHook',
+  'crypto.encrypt',
+  'crypto.hash',
+  'crypto.createHash',
+  'crypto.createHmac',
+  'CryptoJS.AES.encrypt',
+  'CryptoJS.SHA256',
+  'CryptoJS.MD5',
+  'bcrypt.hash',
+  'bcrypt.compare',
+  'btoa',
+  'atob',
+  'Buffer.from',
+  'db.prepare',
+  'db.query',
+  'mysql.escape',
+  'pg.query',
+  'xss',
+  'sanitizeHtml',
+  'parseInt',
+  'parseFloat',
+  'Number',
+  'String',
+  'JSON.stringify',
+  // NOTE: JSON.parse intentionally NOT a sanitizer — it returns a structured
+  // object whose members are still attacker-controlled (`JSON.parse(x).data`).
+  'String.prototype.replace',
+  'String.prototype.trim',
+  'Array.prototype.filter',
+  'Array.prototype.map',
+  // Value-sinking builtins: these return a number/boolean derived from the
+  // argument, dropping the taint identity (e.g. `Math.max(tainted, 0)` no
+  // longer carries the source). Listing them here keeps the unknown-callee
+  // pass-through from over-reporting on pure numeric helpers.
+  'Math.max',
+  'Math.min',
+  'Math.floor',
+  'Math.ceil',
+  'Math.round',
+  'Math.abs',
+  'Math.trunc',
+  'Math.sign',
+  'Math.sqrt',
+  'Math.pow',
+  'Math.log',
+  'Math.exp',
+  'Math.random',
+  'Math.hypot',
+  'Math.fround',
+  'Number.prototype.toString',
+  'Number.prototype.toFixed',
+  'Number.prototype.toPrecision',
+]);
+
+/** Network-request APIs treated as taint sources. */
+const NETWORK_SOURCE_METHODS = ['fetch', 'ajax', 'get', 'post', 'request', 'axios'];
+
+/** DOM query APIs treated as taint sources. */
+const DOM_SOURCE_METHODS = [
+  'querySelector',
+  'getElementById',
+  'getElementsByClassName',
+  'getElementsByTagName',
+];
+
+/** Global functions that execute strings — eval-class sinks. */
+const EVAL_SINK_FUNCTIONS = ['eval', 'Function', 'setTimeout', 'setInterval'];
+
+/** `document.write`-family sink methods. */
+const DOCUMENT_WRITE_METHODS = ['write', 'writeln'];
+
+/** SQL-execution sink methods. */
+const SQL_SINK_METHODS = ['query', 'execute', 'exec', 'run'];
+
+/** Command-execution sink methods. */
+const COMMAND_SINK_METHODS = ['exec', 'spawn', 'execSync', 'spawnSync'];
+
+/** File I/O sink methods. */
+const FILE_SINK_METHODS = ['readFile', 'writeFile', 'readFileSync', 'writeFileSync', 'open'];
+
+/** `location.*` properties treated as URL taint sources. */
+const LOCATION_SOURCE_PROPS = ['href', 'search', 'hash', 'pathname'];
+
+/** Web storage objects treated as storage taint sources. */
+const STORAGE_OBJECT_NAMES = ['localStorage', 'sessionStorage'];
+
+/** Assignment targets treated as DOM XSS sinks. */
+const DOM_ASSIGNMENT_SINK_PROPS = ['innerHTML', 'outerHTML'];
+
 function normalizeSourceType(sourceType: string): DataFlow['sources'][number]['type'] {
   if (
     sourceType === 'user_input' ||
@@ -43,81 +161,6 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
 
   const sinkSites: SinkSite[] = [];
 
-  const sanitizers = new Set([
-    'encodeURIComponent',
-    'encodeURI',
-    'escape',
-    'decodeURIComponent',
-    'decodeURI',
-    'htmlentities',
-    'htmlspecialchars',
-    'escapeHtml',
-    'escapeHTML',
-    'he.encode',
-    'he.escape',
-    'validator.escape',
-    'validator.unescape',
-    'validator.stripLow',
-    'validator.blacklist',
-    'validator.whitelist',
-    'validator.trim',
-    'validator.isEmail',
-    'validator.isURL',
-    'validator.isInt',
-    'DOMPurify.sanitize',
-    'DOMPurify.addHook',
-    'crypto.encrypt',
-    'crypto.hash',
-    'crypto.createHash',
-    'crypto.createHmac',
-    'CryptoJS.AES.encrypt',
-    'CryptoJS.SHA256',
-    'CryptoJS.MD5',
-    'bcrypt.hash',
-    'bcrypt.compare',
-    'btoa',
-    'atob',
-    'Buffer.from',
-    'db.prepare',
-    'db.query',
-    'mysql.escape',
-    'pg.query',
-    'xss',
-    'sanitizeHtml',
-    'parseInt',
-    'parseFloat',
-    'Number',
-    'String',
-    'JSON.stringify',
-    'JSON.parse',
-    'String.prototype.replace',
-    'String.prototype.trim',
-    'Array.prototype.filter',
-    'Array.prototype.map',
-    // Value-sinking builtins: these return a number/boolean derived from the
-    // argument, dropping the taint identity (e.g. `Math.max(tainted, 0)` no
-    // longer carries the source). Listing them here keeps the unknown-callee
-    // pass-through from over-reporting on pure numeric helpers.
-    'Math.max',
-    'Math.min',
-    'Math.floor',
-    'Math.ceil',
-    'Math.round',
-    'Math.abs',
-    'Math.trunc',
-    'Math.sign',
-    'Math.sqrt',
-    'Math.pow',
-    'Math.log',
-    'Math.exp',
-    'Math.random',
-    'Math.hypot',
-    'Math.fround',
-    'Number.prototype.toString',
-    'Number.prototype.toFixed',
-    'Number.prototype.toPrecision',
-  ]);
-
   try {
     const ast = parser.parse(code, {
       sourceType: 'module',
@@ -132,7 +175,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         if (t.isMemberExpression(callee) && t.isIdentifier(callee.property)) {
           const methodName = callee.property.name;
 
-          if (['fetch', 'ajax', 'get', 'post', 'request', 'axios'].includes(methodName)) {
+          if (NETWORK_SOURCE_METHODS.includes(methodName)) {
             const sourceId = `source-network-${line}`;
             sources.push({ type: 'network', location: { file: 'current', line } });
             graph.nodes.push({
@@ -143,17 +186,8 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
             });
 
             const parent = path.parent;
-            if (t.isVariableDeclarator(parent) && t.isIdentifier(parent.id)) {
-              taintMap.set(parent.id.name, { sourceType: 'user_input', sourceLine: line });
-            }
-          } else if (
-            [
-              'querySelector',
-              'getElementById',
-              'getElementsByClassName',
-              'getElementsByTagName',
-            ].includes(methodName)
-          ) {
+            markTaintedSource(parent, 'network', line, taintMap);
+          } else if (DOM_SOURCE_METHODS.includes(methodName)) {
             const sourceId = `source-dom-${line}`;
             sources.push({ type: 'user_input', location: { file: 'current', line } });
             graph.nodes.push({
@@ -168,7 +202,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         if (t.isIdentifier(callee)) {
           const funcName = callee.name;
 
-          if (['eval', 'Function', 'setTimeout', 'setInterval'].includes(funcName)) {
+          if (EVAL_SINK_FUNCTIONS.includes(funcName)) {
             const sinkId = `sink-eval-${line}`;
             sinks.push({ type: 'eval', location: { file: 'current', line } });
             graph.nodes.push({
@@ -178,7 +212,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               location: { file: 'current', line },
             });
 
-            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, funcName, line);
+            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, 'eval', line);
             sinkSites.push({ args: path.node.arguments, sinkType: 'eval', line });
           }
         }
@@ -187,7 +221,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
           const methodName = callee.property.name;
 
           if (
-            ['write', 'writeln'].includes(methodName) &&
+            DOCUMENT_WRITE_METHODS.includes(methodName) &&
             t.isIdentifier(callee.object) &&
             callee.object.name === 'document'
           ) {
@@ -199,11 +233,11 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               type: 'sink',
               location: { file: 'current', line },
             });
-            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, methodName, line);
+            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, 'xss', line);
             sinkSites.push({ args: path.node.arguments, sinkType: 'xss', line });
           }
 
-          if (['query', 'execute', 'exec', 'run'].includes(methodName)) {
+          if (SQL_SINK_METHODS.includes(methodName)) {
             const sinkId = `sink-sql-${line}`;
             sinks.push({ type: 'sql-injection', location: { file: 'current', line } });
             graph.nodes.push({
@@ -212,11 +246,11 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               type: 'sink',
               location: { file: 'current', line },
             });
-            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, methodName, line);
+            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, 'sql-injection', line);
             sinkSites.push({ args: path.node.arguments, sinkType: 'sql-injection', line });
           }
 
-          if (['exec', 'spawn', 'execSync', 'spawnSync'].includes(methodName)) {
+          if (COMMAND_SINK_METHODS.includes(methodName)) {
             const sinkId = `sink-command-${line}`;
             sinks.push({ type: 'other', location: { file: 'current', line } });
             graph.nodes.push({
@@ -225,13 +259,11 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               type: 'sink',
               location: { file: 'current', line },
             });
-            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, methodName, line);
+            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, 'other', line);
             sinkSites.push({ args: path.node.arguments, sinkType: 'other', line });
           }
 
-          if (
-            ['readFile', 'writeFile', 'readFileSync', 'writeFileSync', 'open'].includes(methodName)
-          ) {
+          if (FILE_SINK_METHODS.includes(methodName)) {
             const sinkId = `sink-file-${line}`;
             sinks.push({ type: 'other', location: { file: 'current', line } });
             graph.nodes.push({
@@ -240,7 +272,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               type: 'sink',
               location: { file: 'current', line },
             });
-            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, methodName, line);
+            checkTaintedArguments(path.node.arguments, taintMap, taintPaths, 'other', line);
             sinkSites.push({ args: path.node.arguments, sinkType: 'other', line });
           }
         }
@@ -252,7 +284,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         const line = /* istanbul ignore next */ path.node.loc?.start.line || 0;
 
         if (t.isIdentifier(obj) && obj.name === 'location' && t.isIdentifier(prop)) {
-          if (['href', 'search', 'hash', 'pathname'].includes(prop.name)) {
+          if (LOCATION_SOURCE_PROPS.includes(prop.name)) {
             const sourceId = `source-url-${line}`;
             sources.push({ type: 'user_input', location: { file: 'current', line } });
             graph.nodes.push({
@@ -263,9 +295,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
             });
 
             const parent = path.parent;
-            if (t.isVariableDeclarator(parent) && t.isIdentifier(parent.id)) {
-              taintMap.set(parent.id.name, { sourceType: 'user_input', sourceLine: line });
-            }
+            markTaintedSource(parent, 'user_input', line, taintMap);
           }
         }
 
@@ -285,7 +315,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
           });
         }
 
-        if (t.isIdentifier(obj) && ['localStorage', 'sessionStorage'].includes(obj.name)) {
+        if (t.isIdentifier(obj) && STORAGE_OBJECT_NAMES.includes(obj.name)) {
           const sourceId = `source-storage-${line}`;
           sources.push({ type: 'storage', location: { file: 'current', line } });
           graph.nodes.push({
@@ -352,7 +382,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
 
         if (t.isMemberExpression(left) && t.isIdentifier(left.property)) {
           const propName = left.property.name;
-          if (['innerHTML', 'outerHTML'].includes(propName)) {
+          if (DOM_ASSIGNMENT_SINK_PROPS.includes(propName)) {
             const sinkId = `sink-dom-${line}`;
             sinks.push({ type: 'xss', location: { file: 'current', line } });
             graph.nodes.push({
@@ -368,7 +398,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
               const taintInfo = taintMap.get(right.name)!;
               taintPaths.push({
                 source: {
-                  type: taintInfo.sourceType as DataFlow['sources'][0]['type'],
+                  type: normalizeSourceType(taintInfo.sourceType),
                   location: { file: 'current', line: taintInfo.sourceLine },
                 },
                 sink: { type: 'xss', location: { file: 'current', line } },
@@ -389,7 +419,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         const init = path.node.init;
 
         if (t.isIdentifier(id) && init) {
-          if (t.isCallExpression(init) && checkSanitizer(init, sanitizers)) {
+          if (t.isCallExpression(init) && checkSanitizer(init, SANITIZERS)) {
             const arg = init.arguments[0];
             if (t.isIdentifier(arg) && taintMap.has(arg.name)) {
               logger.debug(`Taint cleaned by sanitizer: ${arg.name} -> ${id.name}`);
@@ -421,9 +451,19 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         const left = path.node.left;
         const right = path.node.right;
 
-        if (t.isIdentifier(left) && t.isIdentifier(right) && taintMap.has(right.name)) {
+        if (t.isIdentifier(right) && taintMap.has(right.name)) {
           const taintInfo = taintMap.get(right.name)!;
-          taintMap.set(left.name, taintInfo);
+          markTaintedTarget(left, taintInfo, taintMap);
+        } else if (t.isBinaryExpression(right)) {
+          const leftTainted = t.isIdentifier(right.left) && taintMap.has(right.left.name);
+          const rightTainted = t.isIdentifier(right.right) && taintMap.has(right.right.name);
+
+          if (leftTainted || rightTainted) {
+            const taintInfo = leftTainted
+              ? taintMap.get((right.left as t.Identifier).name)!
+              : taintMap.get((right.right as t.Identifier).name)!;
+            markTaintedTarget(left, taintInfo, taintMap);
+          }
         }
       },
     });
@@ -434,7 +474,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
     // against the enriched map. This surfaces taint that flows through helpers and
     // property chains — paths the first two passes emit too late (sinks are scanned
     // before propagation completes) or not at all.
-    const summaries = buildFunctionSummaries(ast, sanitizers, checkSanitizer);
+    const summaries = buildFunctionSummaries(ast, SANITIZERS, checkSanitizer);
 
     const moduleEval = (node: t.Node | null | undefined): SourceInfo | null => {
       if (!node) {
@@ -454,7 +494,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
         return (t.isExpression(node.left) ? moduleEval(node.left) : null) ?? moduleEval(node.right);
       }
       if (t.isCallExpression(node)) {
-        if (checkSanitizer(node, sanitizers)) {
+        if (checkSanitizer(node, SANITIZERS)) {
           return null;
         }
         const argInfos = node.arguments.map((arg) =>
@@ -488,7 +528,7 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
     // grows). Function bodies are skipped — they are captured by the summaries.
     let propagated = true;
     let guard = 0;
-    while (propagated && guard < 100) {
+    while (propagated && guard < MAX_FIXPOINT_ITERATIONS) {
       propagated = false;
       guard += 1;
       traverse(ast, {
@@ -506,11 +546,11 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
           }
         },
         AssignmentExpression(path) {
-          const left = path.node.left;
-          if (t.isIdentifier(left) && !taintMap.has(left.name)) {
+          const name = targetName(path.node.left);
+          if (name && !taintMap.has(name)) {
             const info = moduleEval(path.node.right);
             if (info) {
-              taintMap.set(left.name, info);
+              taintMap.set(name, info);
               propagated = true;
             }
           }
@@ -523,10 +563,16 @@ export async function analyzeDataFlowWithTaint(code: string): Promise<DataFlow> 
     );
     for (const site of sinkSites) {
       for (const arg of site.args) {
-        if (!t.isIdentifier(arg) || !taintMap.has(arg.name)) {
+        if (!t.isExpression(arg)) {
           continue;
         }
-        const info = taintMap.get(arg.name)!;
+        // Evaluate the argument with the same module-level evaluator used by the
+        // fixpoint, so member chains (`el.innerHTML = obj.data`), concatenations
+        // and helper calls are re-checked instead of only bare identifiers.
+        const info = moduleEval(arg);
+        if (!info) {
+          continue;
+        }
         const key = `${info.sourceLine}->${site.line}:${site.sinkType}`;
         if (seenPaths.has(key)) {
           continue;
@@ -561,7 +607,7 @@ function checkTaintedArguments(
   args: Array<t.Expression | t.SpreadElement | t.ArgumentPlaceholder>,
   taintMap: Map<string, { sourceType: string; sourceLine: number }>,
   taintPaths: DataFlow['taintPaths'],
-  _funcName: string,
+  sinkType: SinkType,
   line: number,
 ): void {
   args.forEach((arg) => {
@@ -569,11 +615,11 @@ function checkTaintedArguments(
       const taintInfo = taintMap.get(arg.name)!;
       taintPaths.push({
         source: {
-          type: taintInfo.sourceType as DataFlow['sources'][0]['type'],
+          type: normalizeSourceType(taintInfo.sourceType),
           location: { file: 'current', line: taintInfo.sourceLine },
         },
         sink: {
-          type: 'eval',
+          type: sinkType,
           location: { file: 'current', line },
         },
         path: [
@@ -583,4 +629,49 @@ function checkTaintedArguments(
       });
     }
   });
+}
+
+/**
+ * Resolve the variable name a taint-marking assignment targets. Member targets
+ * (`a.b = ...`, `a.b.c = ...`) conservatively mark their base object, since the
+ * taint map is flat and member-chain reads are resolved through the base.
+ */
+function targetName(target: t.Node): string | null {
+  if (t.isIdentifier(target)) {
+    return target.name;
+  }
+  if (t.isMemberExpression(target)) {
+    return targetName(target.object);
+  }
+  return null;
+}
+
+function markTaintedTarget(
+  target: t.Node,
+  info: { sourceType: string; sourceLine: number },
+  taintMap: Map<string, { sourceType: string; sourceLine: number }>,
+): void {
+  const name = targetName(target);
+  if (name) {
+    taintMap.set(name, info);
+  }
+}
+
+/**
+ * Propagate a browser-controlled source into its assignment target. Handles
+ * both declaration (`const x = fetch(...)`) and assignment (`obj.resp = ...`)
+ * forms, marking member-expression targets through their base object.
+ */
+function markTaintedSource(
+  parent: t.Node,
+  sourceType: string,
+  line: number,
+  taintMap: Map<string, { sourceType: string; sourceLine: number }>,
+): void {
+  const info = { sourceType, sourceLine: line };
+  if (t.isVariableDeclarator(parent)) {
+    markTaintedTarget(parent.id, info, taintMap);
+  } else if (t.isAssignmentExpression(parent)) {
+    markTaintedTarget(parent.left, info, taintMap);
+  }
 }

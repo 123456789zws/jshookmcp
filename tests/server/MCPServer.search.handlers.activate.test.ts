@@ -254,7 +254,7 @@ describe('MCPServer.search.handlers.activate', () => {
       notActivated: ['missing_tool'],
       hint: 'Deactivated tools are no longer available. Search again to find alternatives.',
     });
-    expect(remove).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledTimes(2); // handler remove + deactivateToolCore (MCP SDK remove is idempotent)
     expect(ctx.router.removeHandler).toHaveBeenCalledWith('custom_tool');
     expect(ctx.activatedToolNames.has('custom_tool')).toBe(false);
     expect(ctx.extensionToolsByName.get('custom_tool')?.registeredTool).toBeUndefined();

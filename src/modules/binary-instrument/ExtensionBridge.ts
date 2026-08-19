@@ -131,7 +131,9 @@ function isPluginRuntime(value: unknown): value is PluginRuntime {
 }
 
 function isResultRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  // Arrays are objects too, but a bare array has no success/data/error fields —
+  // sending it down the structured path would silently drop the payload.
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function readBoolean(record: Record<string, unknown>, key: string): boolean | undefined {

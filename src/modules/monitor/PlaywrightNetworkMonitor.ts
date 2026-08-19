@@ -11,6 +11,7 @@ import {
   NETWORK_BODY_CACHE_MAX_BODY_BYTES,
   NETWORK_BODY_CACHE_MAX_ENTRIES,
   NETWORK_BODY_CACHE_MAX_TOTAL_BYTES,
+  NETWORK_MAX_RECORDS,
 } from '@src/constants';
 import {
   injectXHRInterceptor,
@@ -29,7 +30,7 @@ export class PlaywrightNetworkMonitor {
   private networkEnabled = false;
   private requests: Map<string, NetworkRequest> = new Map();
   private responses: Map<string, NetworkResponse> = new Map();
-  private readonly MAX_NETWORK_RECORDS = 500;
+  private maxRecords = NETWORK_MAX_RECORDS;
   private requestCounter = 0;
 
   /** LRU cache for response bodies, auto-captured on response event. */
@@ -38,6 +39,11 @@ export class PlaywrightNetworkMonitor {
   // Expose for tests
   set MAX_BODY_CACHE_ENTRIES(value: number) {
     this.responseBodyCache.setMaxEntries(value);
+  }
+
+  // Expose for tests (default comes from NETWORK_MAX_RECORDS constant)
+  set MAX_NETWORK_RECORDS(value: number) {
+    this.maxRecords = value;
   }
 
   // WeakMap to correlate requests with responses
@@ -137,7 +143,7 @@ export class PlaywrightNetworkMonitor {
 
       this.requests.set(requestId, request);
 
-      if (this.requests.size > this.MAX_NETWORK_RECORDS) {
+      if (this.requests.size > this.maxRecords) {
         const firstKey = this.requests.keys().next().value;
         if (firstKey) this.requests.delete(firstKey);
       }
@@ -170,7 +176,7 @@ export class PlaywrightNetworkMonitor {
 
       this.responses.set(requestId, response);
 
-      if (this.responses.size > this.MAX_NETWORK_RECORDS) {
+      if (this.responses.size > this.maxRecords) {
         const firstKey = this.responses.keys().next().value;
         if (firstKey) this.responses.delete(firstKey);
       }
@@ -218,10 +224,12 @@ export class PlaywrightNetworkMonitor {
   }
 
   async disable(): Promise<void> {
-    const page = this.getPageOrThrow();
+    // disable() is a cleanup path — a missing page (never initialized, or
+    // already torn down) must not turn it into a throwing operation.
+    const page = this.page;
     if (this.boundOnRequest) {
       try {
-        page.off('request', this.boundOnRequest);
+        page?.off('request', this.boundOnRequest);
       } catch {
         /* best-effort: page may already be closed during shutdown */
       }
@@ -229,7 +237,7 @@ export class PlaywrightNetworkMonitor {
     }
     if (this.boundOnResponse) {
       try {
-        page.off('response', this.boundOnResponse);
+        page?.off('response', this.boundOnResponse);
       } catch {
         /* best-effort: page may already be closed during shutdown */
       }

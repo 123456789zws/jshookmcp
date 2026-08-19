@@ -140,21 +140,30 @@ export const isCryptoSm4e = (f: SimdFields): boolean =>
  * three-register forms). SM4E (bit21=0, size=01) also has bit15=1, but is
  * excluded here by the (bit21=1 OR size=3) guard and dispatched separately
  * via isCryptoSm4e / isCryptoSm3Sm4.
+ *
+ * RAX1 (SHA-3) shares size=01/bit21=1/bit15=1 with SHA512H/H2/SU1 and is
+ * distinguished by bits[11:10]: SHA512H=00, SHA512H2=01, SHA512SU1=10,
+ * RAX1=11 — so the three-register arm must reject low11_10=11.
  */
 export const isCryptoSha512 = (f: SimdFields): boolean =>
-  f.high8 === 0xce && ((f.insn >>> 15) & 1) === 1 && (f.bit21 === 1 || f.size === 3);
+  f.high8 === 0xce &&
+  ((f.insn >>> 15) & 1) === 1 &&
+  (f.bit21 === 1 ? f.low11_10 !== 0b11 : f.size === 3);
 
 /**
  * Cryptographic SHA-3 (ARMv8.2 FEAT_SHA3). Four instructions sharing high8=0xCE,
- * distinguished from SHA-512 and SM3/SM4 by their unique bit patterns:
+ * distinguished from SHA-512 and SM3/SM4 by their unique bit patterns
+ * (encodings cross-checked against Go's arm64 assembler, i.e. binutils):
  *
  *   EOR3:  bit21=0, size=0, bit15=0  (4-register, Ra in [14:10] overlaps op15_10)
- *   BCAX:  bit21=0, size=2, bit15=0  (4-register, Ra in [14:10])
- *   RAX1:  bit21=1, size=2, op15_10=000110
- *   XAR:   bit21=0, bit15=1, size=2  (imm6 in [15:10])
+ *   BCAX:  bit21=1, size=0, bit15=0  (4-register, Ra in [14:10])
+ *   RAX1:  bit21=1, size=1, op15_10=100011  (0xCE608C00 base)
+ *   XAR:   bit21=0, size=2  (imm6 in [15:10])
  *
  * EOR3/BCAX have Ra in bits[14:10] which sets non-zero op15_10 for non-zero Ra,
  * so the predicate checks bit-level fields instead of the full op15_10 value.
+ * RAX1 is the only one with a fixed op15_10 (100011) — it uses size=01, NOT the
+ * size=10 that RAX1's sibling instructions use.
  */
 export const isCryptoSha3 = (f: SimdFields): boolean => {
   if (f.high8 !== 0xce) return false;
@@ -162,8 +171,8 @@ export const isCryptoSha3 = (f: SimdFields): boolean => {
   if (f.bit21 === 0 && f.size === 0 && f.bit15 === 0) return true;
   // BCAX: bit21=1, size=0, bit15=0
   if (f.bit21 === 1 && f.size === 0 && f.bit15 === 0) return true;
-  // RAX1: bit21=1, size=2, op15_10=000110
-  if (f.bit21 === 1 && f.size === 2 && ((f.insn >>> 10) & 0b111111) === 0b000110) return true;
+  // RAX1: bit21=1, size=1, op15_10=100011
+  if (f.bit21 === 1 && f.size === 1 && ((f.insn >>> 10) & 0b111111) === 0b100011) return true;
   // XAR: bit21=0, size=2 (bit15 is part of imm6, not a fixed discriminator)
   if (f.bit21 === 0 && f.size === 2) return true;
   return false;

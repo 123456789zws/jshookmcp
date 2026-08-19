@@ -12,6 +12,7 @@ import {
   ICMP_PROBE_TIMEOUT_MS,
   ICMP_TRACEROUTE_MAX_HOPS,
   ICMP_DEFAULT_PACKET_SIZE,
+  ICMP_DEFAULT_TTL,
 } from '@src/constants';
 import {
   BaseIcmpProvider,
@@ -131,6 +132,8 @@ function getWinIcmpFns(): WinIcmpFns {
 const IP_OPT_SIZE = 16;
 const MIN_REPLY_BUF_SIZE = 256;
 const ICMP_REPLY_OVERHEAD = 64;
+/** inet_addr() failure marker (255.255.255.255 in network byte order). */
+const INET_ADDR_ERROR = 0xffffffff;
 
 function getReplyBufferSize(packetSize: number): number {
   return Math.max(MIN_REPLY_BUF_SIZE, packetSize + ICMP_REPLY_OVERHEAD);
@@ -142,11 +145,54 @@ function buildOptionBuf(ttl: number): Buffer {
   return buf;
 }
 
+/**
+ * Issue one IcmpSendEcho round-trip. Shared by probe() and traceroute() —
+ * previously the async-callback promise wrapper was duplicated verbatim.
+ */
+function sendEchoOnce(
+  fns: WinIcmpFns,
+  handle: bigint,
+  destAddr: number,
+  packetSize: number,
+  ttl: number,
+  timeout: number,
+): Promise<{ numReplies: number; replyBuf: Buffer }> {
+  const sendData = Buffer.alloc(packetSize, 0xaa);
+  const optionBuf = buildOptionBuf(ttl);
+  const replyBuf = Buffer.alloc(getReplyBufferSize(packetSize));
+
+  return new Promise((resolve, reject) => {
+    fns.sendEcho.async(
+      handle,
+      destAddr,
+      sendData,
+      sendData.length,
+      optionBuf,
+      replyBuf,
+      replyBuf.length,
+      timeout,
+      (err, result) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve({ numReplies: Number(result), replyBuf });
+      },
+    );
+  });
+}
+
 function parseReply(buf: Buffer): { address: number; status: number; rtt: number } {
+  // ICMP_ECHO_REPLY layout differs by pointer width:
+  //   x86 (ICMP_ECHO_REPLY32): Address(ULONG @0) Status(@4) RoundTripTime(@8)
+  //   x64 (ICMP_ECHO_REPLY):   Address(PVOID @0, 8B) Status(@8) RoundTripTime(@12)
+  // Reading the 32-bit offsets on x64 shifts every field: "status" would read
+  // the upper half of the Address pointer and "rtt" would read Status.
+  const is64 = process.arch === 'x64';
   return {
-    address: buf.readUInt32LE(0),
-    status: buf.readUInt32LE(4),
-    rtt: buf.readUInt32LE(8),
+    address: is64 ? Number(buf.readBigUInt64LE(0)) & 0xffffffff : buf.readUInt32LE(0),
+    status: buf.readUInt32LE(is64 ? 8 : 4),
+    rtt: buf.readUInt32LE(is64 ? 12 : 8),
   };
 }
 
@@ -180,14 +226,14 @@ export class WindowsIcmpProvider extends BaseIcmpProvider {
   async probe(params: IcmpProbeParams): Promise<IcmpProbeResult> {
     const {
       target,
-      ttl = 128,
+      ttl = ICMP_DEFAULT_TTL,
       packetSize = ICMP_DEFAULT_PACKET_SIZE,
       timeout = ICMP_PROBE_TIMEOUT_MS,
     } = params;
 
     const fns = getWinIcmpFns();
     const destAddr = fns.inetAddr(target);
-    if (destAddr === 0xffffffff) {
+    if (destAddr === INET_ADDR_ERROR) {
       return {
         target,
         ip: '',
@@ -202,29 +248,14 @@ export class WindowsIcmpProvider extends BaseIcmpProvider {
 
     const handle = fns.createFile();
     try {
-      const sendData = Buffer.alloc(packetSize, 0xaa);
-      const optionBuf = buildOptionBuf(ttl);
-      const replyBuf = Buffer.alloc(getReplyBufferSize(packetSize));
-
-      const numReplies = await new Promise<number>((resolve, reject) => {
-        fns.sendEcho.async(
-          handle,
-          destAddr,
-          sendData,
-          sendData.length,
-          optionBuf,
-          replyBuf,
-          replyBuf.length,
-          timeout,
-          (err, result) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-            resolve(Number(result));
-          },
-        );
-      });
+      const { numReplies, replyBuf } = await sendEchoOnce(
+        fns,
+        handle,
+        destAddr,
+        packetSize,
+        ttl,
+        timeout,
+      );
 
       if (numReplies === 0) {
         return {
@@ -265,7 +296,7 @@ export class WindowsIcmpProvider extends BaseIcmpProvider {
 
     const fns = getWinIcmpFns();
     const destAddr = fns.inetAddr(target);
-    if (destAddr === 0xffffffff) {
+    if (destAddr === INET_ADDR_ERROR) {
       return { target, ip: '', hops: [], reached: false, totalHops: 0, totalTime: 0 };
     }
 
@@ -275,29 +306,14 @@ export class WindowsIcmpProvider extends BaseIcmpProvider {
 
     try {
       for (let ttl = 1; ttl <= maxHops; ttl++) {
-        const sendData = Buffer.alloc(packetSize, 0xaa);
-        const optionBuf = buildOptionBuf(ttl);
-        const replyBuf = Buffer.alloc(getReplyBufferSize(packetSize));
-
-        const numReplies = await new Promise<number>((resolve, reject) => {
-          fns.sendEcho.async(
-            handle,
-            destAddr,
-            sendData,
-            sendData.length,
-            optionBuf,
-            replyBuf,
-            replyBuf.length,
-            timeout,
-            (err, result) => {
-              if (err) {
-                reject(err);
-                return;
-              }
-              resolve(Number(result));
-            },
-          );
-        });
+        const { numReplies, replyBuf } = await sendEchoOnce(
+          fns,
+          handle,
+          destAddr,
+          packetSize,
+          ttl,
+          timeout,
+        );
 
         if (numReplies === 0) {
           hops.push({

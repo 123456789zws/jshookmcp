@@ -20,16 +20,16 @@
  */
 
 import { createHash } from 'node:crypto';
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 
 import { ToolError } from '@errors/ToolError';
 
 import {
-  APK_PACKER_MAX_APK_BYTES,
   APK_SIGBLOCK_DEX_PREFIX_HEAD_BYTES,
   APK_SIGBLOCK_EOCD_SCAN_BYTES,
   APK_SIGBLOCK_MAX_BYTES,
 } from './constants';
+import { validateApkFile } from './validate-apk';
 import type {
   Anomaly,
   CertificateInfo,
@@ -48,12 +48,26 @@ import {
   BLOCK_ID_V2,
   BLOCK_ID_V3,
   BLOCK_ID_V3_1,
-  BLOCK_ID_V4,
+  BLOCK_ID_VERITY_PADDING,
   DEX_MAGIC,
   EOCD_SIGNATURE,
 } from './signing-block-types';
 
 const SIG_BLOCK_MAGIC_BYTES = Buffer.from(APK_SIG_BLOCK_MAGIC, 'utf8');
+
+// ── EOCD / Signing-Block layout constants (PE/APK binary formats) ──
+/** EOCD record is 22 bytes minimum (no comment field). */
+const EOCD_MIN_RECORD_SIZE = 22;
+/** Offset of the central-directory-offset field within the EOCD record. */
+const EOCD_CENTRAL_DIR_OFFSET_FIELD = 16;
+/** Offset of the comment-length field within the EOCD record. */
+const EOCD_COMMENT_LEN_FIELD = 20;
+/** Signing-block trailer: [size_of_block (u64)] [magic (16 B)] = 24 bytes. */
+const SIG_BLOCK_TRAILER_SIZE = 24;
+/** The u64 size field at the head of the signing block. */
+const SIG_BLOCK_SIZE_FIELD = 8;
+/** ID-value pair header: [size u64][id u32] = 12 bytes. */
+const PAIR_HEADER_SIZE = 12;
 
 interface WriteableSchemes {
   v2?: { signers: V2Signer[] };
@@ -77,36 +91,12 @@ export class SigningBlockParser {
    * `ToolError(NOT_FOUND|VALIDATION)` only for unusable input.
    */
   async parse(apkPath: string): Promise<SigningBlockReport> {
-    if (!apkPath || typeof apkPath !== 'string') {
-      throw new ToolError('VALIDATION', 'apkPath must be a non-empty string');
-    }
-
-    let stats;
-    try {
-      stats = await stat(apkPath);
-    } catch (cause) {
-      throw new ToolError('NOT_FOUND', `APK not found: ${apkPath}`, {
-        details: { apkPath },
-        cause: cause as Error,
-      });
-    }
-    if (!stats.isFile()) {
-      throw new ToolError('VALIDATION', `Path is not a regular file: ${apkPath}`, {
-        details: { apkPath },
-      });
-    }
-    if (stats.size > APK_PACKER_MAX_APK_BYTES) {
-      throw new ToolError(
-        'VALIDATION',
-        `APK exceeds APK_PACKER_MAX_APK_BYTES (${APK_PACKER_MAX_APK_BYTES} bytes): ${stats.size}`,
-        { details: { apkPath, size: stats.size, max: APK_PACKER_MAX_APK_BYTES } },
-      );
-    }
+    const { size: fileSize } = await validateApkFile(apkPath);
 
     let fh: FileHandle | undefined;
     try {
       fh = await open(apkPath, 'r');
-      return await this.parseHandle(fh, apkPath, stats.size);
+      return await this.parseHandle(fh, apkPath, fileSize);
     } finally {
       if (fh) await fh.close();
     }
@@ -136,11 +126,11 @@ export class SigningBlockParser {
       });
       return buildReport(apkPath, fileSize, state, false);
     }
-    const centralDirOffset = tail.readUInt32LE(eocdOffsetInTail + 16);
+    const centralDirOffset = tail.readUInt32LE(eocdOffsetInTail + EOCD_CENTRAL_DIR_OFFSET_FIELD);
     const fileEOCDOffset = fileSize - tailLen + eocdOffsetInTail;
 
     // 2. Validate centralDirOffset is sane.
-    if (centralDirOffset >= fileEOCDOffset || centralDirOffset < 24) {
+    if (centralDirOffset >= fileEOCDOffset || centralDirOffset < SIG_BLOCK_TRAILER_SIZE) {
       state.warnings.push(
         `Implausible centralDirOffset ${centralDirOffset} given file size ${fileSize}`,
       );
@@ -149,9 +139,9 @@ export class SigningBlockParser {
 
     // 3. Read 24 bytes immediately preceding centralDirOffset:
     //    [size_of_block (u64)] [magic (16 B "APK Sig Block 42")].
-    const trailer = Buffer.alloc(24);
-    await fh.read(trailer, 0, 24, centralDirOffset - 24);
-    const magicCandidate = trailer.subarray(8);
+    const trailer = Buffer.alloc(SIG_BLOCK_TRAILER_SIZE);
+    await fh.read(trailer, 0, SIG_BLOCK_TRAILER_SIZE, centralDirOffset - SIG_BLOCK_TRAILER_SIZE);
+    const magicCandidate = trailer.subarray(SIG_BLOCK_SIZE_FIELD);
 
     if (!magicCandidate.equals(SIG_BLOCK_MAGIC_BYTES)) {
       // Magic missing at the canonical position — try a small scan.
@@ -193,12 +183,12 @@ export class SigningBlockParser {
     // The "sizeOfBlock" stored at both ends covers everything except the
     // leading 8-byte size field, so the absolute block start is at
     // (centralDirOffset - sizeOfBlock - 8).
-    const blockStartOffset = centralDirOffset - sizeOfBlock - 8;
+    const blockStartOffset = centralDirOffset - sizeOfBlock - SIG_BLOCK_SIZE_FIELD;
     if (blockStartOffset < 0) {
       state.warnings.push('Computed signing block start offset is negative — refusing to read');
       return buildReport(apkPath, fileSize, state, false);
     }
-    const totalLen = sizeOfBlock + 8;
+    const totalLen = sizeOfBlock + SIG_BLOCK_SIZE_FIELD;
     if (totalLen > APK_SIGBLOCK_MAX_BYTES) {
       state.warnings.push(
         `Signing block total length ${totalLen} exceeds APK_SIGBLOCK_MAX_BYTES — refusing to read`,
@@ -260,13 +250,12 @@ function buildReport(
 
 /** Reverse-scan the tail buffer for the EOCD signature. Returns offset or -1. */
 function findEOCD(tail: Buffer): number {
-  // EOCD record is 22 bytes minimum (no comment). Magic at the start.
-  if (tail.length < 22) return -1;
-  for (let i = tail.length - 22; i >= 0; i--) {
+  if (tail.length < EOCD_MIN_RECORD_SIZE) return -1;
+  for (let i = tail.length - EOCD_MIN_RECORD_SIZE; i >= 0; i--) {
     if (tail.readUInt32LE(i) === EOCD_SIGNATURE) {
       // Validate commentLength field (last 2 bytes) matches remaining buffer.
-      const commentLen = tail.readUInt16LE(i + 20);
-      if (i + 22 + commentLen === tail.length) {
+      const commentLen = tail.readUInt16LE(i + EOCD_COMMENT_LEN_FIELD);
+      if (i + EOCD_MIN_RECORD_SIZE + commentLen === tail.length) {
         return i;
       }
     }
@@ -278,18 +267,18 @@ function findEOCD(tail: Buffer): number {
 function parseIdValuePairs(block: Buffer, state: ParserState): void {
   // Skip leading 8-byte size field at block[0..8] and trailing
   // size + magic at block[totalLen-24..]. Payload is block[8..totalLen-24].
-  const payloadStart = 8;
-  const payloadEnd = block.length - 24;
+  const payloadStart = SIG_BLOCK_SIZE_FIELD;
+  const payloadEnd = block.length - SIG_BLOCK_TRAILER_SIZE;
   let cursor = payloadStart;
-  while (cursor + 12 <= payloadEnd) {
+  while (cursor + PAIR_HEADER_SIZE <= payloadEnd) {
     const pairSize = readU64LEAsNumber(block, cursor);
-    if (pairSize < 4 || cursor + 8 + pairSize > payloadEnd) {
+    if (pairSize < 4 || cursor + SIG_BLOCK_SIZE_FIELD + pairSize > payloadEnd) {
       state.warnings.push(`Truncated ID-value pair at offset ${cursor} (pairSize ${pairSize})`);
       return;
     }
-    const id = block.readUInt32LE(cursor + 8);
-    const valueStart = cursor + 12;
-    const valueEnd = cursor + 8 + pairSize;
+    const id = block.readUInt32LE(cursor + SIG_BLOCK_SIZE_FIELD);
+    const valueStart = cursor + PAIR_HEADER_SIZE;
+    const valueEnd = cursor + SIG_BLOCK_SIZE_FIELD + pairSize;
     const value = block.subarray(valueStart, valueEnd);
     dispatchBlock(id, value, state);
     cursor = valueEnd;
@@ -313,18 +302,36 @@ function dispatchBlock(id: number, value: Buffer, state: ParserState): void {
     }
     case BLOCK_ID_V3: {
       const signers = parseV2OrV3Signers(value, /* isV3 */ true, state) as V3Signer[];
+      if (state.schemes.v3) {
+        // Mirror the v2 duplicate-scheme check — a second v3 block is a
+        // layout anomaly, and the signers must not be silently dropped.
+        state.anomalies.push({
+          kind: 'duplicate-scheme',
+          evidence: 'v3 signers block (0xf05368c0) appears more than once',
+        });
+      }
       const keyRotation = collectProofOfRotation(signers);
       state.schemes.v3 = keyRotation ? { signers, keyRotation } : { signers };
       return;
     }
     case BLOCK_ID_V3_1: {
       const signers = parseV2OrV3Signers(value, /* isV3 */ true, state) as V3Signer[];
+      if (state.schemes.v3_1) {
+        state.anomalies.push({
+          kind: 'duplicate-scheme',
+          evidence: 'v3.1 signers block (0x1b93ad61) appears more than once',
+        });
+      }
       state.schemes.v3_1 = { signers };
       return;
     }
-    case BLOCK_ID_V4: {
-      const v4 = parseV4Block(value);
-      if (v4) state.schemes.v4 = v4;
+    case BLOCK_ID_VERITY_PADDING: {
+      // 0x42726577 ("Brew") is the verity *padding* block (page alignment).
+      // It is not the v4 signature — v4 lives in a separate .idsig file.
+      state.unknownBlocks.push({ id: toHexId(id), size: value.length });
+      state.warnings.push(
+        `Verity padding block (0x42726577, size=${value.length}) present — content ignored`,
+      );
       return;
     }
     case BLOCK_ID_SOURCE_STAMP:
@@ -493,33 +500,6 @@ function collectProofOfRotation(signers: ReadonlyArray<V3Signer>): ProofOfRotati
     }
   }
   return undefined;
-}
-
-/**
- * Parse a v4 block. The on-disk shape varies by AOSP version; we read the
- * conservative subset: u32 algorithm id + u32 root-hash length + hash +
- * u32 tree size length + u64 tree size (best-effort).
- */
-function parseV4Block(value: Buffer): V4Block | undefined {
-  try {
-    const r = new LengthReader(value, 'v4');
-    const algId = r.readU32();
-    const hashLen = r.readU32();
-    const hash = r.readSlice(hashLen, 'v4-hash');
-    let treeSize = 0;
-    if (r.remaining() >= 8) {
-      treeSize = readU64LEAsNumber(value, r.position());
-    } else if (r.remaining() >= 4) {
-      treeSize = r.readU32();
-    }
-    return {
-      algorithm: mapAlgorithmId(algId),
-      rootHash: hash.toString('hex'),
-      treeSize,
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 /** Compute SHA-256 over a DER-encoded certificate. */

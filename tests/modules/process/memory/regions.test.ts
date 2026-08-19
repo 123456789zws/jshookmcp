@@ -52,6 +52,7 @@ import {
   MEMORY_SCAN_MAX_REGIONS,
   MEMORY_VMMAP_ENUM_TIMEOUT_MS,
   MEMORY_VMMAP_MAX_BUFFER_BYTES,
+  USERSPACE_MAX_ADDRESS,
 } from '@src/constants';
 
 describe('memory/regions', () => {
@@ -150,6 +151,7 @@ describe('memory/regions', () => {
     const options = state.executePowerShellScript.mock.calls[0]?.[1] as { maxBuffer: number };
     expect(script).toContain(`regions.Count >= ${MEMORY_ENUM_REGIONS_RETURN_LIMIT}`);
     expect(script).toContain(`scannedRegions >= ${MEMORY_SCAN_MAX_REGIONS}`);
+    expect(script).toContain(`>= 0x${USERSPACE_MAX_ADDRESS.toString(16)}`);
     expect(options.maxBuffer).toBe(MEMORY_ENUM_REGIONS_MAX_BUFFER_BYTES);
   });
 

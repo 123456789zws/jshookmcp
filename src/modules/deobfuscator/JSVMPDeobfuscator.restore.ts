@@ -1,6 +1,31 @@
 import type { UnresolvedPart, VMType } from '@internal-types/index';
 import { logger } from '@utils/logger';
 import { type ExecutionSandbox } from '@modules/security/ExecutionSandbox';
+import { int } from '@src/constants/helpers';
+
+/**
+ * Sandbox budget (ms) for statically evaluating an obfuscator.io string
+ * array — a bounded array literal, so a short timeout suffices.
+ *
+ * @env JSVMP_STRING_ARRAY_SANDBOX_TIMEOUT_MS
+ * @default 3000
+ */
+const STRING_ARRAY_SANDBOX_TIMEOUT_MS = int('JSVMP_STRING_ARRAY_SANDBOX_TIMEOUT_MS', 3_000);
+
+/**
+ * Sandbox budget (ms) for executing whole-program evaluations (JSFuck /
+ * JJEncode payloads), which can be arbitrarily large.
+ *
+ * @env JSVMP_EVAL_SANDBOX_TIMEOUT_MS
+ * @default 5000
+ */
+const EVAL_SANDBOX_TIMEOUT_MS = int('JSVMP_EVAL_SANDBOX_TIMEOUT_MS', 5_000);
+
+/**
+ * JSFuck payloads larger than this are not evaluated locally — decoding is
+ * quadratic-ish in practice and risks long sandbox runs.
+ */
+const JSFUCK_MAX_CODE_SIZE = 100_000;
 
 type RestoreResult = {
   code: string;
@@ -14,25 +39,33 @@ type RestoreContext = {
   sandbox: ExecutionSandbox;
 };
 
+export interface RestoreBudget {
+  /** Sandbox evaluation timeout in ms (applies to every sandbox.execute). */
+  timeoutMs?: number;
+  /** Iteration cap for loop-based restore passes. */
+  maxIterations?: number;
+}
+
 export async function restoreJSVMPCode(
   context: RestoreContext,
   code: string,
   vmType: VMType,
   aggressive: boolean,
+  budget?: RestoreBudget,
 ): Promise<RestoreResult> {
   const warnings: string[] = [];
   const unresolvedParts: UnresolvedPart[] = [];
 
   if (vmType === 'obfuscator.io') {
-    return restoreObfuscatorIO(context, code, aggressive, warnings, unresolvedParts);
+    return restoreObfuscatorIO(context, code, aggressive, warnings, unresolvedParts, budget);
   }
   if (vmType === 'jsfuck') {
-    return restoreJSFuck(context, code, warnings);
+    return restoreJSFuck(context, code, warnings, budget);
   }
   if (vmType === 'jjencode') {
-    return restoreJJEncode(context, code, warnings);
+    return restoreJJEncode(context, code, warnings, budget);
   }
-  return restoreCustomVM(context, code, aggressive, warnings, unresolvedParts);
+  return restoreCustomVM(context, code, aggressive, warnings, unresolvedParts, budget);
 }
 
 async function restoreObfuscatorIO(
@@ -41,6 +74,7 @@ async function restoreObfuscatorIO(
   aggressive: boolean,
   warnings: string[],
   unresolvedParts: UnresolvedPart[],
+  budget?: RestoreBudget,
 ): Promise<RestoreResult> {
   let restored = code;
   let confidence = 0.5;
@@ -56,7 +90,7 @@ async function restoreObfuscatorIO(
       try {
         const sandboxResult = await context.sandbox.execute({
           code: `return ${arrayContent || '[]'};`,
-          timeoutMs: 3000,
+          timeoutMs: budget?.timeoutMs ?? STRING_ARRAY_SANDBOX_TIMEOUT_MS,
         });
         const stringArray = sandboxResult.ok ? sandboxResult.output : undefined;
 
@@ -124,12 +158,13 @@ async function restoreJSFuck(
   context: RestoreContext,
   code: string,
   warnings: string[],
+  budget?: RestoreBudget,
 ): Promise<RestoreResult> {
   try {
     logger.info('JSFuck detected, attempting deobfuscation...');
 
     try {
-      if (code.length > 100000) {
+      if (code.length > JSFUCK_MAX_CODE_SIZE) {
         warnings.push('JSFuck code detected, file too large to process directly.');
         warnings.push('Consider using an online JSFuck decoder tool.');
         return {
@@ -141,7 +176,7 @@ async function restoreJSFuck(
 
       const sandboxResult = await context.sandbox.execute({
         code: `return ${code};`,
-        timeoutMs: 5000,
+        timeoutMs: budget?.timeoutMs ?? EVAL_SANDBOX_TIMEOUT_MS,
       });
       const result = sandboxResult.ok ? sandboxResult.output : undefined;
 
@@ -183,6 +218,7 @@ async function restoreJJEncode(
   context: RestoreContext,
   code: string,
   warnings: string[],
+  budget?: RestoreBudget,
 ): Promise<RestoreResult> {
   try {
     logger.info('JJEncode detected, attempting deobfuscation...');
@@ -194,7 +230,7 @@ async function restoreJJEncode(
       if (lastLine?.includes('$$$$')) {
         const sandboxResult = await context.sandbox.execute({
           code: `${code}; return $$$$()`,
-          timeoutMs: 5000,
+          timeoutMs: budget?.timeoutMs ?? EVAL_SANDBOX_TIMEOUT_MS,
         });
         const result = sandboxResult.ok ? sandboxResult.output : undefined;
 
@@ -208,7 +244,10 @@ async function restoreJJEncode(
         }
       }
 
-      const sandboxResult = await context.sandbox.execute({ code, timeoutMs: 5000 });
+      const sandboxResult = await context.sandbox.execute({
+        code,
+        timeoutMs: budget?.timeoutMs ?? EVAL_SANDBOX_TIMEOUT_MS,
+      });
       if (!sandboxResult.ok) {
         logger.warn('JJEncode sandbox execution failed:', sandboxResult.error);
       }
@@ -245,6 +284,7 @@ async function restoreCustomVM(
   aggressive: boolean,
   warnings: string[],
   unresolvedParts: UnresolvedPart[],
+  _budget?: RestoreBudget,
 ): Promise<RestoreResult> {
   warnings.push('AI-assisted deobfuscation removed, using fallback directly.');
   return restoreCustomVMBasic(code, aggressive, warnings, unresolvedParts);

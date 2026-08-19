@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const originalPlatform = process.platform;
+const originalArch = process.arch;
 
 const { state, mockKoffi, posixMocks } = vi.hoisted(() => {
   const shared = {
@@ -21,9 +22,18 @@ const { state, mockKoffi, posixMocks } = vi.hoisted(() => {
       replySize: number,
     ) => {
       shared.replySizes.push(replySize);
-      replyBuf.writeUInt32LE(destAddr >>> 0, 0);
-      replyBuf.writeUInt32LE(0, 4);
-      replyBuf.writeUInt32LE(7, 8);
+      if (process.arch === 'x64') {
+        // ICMP_ECHO_REPLY (x64): Address is a ULONG_PTR at 0 (8B), Status at 8,
+        // RoundTripTime at 12.
+        replyBuf.writeBigUInt64LE(BigInt(destAddr >>> 0), 0);
+        replyBuf.writeUInt32LE(0, 8);
+        replyBuf.writeUInt32LE(7, 12);
+      } else {
+        // ICMP_ECHO_REPLY32: Address(4) Status(4) RoundTripTime(4).
+        replyBuf.writeUInt32LE(destAddr >>> 0, 0);
+        replyBuf.writeUInt32LE(0, 4);
+        replyBuf.writeUInt32LE(7, 8);
+      }
       return 1;
     },
   );
@@ -154,6 +164,109 @@ describe('IcmpProbe POSIX traceroute SEND_ERROR', () => {
     expect(result.hops.length).toBeLessThanOrEqual(5);
     expect(result.hops.every((h: { status: string }) => h.status === 'SEND_ERROR')).toBe(true);
     expect(result.reached).toBe(false);
+
+    unloadIcmpLibraries();
+  });
+});
+
+describe('IcmpProbe Windows ICMP_ECHO_REPLY32 (x86 layout)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    Object.defineProperty(process, 'arch', { value: 'x86' });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+    Object.defineProperty(process, 'arch', { value: originalArch });
+  });
+
+  it('parses the 32-bit reply layout (Address@0 Status@4 RTT@8)', async () => {
+    vi.resetModules();
+    const { icmpProbe, unloadIcmpLibraries } = await import('@src/native/IcmpProbe');
+
+    const result = await icmpProbe({ target: '1.1.1.1', timeout: 1000 });
+
+    expect(result.alive).toBe(true);
+    expect(result.rtt).toBe(7);
+    expect(result.ip).toBe('1.1.1.1');
+
+    unloadIcmpLibraries();
+  });
+});
+
+describe('IcmpProbe POSIX reply source-IP validation', () => {
+  let capturedId = 0;
+  let replySourceIp = '1.2.3.4';
+
+  /** Build an IPv4 header (20B) + ICMP echo reply whose id/source are controllable. */
+  function buildReply(): Buffer {
+    const buf = Buffer.alloc(28, 0);
+    buf[0] = 0x45; // IPv4, IHL=5
+    const parts = replySourceIp.split('.').map(Number);
+    buf[12] = parts[0]!;
+    buf[13] = parts[1]!;
+    buf[14] = parts[2]!;
+    buf[15] = parts[3]!;
+    buf[20] = 0; // ICMP type: Echo Reply
+    buf[21] = 0; // code
+    buf.writeUInt16BE(capturedId, 24); // id at ihl+4
+    buf.writeUInt16BE(1, 26); // seq
+    return buf;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedId = 0;
+    replySourceIp = '1.2.3.4';
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+
+    // Capture the random per-probe id from the outbound echo packet
+    // (ICMP header: type@0 code@1 checksum@2 id@4 seq@6).
+    (posixMocks.posixSendto as any).mockImplementation(
+      (_fd: number, packet: Buffer, _len: number) => {
+        capturedId = packet.readUInt16BE(4);
+        return 32;
+      },
+    );
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+  });
+
+  it('accepts an echo reply from the probed target (id + source match)', async () => {
+    (posixMocks.posixRecv as any).mockImplementation((_fd: number, buf: Buffer, _len: number) => {
+      const reply = buildReply();
+      reply.copy(buf);
+      return reply.length;
+    });
+    vi.resetModules();
+    const { icmpProbe, unloadIcmpLibraries } = await import('@src/native/IcmpProbe');
+
+    const result = await icmpProbe({ target: '1.2.3.4', timeout: 1000 });
+
+    expect(result.alive).toBe(true);
+    expect(result.ip).toBe('1.2.3.4');
+
+    unloadIcmpLibraries();
+  });
+
+  it('rejects a reply from a different source IP (concurrent-probe mismatch)', async () => {
+    replySourceIp = '5.6.7.8';
+    (posixMocks.posixRecv as any).mockImplementation((_fd: number, buf: Buffer, _len: number) => {
+      const reply = buildReply();
+      reply.copy(buf);
+      return reply.length;
+    });
+    vi.resetModules();
+    const { icmpProbe, unloadIcmpLibraries } = await import('@src/native/IcmpProbe');
+
+    const result = await icmpProbe({ target: '1.2.3.4', timeout: 1000 });
+
+    // Same id (raw socket broadcast), wrong source → treated as noise.
+    expect(result.alive).toBe(false);
+    expect(result.icmpStatus).toBe('UNEXPECTED_REPLY');
 
     unloadIcmpLibraries();
   });

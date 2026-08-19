@@ -70,9 +70,23 @@ describe('HookPatternScanner: decodeHookTarget', () => {
     expect(t).toBe('0x112');
   });
   it('jmp_abs64: target is the 8-byte absolute address at +6', () => {
-    // FF 25 [4-byte disp] [8-byte absolute target = 0xdeadbeefcafe]
+    // FF 25 [4-byte disp=0] [8-byte absolute target = 0xdeadbeefcafe]
     const bytes = U([0xff, 0x25, 0, 0, 0, 0, 0xfe, 0xca, 0xef, 0xbe, 0xad, 0xde, 0, 0]);
     expect(decodeHookTarget(bytes, 0x400000n)).toBe('0xdeadbeefcafe');
+  });
+  it('jmp_abs64: compiler-style FF 25 [rip+disp32] resolves the memory operand', () => {
+    // Normal compiler output: FF 25 disp32 (JMP QWORD PTR [rip+disp32]).
+    // disp32 = 0x10 → target = funcAddr + 6 + 0x10 (the memory slot holds the address,
+    // so the resolved value is the slot address itself, not bytes 6-13 of the window).
+    const bytes = U([
+      0xff, 0x25, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    expect(decodeHookTarget(bytes, 0x400000n)).toBe('0x400016');
+  });
+  it('jmp_abs64: negative disp32 wraps correctly', () => {
+    // disp32 = -0x20 (0xffffffe0) → target = 0x400000 + 6 - 0x20 = 0x3fffe6
+    const bytes = U([0xff, 0x25, 0xe0, 0xff, 0xff, 0xff]);
+    expect(decodeHookTarget(bytes, 0x400000n)).toBe('0x3fffe6');
   });
   it('mov_jmp: target is the MOV imm32', () => {
     // B8 78 56 34 12 FF E0 → imm32 = 0x12345678

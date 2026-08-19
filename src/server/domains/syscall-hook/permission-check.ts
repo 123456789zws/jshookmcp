@@ -1,8 +1,18 @@
+import { LOGON_PROBE_TIMEOUT_MS } from '@src/constants/syscall-hook';
+import { logger } from '@utils/logger';
+
 export interface PermissionCheckResult {
   hasPermission: boolean;
   platform: string;
   reason?: string;
   requiredCapabilities?: string[];
+}
+
+/** Log a fail-open probe failure — a silent mis-authorization is undiagnosable. */
+function logProbeFailure(platform: string, error: unknown): void {
+  logger.warn(
+    `[syscall-hook] permission probe failed on ${platform}; fail-open: monitor will be attempted and surface the real error at runtime. ${error instanceof Error ? error.message : String(error)}`,
+  );
 }
 
 export async function checkSyscallPermission(): Promise<PermissionCheckResult> {
@@ -22,8 +32,12 @@ export async function checkSyscallPermission(): Promise<PermissionCheckResult> {
         reason: 'strace requires root (EUID=0) or ptrace_scope=0',
         requiredCapabilities: ['root', 'CAP_SYS_PTRACE'],
       };
-    } catch {
-      return { hasPermission: true, platform }; // If can't check, allow (will fail at runtime)
+    } catch (error) {
+      // Fail-open stays (the monitor itself will surface the real error at
+      // runtime), but the probe failure must be logged — a silent
+      // mis-authorization is undiagnosable.
+      logProbeFailure(platform, error);
+      return { hasPermission: true, platform };
     }
   }
 
@@ -34,7 +48,7 @@ export async function checkSyscallPermission(): Promise<PermissionCheckResult> {
       const { execFile } = await import('node:child_process');
       const { promisify } = await import('node:util');
       const execFileAsync = promisify(execFile);
-      await execFileAsync('logman', ['query', 'providers'], { timeout: 5000 });
+      await execFileAsync('logman', ['query', 'providers'], { timeout: LOGON_PROBE_TIMEOUT_MS });
       return { hasPermission: true, platform };
     } catch {
       return {
@@ -56,7 +70,9 @@ export async function checkSyscallPermission(): Promise<PermissionCheckResult> {
         reason: 'dtrace requires root privileges on macOS',
         requiredCapabilities: ['root'],
       };
-    } catch {
+    } catch (error) {
+      // Fail-open + log (see logProbeFailure).
+      logProbeFailure(platform, error);
       return { hasPermission: true, platform };
     }
   }

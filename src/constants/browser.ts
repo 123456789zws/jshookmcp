@@ -28,6 +28,31 @@ export const PAGE_FRAME_SELECTOR_TIMEOUT_MS = int('PAGE_FRAME_SELECTOR_TIMEOUT_M
 /** Timeout for waitForNetworkIdle in PageController. */
 export const PAGE_NETWORK_IDLE_TIMEOUT_MS = int('PAGE_NETWORK_IDLE_TIMEOUT_MS', 30_000);
 
+/**
+ * Default timeout for page navigation/reload/selector-wait operations in
+ * PageController when no per-call timeout is supplied. Also the dialog-wait
+ * timeout in handleDialog.
+ */
+export const PAGE_OPERATION_TIMEOUT_MS = int('PAGE_OPERATION_TIMEOUT_MS', 30_000);
+
+/**
+ * Hard backstop timeout for page.evaluate()/evaluateOnNewDocument()/coverage
+ * calls wrapped in PageController's timeout helpers.
+ */
+export const PAGE_EVALUATE_TIMEOUT_MS = int('PAGE_EVALUATE_TIMEOUT_MS', 30_000);
+
+/* ================================================================== */
+/*  CDP session                                                        */
+/* ================================================================== */
+
+/**
+ * Watchdog for CDP session operations (createCDPSession / liveness ping) so a
+ * hanging session cannot block monitor setup. After debugger pause/resume a
+ * session can sit in a zombie state where send() hangs indefinitely without
+ * firing 'disconnected' (used by PerformanceMonitor + ConsoleMonitor).
+ */
+export const CDP_SESSION_TIMEOUT_MS = int('CDP_SESSION_TIMEOUT_MS', 500);
+
 /* ================================================================== */
 /*  DOM inspection                                                     */
 /* ================================================================== */

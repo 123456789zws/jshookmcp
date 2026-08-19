@@ -41,8 +41,32 @@ interface WindowWithDomObserver extends Window {
   __domObserver?: MutationObserver;
 }
 
+/** Cap on textContent reported for query-all results (chars). */
+const TEXT_CONTENT_MAX_CHARS = 500;
+/** Cap on findByTextEvaluation XPath snapshot results. */
+const XPATH_RESULT_LIMIT = 100;
+
 const serializeForEvaluation = (value: string | number | undefined): string =>
   value === undefined ? 'undefined' : JSON.stringify(value);
+
+/**
+ * Visibility check (display/visibility/opacity) shared by the injected page
+ * evaluations. String-built evaluations inline this source verbatim; the
+ * function-reference evaluations (querySelectorEvaluation / findByTextEvaluation,
+ * kept for Node-side callers) call {@link isVisible} instead. Both variants
+ * stay self-contained because injected code runs in the page where module
+ * scope is unreachable.
+ */
+const IS_VISIBLE_SOURCE = `function isVisible(element) {
+  const style = window.getComputedStyle(element);
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+}`;
+
+/** Node-side visibility check used by direct (non-injected) evaluation calls. */
+export function isVisible(element: Element): boolean {
+  const style = window.getComputedStyle(element);
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+}
 
 export const SHADOW_DOM_WALKER_SCRIPT = `
 const walkShadowRoots = () => {
@@ -68,6 +92,7 @@ const walkShadowRoots = () => {
 export function buildQueryAllEvaluation(selector: string, limit: number): string {
   return `
 ${SHADOW_DOM_WALKER_SCRIPT}
+${IS_VISIBLE_SOURCE}
 const selector = ${serializeForEvaluation(selector)};
 const maxLimit = ${serializeForEvaluation(limit)};
 const { roots, shadowRootCount } = walkShadowRoots();
@@ -85,15 +110,14 @@ for (const root of roots) {
       attributes[attr.name] = attr.value;
     }
     const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
     const textContent = element.textContent?.trim() || '';
     results.push({
       found: true,
       nodeName: element.nodeName,
       attributes,
-      textContent: textContent.length > 500 ? textContent.substring(0, 500) + '...[truncated]' : textContent,
+      textContent: textContent.length > ${TEXT_CONTENT_MAX_CHARS} ? textContent.substring(0, ${TEXT_CONTENT_MAX_CHARS}) + '...[truncated]' : textContent,
       boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      visible: style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0',
+      visible: isVisible(element),
     });
     if (results.length >= maxLimit) break;
   }
@@ -109,6 +133,7 @@ return { elements: results, diagnostics: { readyState: document.readyState, shad
 export function buildFindClickableEvaluation(filterText?: string): string {
   return `
 ${SHADOW_DOM_WALKER_SCRIPT}
+${IS_VISIBLE_SOURCE}
 const filter = ${serializeForEvaluation(filterText)};
 const normalizedFilter = filter?.toLowerCase();
 const { roots, shadowRootCount } = walkShadowRoots();
@@ -120,7 +145,6 @@ const appendClickable = (element, type, fallbackSelector) => {
   const text = element.textContent?.trim() || (element.value ?? '').trim() || '';
   if (normalizedFilter && !text.toLowerCase().includes(normalizedFilter)) return;
   const rect = element.getBoundingClientRect();
-  const style = window.getComputedStyle(element);
   let selector = fallbackSelector;
   if (element.id) selector = '#' + element.id;
   else if (element.className) selector = fallbackSelector + '.' + element.className.split(' ')[0];
@@ -128,12 +152,7 @@ const appendClickable = (element, type, fallbackSelector) => {
     selector,
     text,
     type,
-    visible:
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      style.opacity !== '0' &&
-      rect.width > 0 &&
-      rect.height > 0,
+    visible: isVisible(element) && rect.width > 0 && rect.height > 0,
     boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
   });
 };
@@ -153,21 +172,47 @@ export function querySelectorEvaluation(selector: string): DOMInspectorElementIn
   const attributes: Record<string, string> = {};
   for (const attr of Array.from(element.attributes)) attributes[attr.name] = attr.value;
   const rect = element.getBoundingClientRect();
-  const style = window.getComputedStyle(element);
   return {
     found: true,
     nodeName: element.nodeName,
     attributes,
     textContent: element.textContent?.trim() || '',
     boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-    visible: style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0',
+    visible: isVisible(element),
   };
+}
+
+/**
+ * String-built variant of {@link querySelectorEvaluation} for `page.evaluate`
+ * injection — the function-reference form cannot carry module scope into the
+ * page, so the self-contained check source is inlined instead.
+ */
+export function buildQuerySelectorEvaluation(selector: string): string {
+  return `
+${IS_VISIBLE_SOURCE}
+const element = document.querySelector(${serializeForEvaluation(selector)});
+if (!element) return { found: false };
+const attributes = {};
+for (const attr of Array.from(element.attributes)) attributes[attr.name] = attr.value;
+const rect = element.getBoundingClientRect();
+return {
+  found: true,
+  nodeName: element.nodeName,
+  attributes,
+  textContent: element.textContent?.trim() || '',
+  boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+  visible: isVisible(element),
+};
+`.trim();
 }
 
 export function getStructureEvaluation(
   depth: number,
   withText: boolean,
 ): DOMInspectorStructureNode | null {
+  if (!document.body) {
+    return null;
+  }
   const buildTree = (node: Element, currentDepth: number): DOMInspectorStructureNode | null => {
     if (currentDepth > depth) return null;
     const result: DOMInspectorStructureNode = {
@@ -252,13 +297,37 @@ export function stopObservingDOMEvaluation(): void {
   }
 }
 
+/** Build an XPath 1.0 string literal that embeds `value` verbatim. */
+function xpathStringLiteral(value: string): string {
+  if (!value.includes("'")) {
+    return `'${value}'`;
+  }
+  if (!value.includes('"')) {
+    return `"${value}"`;
+  }
+  return `concat('${value.replace(/'/g, `', "'", '`)}')`;
+}
+
+/**
+ * JS-source twin of {@link xpathStringLiteral} for string-built evaluations
+ * (see {@link buildFindByTextEvaluation}). The concat() replacement is
+ * emitted via JSON.stringify so the generated page code stays valid JS
+ * (the value contains both quote kinds).
+ */
+const XPATH_STRING_LITERAL_SOURCE = `function xpathStringLiteral(value) {
+  if (!value.includes("'")) return "'" + value + "'";
+  if (!value.includes('"')) return '"' + value + '"';
+  return "concat('" + value.replace(/'/g, ${JSON.stringify(`', "'", '`)}) + "')";
+}`;
+
 export function findByTextEvaluation(
   searchText: string,
   tagName?: string,
 ): Array<DOMInspectorElementInfo & { selector: string }> {
-  const xpath = tagName
-    ? `//${tagName}[contains(text(), "${searchText}")]`
-    : `//*[contains(text(), "${searchText}")]`;
+  // tagName flows into the XPath expression: restrict it to a valid HTML tag
+  // name so it cannot inject predicates.
+  const safeTag = tagName && /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tagName) ? tagName : '*';
+  const xpath = `//${safeTag}[contains(text(), ${xpathStringLiteral(searchText)})]`;
   const result = document.evaluate(
     xpath,
     document,
@@ -267,11 +336,10 @@ export function findByTextEvaluation(
     null,
   );
   const matchedElements: Array<DOMInspectorElementInfo & { selector: string }> = [];
-  for (let i = 0; i < Math.min(result.snapshotLength, 100); i++) {
+  for (let i = 0; i < Math.min(result.snapshotLength, XPATH_RESULT_LIMIT); i++) {
     const element = result.snapshotItem(i) as Element | null;
     if (!element) continue;
     const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
     let selector = element.tagName.toLowerCase();
     if (element.id) selector = `#${element.id}`;
     else if (element.className) {
@@ -284,10 +352,50 @@ export function findByTextEvaluation(
       textContent: element.textContent?.trim(),
       selector,
       boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      visible: style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0',
+      visible: isVisible(element),
     });
   }
   return matchedElements;
+}
+
+/**
+ * String-built variant of {@link findByTextEvaluation} for `page.evaluate`
+ * injection — inlines the shared visibility and XPath-literal sources
+ * instead of relying on module scope.
+ */
+export function buildFindByTextEvaluation(searchText: string, tagName?: string): string {
+  // tagName flows into the XPath expression: restrict it to a valid HTML tag
+  // name so it cannot inject predicates.
+  const safeTag = tagName && /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tagName) ? tagName : '*';
+  return `
+${IS_VISIBLE_SOURCE}
+${XPATH_STRING_LITERAL_SOURCE}
+const searchText = ${serializeForEvaluation(searchText)};
+const safeTag = ${serializeForEvaluation(safeTag)};
+const xpath = '//' + safeTag + '[contains(text(), ' + xpathStringLiteral(searchText) + ')]';
+const result = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+const matchedElements = [];
+for (let i = 0; i < Math.min(result.snapshotLength, ${XPATH_RESULT_LIMIT}); i++) {
+  const element = result.snapshotItem(i);
+  if (!element) continue;
+  const rect = element.getBoundingClientRect();
+  let selector = element.tagName.toLowerCase();
+  if (element.id) selector = '#' + element.id;
+  else if (element.className) {
+    const classes = element.className.split(' ').filter(Boolean);
+    if (classes.length > 0) selector = element.tagName.toLowerCase() + '.' + classes[0];
+  }
+  matchedElements.push({
+    found: true,
+    nodeName: element.tagName,
+    textContent: element.textContent?.trim(),
+    selector,
+    boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    visible: isVisible(element),
+  });
+}
+return matchedElements;
+`.trim();
 }
 
 export function getXPathEvaluation(selector: string): string | null {

@@ -12,6 +12,18 @@ import { int } from './helpers.js';
 /** Default per-command processing timeout inside the webhook command queue. */
 export const WEBHOOK_PROCESS_TIMEOUT_MS = int('WEBHOOK_PROCESS_TIMEOUT_MS', 10_000);
 
+/** Default webhook command-queue capacity (max queued commands). */
+export const WEBHOOK_QUEUE_MAX_SIZE = int('WEBHOOK_QUEUE_MAX_SIZE', 1000);
+
+/** Default webhook command retry attempts before a command is marked failed. */
+export const WEBHOOK_QUEUE_MAX_RETRIES = int('WEBHOOK_QUEUE_MAX_RETRIES', 3);
+
+/** Delay (ms) between webhook command retry attempts. 0 = retry immediately. */
+export const WEBHOOK_QUEUE_RETRY_DELAY_MS = int('WEBHOOK_QUEUE_RETRY_DELAY_MS', 0);
+
+/** Default listen port for the webhook C2 server. */
+export const WEBHOOK_PORT = int('WEBHOOK_PORT', 18_789);
+
 /** Default per-step timeout for the cross-domain orchestrator. */
 export const ORCHESTRATOR_STEP_TIMEOUT_MS = int('ORCHESTRATOR_STEP_TIMEOUT_MS', 10_000);
 

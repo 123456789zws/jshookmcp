@@ -22,15 +22,32 @@ import type {
 } from '@server/sandbox/types';
 import type { MCPBridge } from '@server/sandbox/MCPBridge';
 import { SANDBOX_HELPER_SOURCE } from '@server/sandbox/SandboxHelpers';
-import { SANDBOX_EXEC_TIMEOUT_MS, SANDBOX_MEMORY_LIMIT_MB } from '@src/constants';
+import {
+  SANDBOX_EXEC_TIMEOUT_MS,
+  SANDBOX_MEMORY_LIMIT_MB,
+  SANDBOX_MAX_BRIDGE_CALLS,
+} from '@src/constants';
 
 const DEFAULT_TIMEOUT_MS = SANDBOX_EXEC_TIMEOUT_MS;
 const DEFAULT_MEMORY_LIMIT_BYTES = SANDBOX_MEMORY_LIMIT_MB * 1024 * 1024;
-const DEFAULT_MAX_BRIDGE_CALLS = 10;
 
 type QuickJSModule = Awaited<ReturnType<typeof import('quickjs-emscripten').getQuickJS>>;
 
 let quickjsPromise: Promise<QuickJSModule> | null = null;
+
+/**
+ * Dispose every handle an evalCode result may carry.
+ *
+ * quickjs-emscripten's evalCode result is a union type that only exposes the
+ * `value` or the `error` side depending on the outcome, so the non-narrowed
+ * side needs an explicit cast to reach it. Disposing a missing handle is a
+ * no-op; disposing both when both exist prevents handle leaks.
+ */
+function disposeEvalResult(result: unknown): void {
+  const handles = result as { value?: QuickJSHandle; error?: QuickJSHandle };
+  handles.value?.dispose();
+  handles.error?.dispose();
+}
 
 function getQuickJS(): Promise<QuickJSModule> {
   if (!quickjsPromise) {
@@ -119,94 +136,12 @@ export class QuickJSSandbox {
    * it down.  There is zero state leakage between calls.
    */
   async execute(code: string, options: SandboxOptions = {}): Promise<SandboxResult> {
-    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const memoryLimitBytes = options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES;
-
-    const QuickJS = await getQuickJS();
-    const runtime = QuickJS.newRuntime();
-
-    // Resource limits
-    runtime.setMemoryLimit(memoryLimitBytes);
-
-    // Timeout enforcement via interrupt handler
-    const startTime = Date.now();
-    let timedOut = false;
-    runtime.setInterruptHandler(() => {
-      if (Date.now() - startTime > timeoutMs) {
-        timedOut = true;
-        return true; // interrupt execution
-      }
-      return false;
-    });
-
-    const context = runtime.newContext();
-    const logs: string[] = [];
-
-    try {
-      // Inject console.log stub to capture output
-      this.injectConsole(context, logs);
-
-      // Inject pre-built helper libraries
-      this.injectHelpers(context);
-
-      // Inject MCP bridge if available
+    return this.executeInFreshRuntime(code, options, (ctx, logs) => {
+      // Legacy sync bridge stub — injected only when a bridge is set.
       if (this.bridge) {
-        this.injectBridge(context, this.bridge, logs);
+        this.injectBridge(ctx, this.bridge, logs);
       }
-
-      // Inject user-supplied globals
-      if (options.globals) {
-        this.injectGlobals(context, options.globals);
-      }
-
-      // Evaluate the user code
-      const result = context.evalCode(code, 'sandbox-eval.js');
-
-      if (result.error) {
-        const errorMsg = context.dump(result.error);
-        result.error.dispose();
-
-        if (timedOut) {
-          return {
-            ok: false,
-            error: 'Execution timed out',
-            timedOut: true,
-            durationMs: Date.now() - startTime,
-            logs,
-          };
-        }
-
-        return {
-          ok: false,
-          error: typeof errorMsg === 'object' ? JSON.stringify(errorMsg) : String(errorMsg),
-          timedOut: false,
-          durationMs: Date.now() - startTime,
-          logs,
-        };
-      }
-
-      const output = unmarshalFromQuickJS(context, result.value);
-      result.value.dispose();
-
-      return {
-        ok: true,
-        output,
-        timedOut: false,
-        durationMs: Date.now() - startTime,
-        logs,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        timedOut,
-        durationMs: Date.now() - startTime,
-        logs,
-      };
-    } finally {
-      context.dispose();
-      runtime.dispose();
-    }
+    });
   }
 
   /**
@@ -229,7 +164,7 @@ export class QuickJSSandbox {
     bridge: MCPBridge,
     options: OrchestrationOptions = {},
   ): Promise<OrchestrationResult> {
-    const maxBridgeCalls = options.maxBridgeCalls ?? DEFAULT_MAX_BRIDGE_CALLS;
+    const maxBridgeCalls = options.maxBridgeCalls ?? SANDBOX_MAX_BRIDGE_CALLS;
     const startTime = Date.now();
     const allLogs: string[] = [];
     const allBridgeCalls: BridgeCallRecord[] = [];
@@ -331,6 +266,22 @@ export class QuickJSSandbox {
     bridge: MCPBridge,
     options: SandboxOptions = {},
   ): Promise<SandboxResult> {
+    return this.executeInFreshRuntime(code, options, (ctx, logs) => {
+      this.injectBridgeForOrchestration(ctx, bridge, logs);
+    });
+  }
+
+  /**
+   * Shared single-round execution: spins up a fresh QuickJS runtime, injects
+   * the console/helpers/globals plus the caller-supplied bridge injection,
+   * evaluates the code, and tears everything down. Used by both execute()
+   * (legacy sync bridge stub) and executeOneRound() (orchestration bridge).
+   */
+  private async executeInFreshRuntime(
+    code: string,
+    options: SandboxOptions = {},
+    injectBridge: (ctx: QuickJSContext, logs: string[]) => void,
+  ): Promise<SandboxResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const memoryLimitBytes = options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES;
 
@@ -354,7 +305,7 @@ export class QuickJSSandbox {
     try {
       this.injectConsole(context, logs);
       this.injectHelpers(context);
-      this.injectBridgeForOrchestration(context, bridge, logs);
+      injectBridge(context, logs);
 
       if (options.globals) {
         this.injectGlobals(context, options.globals);
@@ -364,7 +315,9 @@ export class QuickJSSandbox {
 
       if (result.error) {
         const errorMsg = context.dump(result.error);
-        result.error.dispose();
+        // Disposes the error handle and any value handle the engine produced
+        // alongside it — otherwise the value leaks for the runtime's lifetime.
+        disposeEvalResult(result);
 
         if (timedOut) {
           return {
@@ -386,7 +339,7 @@ export class QuickJSSandbox {
       }
 
       const output = unmarshalFromQuickJS(context, result.value);
-      result.value.dispose();
+      disposeEvalResult(result);
 
       return { ok: true, output, timedOut: false, durationMs: Date.now() - startTime, logs };
     } catch (err) {
@@ -444,11 +397,11 @@ export class QuickJSSandbox {
   private injectHelpers(ctx: QuickJSContext): void {
     const result = ctx.evalCode(SANDBOX_HELPER_SOURCE, 'sandbox-helpers.js');
     if (result.error) {
-      // Helpers failed to load — log but don't block execution
+      // Helpers failed to load — log but don't block execution.
       ctx.dump(result.error);
-      result.error.dispose();
+      disposeEvalResult(result);
     } else {
-      result.value.dispose();
+      disposeEvalResult(result);
     }
   }
 

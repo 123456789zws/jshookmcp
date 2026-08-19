@@ -33,14 +33,18 @@ describe('JScramberDeobfuscator', () => {
     expect(result.transformations.length).toBeGreaterThan(0);
   });
 
-  it('replaces decrypt-function calls with placeholder strings', async () => {
+  it('does not fabricate placeholder strings for unresolvable decrypt calls', async () => {
     const code = `
       function dec(s){ return s.split('').map(c=>String.fromCharCode(c.charCodeAt(0))).join(''); }
       const value = dec("abc");
     `;
     const result = await new JScramberDeobfuscator().deobfuscate({ code, decryptStrings: true });
 
-    expect(result.code).toContain('[DECRYPTED_STRING]');
+    // The map/join decoder cannot be statically evaluated — the call is kept
+    // intact and reported, never replaced with a fake literal.
+    expect(result.code).not.toContain('[DECRYPTED_STRING]');
+    expect(result.code).toContain('dec("abc")');
+    expect(result.warnings.some((w) => w.includes('decrypt'))).toBe(true);
   });
 
   it('restores flattened control-flow while-switch pattern', async () => {

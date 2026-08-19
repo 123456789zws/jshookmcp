@@ -9,62 +9,10 @@
  * and processed independently, exactly as the hardware does.
  */
 
-/** Number of bytes per lane for an element-size field (0=1,1=2,2=4,3=8). */
-const laneBytes = (size: number): number => 1 << size;
+import { laneBytes, packLanes, readLanes } from './simd-utils';
 
-/** Read a V register as an array of unsigned BigInt lanes at the given size/width. */
-export function readLanes(v: Uint8Array, size: number, q: number): bigint[] {
-  const bytes = laneBytes(size);
-  const active = q === 1 ? 16 : 8;
-  const count = active / bytes;
-  const dv = new DataView(v.buffer, v.byteOffset, 16);
-  const out: bigint[] = [];
-  for (let i = 0; i < count; i++) {
-    const off = i * bytes;
-    switch (bytes) {
-      case 1:
-        out.push(BigInt(dv.getUint8(off)));
-        break;
-      case 2:
-        out.push(BigInt(dv.getUint16(off, true)));
-        break;
-      case 4:
-        out.push(BigInt(dv.getUint32(off, true)));
-        break;
-      default:
-        out.push(dv.getBigUint64(off, true));
-        break;
-    }
-  }
-  return out;
-}
-
-/** Pack unsigned BigInt lanes back into a fresh 16-byte V register (unused high bytes zeroed). */
-export function packLanes(lanes: bigint[], size: number): Uint8Array<ArrayBuffer> {
-  const bytes = laneBytes(size);
-  const out = new Uint8Array(16);
-  const dv = new DataView(out.buffer);
-  for (let i = 0; i < lanes.length; i++) {
-    const off = i * bytes;
-    if (off + bytes > 16) break;
-    const v = lanes[i] ?? 0n;
-    switch (bytes) {
-      case 1:
-        dv.setUint8(off, Number(v & 0xffn));
-        break;
-      case 2:
-        dv.setUint16(off, Number(v & 0xffffn), true);
-        break;
-      case 4:
-        dv.setUint32(off, Number(v & 0xffff_ffffn), true);
-        break;
-      default:
-        dv.setBigUint64(off, v & 0xffff_ffff_ffff_ffffn, true);
-        break;
-    }
-  }
-  return out;
-}
+// Re-export for external consumers that depend on these via simd-neon.
+export { laneBytes, packLanes, readLanes };
 
 /** Mask for the low `bytes*8` bits. */
 const widthMask = (bytes: number): bigint => (1n << BigInt(bytes * 8)) - 1n;

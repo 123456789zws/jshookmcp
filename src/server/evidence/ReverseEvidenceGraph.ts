@@ -394,6 +394,16 @@ export class ReverseEvidenceGraph {
     for (const edge of edges) {
       this.edges.set(edge.id, edge);
     }
+    // Re-seed the module-level ID counter from the restored ids. Without this a
+    // restore into a fresh process (counter reset) would generate colliding ids
+    // for new nodes/edges and silently overwrite restored Map entries.
+    nextId = 1;
+    const advanceCounter = (id: string): void => {
+      const match = /\d+$/.exec(id);
+      if (match) nextId = Math.max(nextId, Number(match[0]) + 1);
+    };
+    for (const node of nodes) advanceCounter(node.id);
+    for (const edge of edges) advanceCounter(edge.id);
     this.mutationSeq = nodes.length + edges.length;
     this.lastPersistedSeq = this.mutationSeq;
     this.isDirty = false;

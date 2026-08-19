@@ -152,6 +152,27 @@ describe('AdvancedToolHandlersIntercept', () => {
       expect(body.createdRules).toHaveLength(2);
     });
 
+    it('batch mode maps null responseBody to undefined (not "null" string)', async () => {
+      consoleMonitor.enableFetchIntercept.mockResolvedValue([{ id: 'r-null' }]);
+      consoleMonitor.getFetchInterceptStatus.mockReturnValue({ rules: ['r-null'] });
+
+      await handler.handleNetworkInterceptResponse({
+        rules: [{ urlPattern: '*c*', responseBody: null }],
+      });
+
+      expect(consoleMonitor.enableFetchIntercept).toHaveBeenCalledWith([
+        {
+          urlPattern: '*c*',
+          urlPatternType: 'glob',
+          stage: 'Response',
+          interceptAction: 'fulfill',
+          responseCode: 200,
+          responseHeaders: undefined,
+          responseBody: undefined,
+        },
+      ]);
+    });
+
     it('passes through continue action', async () => {
       consoleMonitor.enableFetchIntercept.mockResolvedValue([
         {

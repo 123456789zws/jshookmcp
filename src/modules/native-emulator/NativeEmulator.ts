@@ -23,6 +23,7 @@
  * AOT code are rejected by the extractor/classifier rather than silently run.
  */
 import { CpuEngine, type NativeRuntimeImportDiagnostic } from './CpuEngine';
+import type { PacKeys } from './decoder/PointerAuth';
 import { JniEnvironment, type JavaMethodImpl } from './jni';
 import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
 import {
@@ -96,6 +97,13 @@ export class NativeEmulator {
   }
 
   /**
+   * Replace the active PAC key set. Keys are 128-bit per-slot (IA/IB/DA/DB),
+   * each as a 32-hex-char string. Setting IA / IB keys lets AUTIA verify
+   * signatures produced by matching hardware (e.g. keys dumped via Frida).
+   */
+  setPacKeys = (keys: PacKeys): void => this.engine.setPacKeys(keys);
+
+  /**
    * Load an ELF64 AArch64 shared object's bytes and return its entry point.
    * Dynamic relocations are applied and imported libc symbols auto-wired to the
    * bundled bionic stubs, so a real PIC `.so` is callable without manual setup.
@@ -126,7 +134,15 @@ export class NativeEmulator {
    * @returns Load result for the primary library (entry, unresolvedImports, constructorFaults).
    */
   loadLibraryChain(dependencies: Uint8Array[], primary: Uint8Array): NativeLibraryLoadResult {
+    this.checkNotDisposed();
     return this.engine.loadLibraryChain(dependencies, primary, this.bionic);
+  }
+
+  /** Snapshot of dlsym lookups since the last call (clears after read). */
+  bionicDlsymDiagnostics(): string[] {
+    const copy = [...this.bionic.dlsymLog];
+    this.bionic.dlsymLog.length = 0;
+    return copy;
   }
 
   /**
@@ -152,13 +168,33 @@ export class NativeEmulator {
    *
    * Pass `injectJni: false` to skip auto-detection and pass raw args.
    */
-  call(symbol: string, args: number[] = [], opts?: { injectJni?: boolean }): number {
+  call(
+    symbol: string,
+    args: number[] = [],
+    opts?: { injectJni?: boolean; initRegisters?: Record<number, bigint>; maxSteps?: number },
+  ): number {
     this.checkNotDisposed();
     const injectJni = opts?.injectJni ?? NativeEmulator.JNI_SIGNATURE_RE.test(symbol);
+    const initRegs = opts?.initRegisters;
+    const maxSteps = opts?.maxSteps;
     if (injectJni) {
-      return this.engine.callSymbol(symbol, [this.jni.envPointer(), 0, ...args]);
+      // JNI_OnLoad takes (JavaVM*, void*), not (JNIEnv*, jobject).
+      if (symbol === 'JNI_OnLoad' || symbol === 'JNI_OnUnload') {
+        return this.engine.callSymbol(
+          symbol,
+          [this.jni.javaVmPointer(), 0, ...args],
+          initRegs,
+          maxSteps,
+        );
+      }
+      return this.engine.callSymbol(
+        symbol,
+        [this.jni.envPointer(), 0, ...args],
+        initRegs,
+        maxSteps,
+      );
     }
-    return this.engine.callSymbol(symbol, args);
+    return this.engine.callSymbol(symbol, args, initRegs, maxSteps);
   }
 
   /**
@@ -168,8 +204,26 @@ export class NativeEmulator {
    * setup. Returns x0 (an int/jboolean, or a jobject/jarray handle to resolve
    * via bytesOf/stringOf).
    */
-  callJniExport(symbol: string, javaArgs: number[] = [], thiz = 0): number {
-    return this.engine.callSymbol(symbol, [this.jni.envPointer(), thiz, ...javaArgs]);
+  callJniExport(
+    symbol: string,
+    javaArgs: number[] = [],
+    thiz = 0,
+    initRegisters?: Record<number, bigint>,
+  ): number {
+    return this.engine.callSymbol(
+      symbol,
+      [this.jni.envPointer(), thiz, ...javaArgs],
+      initRegisters,
+    );
+  }
+
+  /** Call a function at an arbitrary guest address (e.g. RegisterNatives target). */
+  callAddress(address: number, args: number[] = [], maxSteps?: number): number {
+    return this.engine.callGuestFunction(
+      address,
+      args.map((a) => BigInt(a)),
+      maxSteps,
+    );
   }
 
   /**
@@ -182,8 +236,90 @@ export class NativeEmulator {
     return this.jni?.jniDiagnostics?.();
   }
 
+  /** Return the guest stub address for a JNI table index. Returns 0 for unbound indices. */
+  getJniStubAddress(index: number): number {
+    return this.jni.getJniStubAddress(index);
+  }
+
+  /** Return all bound JNI index → stub address mappings. */
+  getJniStubAddresses(): ReadonlyMap<number, number> {
+    return this.jni.getJniStubAddresses();
+  }
+
+  /** Non-destructive snapshot (for trace handlers). */
+  jniDiagSnapshot(): string[] | undefined {
+    return this.jni?.snapshotJniDiag?.();
+  }
+
+  clearJniDiag(): void {
+    this.jni?.clearJniDiag?.();
+  }
+
+  /** Ensure the TPIDR_EL0 TLS block is mapped and return its base address.
+   *  Call this before writing data to TLS slots (e.g. frame-table pointer at
+   *  +0x1768) via nemu_write_regions. */
+  prepareTls(): number {
+    return this.engine.prepareTls();
+  }
+
   setupJava(className: string, name: string, signature: string, impl: JavaMethodImpl): void {
+    this.jni.defineClass(className);
     this.jni.registerJavaMethod(className, name, signature, impl);
+  }
+
+  /**
+   * Pre-populate a JNI handle so that subsequent GetStringUTFChars /
+   * GetObjectArrayElement calls on the returned handle return controlled data.
+   *
+   * - kind='string': value is a JS string → GetStringUTFChars returns a C copy
+   * - kind='objarray': value is a number[] of existing handles → GetObjectArrayElement resolves them
+   * - kind='integer': value is a number → GetIntField-style access returns it
+   * - kind='boolean': value is 0 or 1
+   */
+  createJniHandle(
+    kind: 'string' | 'objarray' | 'integer' | 'boolean' | 'object',
+    value: unknown,
+    className?: string,
+  ): number {
+    switch (kind) {
+      case 'string':
+        // mock-string: auto-unbox in jniCallMethod → returns handle for toString()
+        // cls: java/lang/String → GetObjectClass returns java/lang/String
+        return this.jni.allocHandle({
+          kind: 'mock-string',
+          value: String(value),
+          cls: 'java/lang/String',
+        });
+      case 'objarray':
+        return this.jni.allocHandle({
+          kind: 'objarray',
+          value: (value as number[]).map(BigInt),
+          cls: '[Ljava/lang/Object;',
+        });
+      case 'integer':
+        // mock-int: auto-unbox in jniCallMethod → returns int value for intValue()
+        return this.jni.allocHandle({
+          kind: 'mock-int',
+          value: Number(value),
+          cls: 'java/lang/Integer',
+        });
+      case 'boolean':
+        // mock-boolean: auto-unbox in jniCallMethod → returns 1/0 for booleanValue()
+        return this.jni.allocHandle({
+          kind: 'mock-boolean',
+          value: Boolean(value),
+          cls: 'java/lang/Boolean',
+        });
+      case 'object':
+        // Generic object with explicit class name (e.g. HashMap)
+        return this.jni.allocHandle({
+          kind: 'auto-object',
+          desc: className ?? 'java/lang/Object',
+          cls: className ?? 'java/lang/Object',
+        });
+      default:
+        throw new Error(`Unsupported JNI handle kind: ${kind}`);
+    }
   }
 
   /**
@@ -192,6 +328,7 @@ export class NativeEmulator {
    * constant (a primitive as bigint, or a handle from newByteArray for objects).
    */
   setupJavaField(className: string, name: string, signature: string, value: bigint): void {
+    this.jni.defineClass(className);
     this.jni.registerJavaField(className, name, signature, value);
   }
 
@@ -262,6 +399,16 @@ export class NativeEmulator {
     this.engine.writeCode(address, data);
   }
 
+  /** Map guest memory at a given address (no-op if already mapped). */
+  mapGuestMemory(address: number, size: number): void {
+    this.engine.mapMemory(address, size);
+  }
+
+  /** Write-protect the SO text segment so self-modifying stores are silently dropped. */
+  protectCodeSection(): ReturnType<CpuEngine['protectCodeSection']> {
+    return this.engine.protectCodeSection();
+  }
+
   /**
    * Release all resources held by this emulator: mapped memory regions, JNI
    * object handles, CPU register state, symbol table, and host function stubs.
@@ -305,6 +452,100 @@ export class NativeEmulator {
 
     // Reset heap allocator state
     this.nextAllocAddr = 0x4000_0000;
+  }
+
+  /**
+   * Scan emulated memory for a byte pattern (like Volatility's memory scanning).
+   * Reads memory in page-sized chunks and searches for exact byte matches.
+   *
+   * @param pattern  Byte pattern to search for.
+   * @param startAddr Starting address of the scan range.
+   * @param endAddr   Ending address of the scan range (exclusive).
+   * @param maxResults Maximum number of results to return (default: 100).
+   * @returns Array of matched addresses.
+   */
+  scanMemory(
+    pattern: Uint8Array,
+    startAddr: number,
+    endAddr: number,
+    maxResults: number = 100,
+  ): number[] {
+    this.checkNotDisposed();
+    if (pattern.length === 0) {
+      throw new Error('Pattern must be non-empty');
+    }
+    if (startAddr >= endAddr) {
+      throw new Error('startAddr must be less than endAddr');
+    }
+    const results: number[] = [];
+    // Use the configured guest page size (same source as allocGuestMemory,
+    // bionic.ts, and syscalls.ts) so a non-default guestPageSizeBytes config
+    // keeps chunk stepping consistent with the rest of the emulator.
+    const pageSize = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;
+    const patternLen = pattern.length;
+
+    // Build bad-character skip table for fast scanning
+    const skip = new Int32Array(256);
+    skip.fill(patternLen);
+    for (let i = 0; i < patternLen - 1; i++) {
+      skip[pattern[i]!] = patternLen - 1 - i;
+    }
+
+    for (let chunkStart = startAddr; chunkStart < endAddr; chunkStart += pageSize) {
+      if (results.length >= maxResults) break;
+      const chunkEnd = Math.min(chunkStart + pageSize + patternLen - 1, endAddr);
+      let chunk: Uint8Array;
+      try {
+        chunk = this.readGuestMemory(chunkStart, chunkEnd - chunkStart);
+      } catch {
+        // Skip unmapped regions
+        continue;
+      }
+
+      // Boyer-Moore-Horspool search
+      let i = 0;
+      while (i <= chunk.length - patternLen && results.length < maxResults) {
+        let j = patternLen - 1;
+        while (j >= 0 && chunk[i + j] === pattern[j]) j--;
+        if (j < 0) {
+          results.push(chunkStart + i);
+          i++;
+        } else {
+          const badChar = chunk[i + patternLen - 1]!;
+          i += skip[badChar] ?? patternLen;
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * XOR a region of emulated memory with a single-byte key.
+   * Used for quick decryption testing without writing custom tooling.
+   *
+   * @param address  Starting guest address.
+   * @param key      Single-byte XOR key (0-255).
+   * @param length   Number of bytes to XOR.
+   * @param dryRun   If true, return XOR'd result without modifying memory.
+   * @returns The XOR'd bytes.
+   */
+  xorMemory(address: number, key: number, length: number, dryRun: boolean = true): Uint8Array {
+    this.checkNotDisposed();
+    if (key < 0 || key > 255 || !Number.isInteger(key)) {
+      throw new Error('Key must be a byte value (0-255)');
+    }
+    if (length <= 0) {
+      throw new Error('Length must be positive');
+    }
+    const original = this.readGuestMemory(address, length);
+    const result = new Uint8Array(original.length);
+    for (let i = 0; i < original.length; i++) {
+      result[i] = original[i]! ^ key;
+    }
+    if (!dryRun) {
+      this.writeGuestMemory(address, result);
+    }
+    return result;
   }
 
   /** Throw if dispose() has been called. */

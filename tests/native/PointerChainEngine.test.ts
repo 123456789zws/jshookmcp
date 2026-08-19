@@ -216,6 +216,27 @@ describe('PointerChainEngine', () => {
       expect(res.targetAddress).toBe('0x4242');
     });
 
+    it('builds chains through ALL intermediate levels for depth ≥ 2', async () => {
+      // Memory mock: 0x1000 → 0x2000 → 0x3000 → 0x4242 (target).
+      // A 3-link chain must carry every level: [0x1000, 0x2000, 0x3000].
+      const res = await engine.scan(1234, '0x4242', { maxDepth: 4 });
+
+      const depth3 = res.chains.find((c) => c.depth === 3);
+      expect(depth3).toBeDefined();
+      expect(depth3!.baseAddress).toBe('0x1000');
+      expect(depth3!.links).toHaveLength(3);
+      // Each link's address is the pointer slot for that level, deepest first.
+      expect(depth3!.links[0]!.address).toBe('0x1000');
+      expect(depth3!.links[1]!.address).toBe('0x2000');
+      expect(depth3!.links[2]!.address).toBe('0x3000');
+      // Final link reaches the target exactly: *0x3000 == 0x4242, offset 0.
+      expect(depth3!.links[2]!.offset).toBe(0);
+      // The full chain must validate back to the target.
+      const validation = await engine.validateChain(1234, depth3!);
+      expect(validation.isValid).toBe(true);
+      expect(validation.resolvedAddress).toBe('0x4242');
+    });
+
     it('should respect maximum depth limit', async () => {
       // If we cap depth to 1, it only searches for direct pointers
       const res = await engine.scan(1234, '0x4242', { maxDepth: 1 });

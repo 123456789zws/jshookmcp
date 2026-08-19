@@ -1,5 +1,13 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { tool } from '@server/registry/tool-builder';
+import {
+  DART_MAX_MAP_BYTES,
+  DART_MAX_OFFSETS_PER_STRING,
+  DART_MAX_SMI_VALUE,
+  DART_MIN_LENGTH,
+  DART_MIN_LENGTH_CEILING,
+  DART_MIN_LENGTH_FLOOR,
+} from '@src/constants/dart';
 
 export const dartInspectorTools: Tool[] = [
   tool('dart_strings_extract', (t) =>
@@ -10,7 +18,11 @@ export const dartInspectorTools: Tool[] = [
           'plus customRules). ReDoS-guarded.',
       )
       .string('filePath', 'Absolute path to the libapp.so (or arbitrary binary) to extract from')
-      .number('minLength', 'Minimum string length to emit', { default: 4, minimum: 2, maximum: 64 })
+      .number('minLength', 'Minimum string length to emit', {
+        default: DART_MIN_LENGTH,
+        minimum: DART_MIN_LENGTH_FLOOR,
+        maximum: DART_MIN_LENGTH_CEILING,
+      })
       .boolean('includeRaw', 'Include unclassified strings under the `raw` bucket', {
         default: false,
       })
@@ -22,7 +34,7 @@ export const dartInspectorTools: Tool[] = [
       })
       .number('maxChunkBytes', 'Streaming chunk size in bytes')
       .number('maxOffsetsPerString', 'Cap on offsets recorded per string (excess sets truncated)', {
-        default: 1000,
+        default: DART_MAX_OFFSETS_PER_STRING,
       })
       .enum(
         'ruleMode',
@@ -89,7 +101,7 @@ export const dartInspectorTools: Tool[] = [
       .enum('width', ['4', '8'], 'Word width in bytes (4 for ARM32, 8 for ARM64)', { default: '8' })
       .number('stride', 'Bytes between consecutive scan positions; defaults to `width`')
       .number('minValue', 'Inclusive minimum decoded Smi value', { default: 1 })
-      .number('maxValue', 'Inclusive maximum decoded Smi value', { default: 1_000_000 })
+      .number('maxValue', 'Inclusive maximum decoded Smi value', { default: DART_MAX_SMI_VALUE })
       .boolean('includeZero', 'Include decoded-to-zero hits', { default: false })
       .boolean('includeNegative', 'Include decoded-to-negative hits', { default: false })
       .number('maxResults', 'Cap on returned hits (truncates with truncated=true)')
@@ -143,7 +155,7 @@ export const dartInspectorTools: Tool[] = [
         'Lookup direction (forward: obfuscated→original, reverse: original→obfuscated)',
         { default: 'forward' },
       )
-      .number('maxMapBytes', 'Cap on map file size in bytes', { default: 16 * 1024 * 1024 })
+      .number('maxMapBytes', 'Cap on map file size in bytes', { default: DART_MAX_MAP_BYTES })
       .number('maxLookups', 'Cap on number of lookups attempted (extras go to unresolved)')
       .required('obfuscatedNames')
       .query(),
@@ -345,7 +357,10 @@ export const dartInspectorTools: Tool[] = [
       )
       .string('apkPath', 'Absolute path to APK (extracts arm64-v8a/libapp.so)')
       .string('libappPath', 'Absolute path to libapp.so directly')
-      .required('apkPath|libappPath')
+      // NOTE: "apkPath OR libappPath" cannot be expressed in JSON Schema
+      // required[] (a literal 'apkPath|libappPath' entry matches no declared
+      // property and is silently ignored). The handler enforces the OR:
+      // handleDartCreateSession throws VALIDATION when neither is provided.
       .query(),
   ),
   tool('dart_pc_descriptors', (t) =>

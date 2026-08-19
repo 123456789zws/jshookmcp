@@ -5,94 +5,16 @@
  * Examples: 8-bit → 16-bit, 16-bit → 32-bit, 32-bit → 64-bit
  */
 
-/** Number of bytes per lane for an element-size field (0=1,1=2,2=4,3=8). */
-const laneBytes = (size: number): number => 1 << size;
+import { laneBytes, packLanes, readLanes, readLaneSigned } from './simd-utils';
+
+// Re-export for external consumers that depend on these via this module.
+export { laneBytes, packLanes, readLanes, readLaneSigned };
 
 /** Interpret an unsigned lane as signed (two's complement) at the lane width. */
 function toSigned(v: bigint, bytes: number): bigint {
   const bits = BigInt(bytes * 8);
   const signBit = 1n << (bits - 1n);
   return (v & signBit) !== 0n ? v - (1n << bits) : v;
-}
-
-/** Pack unsigned BigInt lanes back into a fresh 16-byte V register. */
-export function packLanes(lanes: bigint[], size: number): Uint8Array<ArrayBuffer> {
-  const bytes = laneBytes(size);
-  const out = new Uint8Array(16);
-  const dv = new DataView(out.buffer);
-  for (let i = 0; i < lanes.length; i++) {
-    const off = i * bytes;
-    if (off + bytes > 16) break;
-    const v = lanes[i] ?? 0n;
-    switch (bytes) {
-      case 1:
-        dv.setUint8(off, Number(v & 0xffn));
-        break;
-      case 2:
-        dv.setUint16(off, Number(v & 0xffffn), true);
-        break;
-      case 4:
-        dv.setUint32(off, Number(v & 0xffff_ffffn), true);
-        break;
-      default:
-        dv.setBigUint64(off, v & 0xffff_ffff_ffff_ffffn, true);
-        break;
-    }
-  }
-  return out;
-}
-
-/** Read a V register as an array of unsigned BigInt lanes. */
-export function readLanes(v: Uint8Array, size: number, q: number): bigint[] {
-  const bytes = laneBytes(size);
-  const active = q === 1 ? 16 : 8;
-  const count = active / bytes;
-  const dv = new DataView(v.buffer, v.byteOffset, 16);
-  const out: bigint[] = [];
-  for (let i = 0; i < count; i++) {
-    const off = i * bytes;
-    switch (bytes) {
-      case 1:
-        out.push(BigInt(dv.getUint8(off)));
-        break;
-      case 2:
-        out.push(BigInt(dv.getUint16(off, true)));
-        break;
-      case 4:
-        out.push(BigInt(dv.getUint32(off, true)));
-        break;
-      default:
-        out.push(dv.getBigUint64(off, true));
-        break;
-    }
-  }
-  return out;
-}
-
-/**
- * Helper: Read a lane from a V register at the given size, sign-extended.
- */
-function readLaneSigned(v: Uint8Array, index: number, size: number): bigint {
-  const bytes = laneBytes(size);
-  const offset = index * bytes;
-  const dv = new DataView(v.buffer, v.byteOffset, 16);
-
-  let value: bigint;
-  switch (bytes) {
-    case 1:
-      value = BigInt(dv.getInt8(offset));
-      break;
-    case 2:
-      value = BigInt(dv.getInt16(offset, true));
-      break;
-    case 4:
-      value = BigInt(dv.getInt32(offset, true));
-      break;
-    default:
-      value = dv.getBigInt64(offset, true);
-      break;
-  }
-  return value;
 }
 
 /**
@@ -698,8 +620,11 @@ export function neonUxtl(vn: Uint8Array, size: number, q: number): Uint8Array<Ar
 /**
  * ADDHN/ADDHN2: Add returning High Narrow
  * Adds wide elements and narrows by taking the high half.
+ * q=1 (ADDHN2) preserves the destination's existing low half — the caller
+ * passes Vd so the low lanes come from the destination, not Vn.
  */
 export function neonAddhn(
+  vd: Uint8Array,
   vn: Uint8Array,
   vm: Uint8Array,
   size: number,
@@ -718,9 +643,9 @@ export function neonAddhn(
   const result = new Uint8Array(16);
   const offset = q === 1 ? laneCount : 0;
 
-  // Copy existing low half if q=1
+  // Copy existing low half from the destination if q=1 (ADDHN2)
   if (q === 1) {
-    result.set(vn.subarray(0, laneCount * narrowBytes), 0);
+    result.set(vd.subarray(0, laneCount * narrowBytes), 0);
   }
 
   const outView = new DataView(result.buffer);
@@ -747,8 +672,10 @@ export function neonAddhn(
 
 /**
  * SUBHN/SUBHN2: Subtract returning High Narrow
+ * q=1 (SUBHN2) preserves the destination's existing low half.
  */
 export function neonSubhn(
+  vd: Uint8Array,
   vn: Uint8Array,
   vm: Uint8Array,
   size: number,
@@ -768,7 +695,7 @@ export function neonSubhn(
   const offset = q === 1 ? laneCount : 0;
 
   if (q === 1) {
-    result.set(vn.subarray(0, laneCount * narrowBytes), 0);
+    result.set(vd.subarray(0, laneCount * narrowBytes), 0);
   }
 
   const outView = new DataView(result.buffer);
@@ -795,8 +722,10 @@ export function neonSubhn(
 
 /**
  * RADDHN/RADDHN2: Rounding Add returning High Narrow
+ * q=1 (RADDHN2) preserves the destination's existing low half.
  */
 export function neonRaddhn(
+  vd: Uint8Array,
   vn: Uint8Array,
   vm: Uint8Array,
   size: number,
@@ -817,7 +746,7 @@ export function neonRaddhn(
   const offset = q === 1 ? laneCount : 0;
 
   if (q === 1) {
-    result.set(vn.subarray(0, laneCount * narrowBytes), 0);
+    result.set(vd.subarray(0, laneCount * narrowBytes), 0);
   }
 
   const outView = new DataView(result.buffer);
@@ -845,8 +774,10 @@ export function neonRaddhn(
 
 /**
  * RSUBHN/RSUBHN2: Rounding Subtract returning High Narrow
+ * q=1 (RSUBHN2) preserves the destination's existing low half.
  */
 export function neonRsubhn(
+  vd: Uint8Array,
   vn: Uint8Array,
   vm: Uint8Array,
   size: number,
@@ -867,7 +798,7 @@ export function neonRsubhn(
   const offset = q === 1 ? laneCount : 0;
 
   if (q === 1) {
-    result.set(vn.subarray(0, laneCount * narrowBytes), 0);
+    result.set(vd.subarray(0, laneCount * narrowBytes), 0);
   }
 
   const outView = new DataView(result.buffer);

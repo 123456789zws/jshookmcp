@@ -959,6 +959,7 @@ describe('CaptchaDetector — deep coverage', () => {
         expect.any(Function),
         '.my-slider',
         expect.any(Array),
+        expect.any(Object), // thresholds
       );
     });
 

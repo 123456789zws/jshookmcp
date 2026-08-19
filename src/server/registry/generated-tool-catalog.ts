@@ -15517,6 +15517,193 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_bind_all_imports",
+      "description": "Batch-bind host functions to ALL resolved import stubs in the GOT. Reads the GOT table (0x74000 range), finds every unique resolved address, and binds the given JS function body to each. Call after load_library to mock every unresolved shell import at once.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "fn": {
+            "type": "string",
+            "description": "JavaScript function body for ALL imports. Receives ctx. Returns Number/BigInt placed in x0."
+          },
+          "gotStart": {
+            "type": "number",
+            "description": "Start of GOT VA range (default: SO GOT start)"
+          },
+          "gotEnd": {
+            "type": "number",
+            "description": "End of GOT VA range (default: auto-detect)"
+          }
+        },
+        "required": [
+          "sessionId",
+          "fn"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_bind_host_fn",
+      "description": "Register a JavaScript host function at a specific guest address, overriding any existing stub. The function receives guest registers (ctx.x(0)..x(7)), can read/write guest memory (ctx.read/ctx.write), and returns a BigInt value placed in x0. Use to mock custom shell imports at their resolved GOT addresses.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "address": {
+            "type": "number",
+            "description": "Guest address to bind the host function"
+          },
+          "fn": {
+            "type": "string",
+            "description": "JavaScript function body. Receives ctx with .x(n) .read(addr,len) .write(addr,bytes). Must return a Number or BigInt."
+          }
+        },
+        "required": [
+          "sessionId",
+          "address",
+          "fn"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_bytecode_decode",
+      "description": "Decode a u32 LiteVM bytecode word into its opcode fields: group (G0-G7), sub-opcode, a1 register index, fl field index, imm signed offset, and validity. Matches the Python LiteVM Opcode.is_valid_opcode() semantics. No session needed — pure computation. Use to understand what a native bytecode word means without external scripts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "word": {
+            "type": "number",
+            "description": "The u32 bytecode word to decode (e.g. 0x02000000)"
+          }
+        },
+        "required": [
+          "word"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_bytecode_scan",
+      "description": "Scan a guest memory region and decode all valid LiteVM bytecode words. Reads `count` u32 words starting at `address`, decodes each one, and returns only the valid opcodes with their offsets. Much faster than manual decode+filter — one call to survey an entire bytecode table.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read from"
+          },
+          "address": {
+            "type": "number",
+            "description": "Guest address of the first u32 word"
+          },
+          "count": {
+            "type": "number",
+            "description": "Number of u32 words to scan (default: 256)",
+            "default": 256
+          },
+          "filePath": {
+            "type": "string",
+            "description": "Alternative to sessionId+address: filesystem path to a binary file (e.g. .so). Reads from file offset `address`."
+          },
+          "outputFormat": {
+            "type": "string",
+            "description": "Output format: \"summary\" (counts by group), \"list\" (all valid ops), \"annotated\" (all words with annotations)",
+            "default": "summary"
+          }
+        },
+        "required": [
+          "sessionId",
+          "address"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_call_address",
+      "description": "Call a function at an arbitrary guest address (e.g. a native method registered via RegisterNatives). Uses AArch64 AAPCS with args in x0..x7; returns x0. Set injectJni=true to prepend guest JNIEnv* as x0 + thiz=0 as x1 (standard JNI method convention).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id with a library already loaded"
+          },
+          "address": {
+            "type": "number",
+            "description": "Guest address of the function to call"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Integer arguments passed in x0..x7 (default: none)"
+          },
+          "injectJni": {
+            "type": "boolean",
+            "description": "Prepend guest JNIEnv* + thiz=0 as x0/x1 (default: false)"
+          },
+          "maxSteps": {
+            "type": "number",
+            "description": "Max instruction steps before aborting (default: 1M, 0=unlimited)"
+          }
+        },
+        "required": [
+          "sessionId",
+          "address"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_call_jni_export",
       "description": "Invoke an exported `Java_*` JNI function. Injects the guest `JNIEnv*` and thiz, then the Java arguments. Returns x0 — an int/jboolean directly, or a jobject/jbyteArray/jstring handle to resolve via read_byte_array. The main entry point for reversing a native signing/crypto routine.",
       "inputSchema": {
@@ -15560,7 +15747,7 @@ export const GENERATED_TOOL_CATALOG = [
   {
     "tool": {
       "name": "nemu_call_symbol",
-      "description": "Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). Auto-detects JNI signatures (symbols mangled with `P7_JNIEnv` first param, or `Java_` prefix) and injects the guest JNIEnv* as x0 + synthetic thiz=0 as x1 — no need to manually choose between call_symbol and call_jni_export for RegisterNatives-style or standard JNI entry points. Set injectJni=false to force raw arguments.",
+      "description": "Invoke an exported function by name following AArch64 AAPCS (integer args in x0..x7, result in x0). Auto-detects JNI signatures. Set injectJni=false to force raw arguments. Set debug=true for auto-NOP on NULL indirect calls + auto TLS prep.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -15582,6 +15769,29 @@ export const GENERATED_TOOL_CATALOG = [
           "injectJni": {
             "type": "boolean",
             "description": "Auto-detect JNI signature (default: auto). Set false to force raw args"
+          },
+          "debug": {
+            "type": "boolean",
+            "description": "Enable auto-NOP on NULL indirect calls + auto TLS prep + verbose diag (default: false)"
+          },
+          "codeProtect": {
+            "type": "boolean",
+            "description": "Write-protect the SO text segment before invocation. Self-modifying stores are silently dropped instead of crashing — eliminates the most common class of obfuscation bugs.",
+            "default": false
+          },
+          "initRegisters": {
+            "type": "object",
+            "properties": {
+              "additionalProperties": {
+                "type": "number"
+              }
+            },
+            "description": "Map of register index → value to set BEFORE invocation (e.g. {\"11\":348496} for x11=0x55150). Applied after the default zeroing, so all registers except these start at 0."
+          },
+          "maxSteps": {
+            "type": "number",
+            "description": "Max instruction steps before aborting (default: 1M, 0=unlimited). Use for long-running bytecode loops.",
+            "default": 0
           }
         },
         "required": [
@@ -15617,6 +15827,51 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_create_jni_handle",
+      "description": "Create a mock JNI object handle pre-populated with controlled data. Use BEFORE calling JNI functions to seed the handle table so that GetStringUTFChars / GetObjectArrayElement / GetIntField return expected values. Returns the handle id to pass as an argument to nemu_call_address or nemu_call_symbol.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id with a library already loaded"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "string",
+              "objarray",
+              "integer",
+              "boolean",
+              "object"
+            ],
+            "description": "JNI object kind"
+          },
+          "value": {
+            "type": "string",
+            "description": "Value: string for string kind, JSON array of handles for objarray, number string for integer, \"true\"/\"false\" for boolean"
+          },
+          "className": {
+            "type": "string",
+            "description": "Class name for object kind (e.g. \"java/util/HashMap\")"
+          }
+        },
+        "required": [
+          "sessionId",
+          "kind"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_create_session",
       "description": "Create an isolated ARM64 emulator session and return its sessionId. Each session owns its own CPU registers, guest stack, and JNI object table, so concurrent analyses never interfere. Destroy it with nemu_destroy_session when done; idle sessions auto-expire. Pass `files` to populate the virtual device filesystem (path→base64 content) so native code can fopen/fread assets like jiagu_config directly from the emulated FS.",
       "inputSchema": {
@@ -15633,6 +15888,13 @@ export const GENERATED_TOOL_CATALOG = [
               "type": "string"
             },
             "description": "Virtual filesystem: path→base64 content for fopen/fread"
+          },
+          "extraSymbols": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Extra symbol→address mappings for dlsym resolution (e.g. VM handler addresses not exported in .dynsym). Keys are symbol names, values are vaddrs."
           }
         }
       },
@@ -15640,6 +15902,90 @@ export const GENERATED_TOOL_CATALOG = [
         "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_create_vtable",
+      "description": "Create a C++ vtable-backed object in guest memory. Allocates a vtable with `numSlots` entries (each pointing to a return-0 host stub) and an object that points to it. Use when native code does direct vtable dispatch (BLR X8 through [obj+offset]) — common in obfuscated SO files calling virtual methods on C++ objects. Returns {objectAddr, vtableAddr} for use with nemu_call_address/nemu_call_symbol.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "numSlots": {
+            "type": "integer",
+            "description": "Number of vtable slots (default 16). Each slot is 8 bytes.",
+            "default": 16
+          },
+          "returnStubAddr": {
+            "type": "string",
+            "description": "Address of host stub for default return value (default auto-created return-0 stub)",
+            "default": ""
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_data_dump",
+      "description": "Read a guest memory region and format it as a structured table of u32 or u64 values. Each row shows offset, hex value, ASCII preview, and optional annotations. Auto-classifies each word as pointer, bytecode, ASCII, or raw data. Pointers are resolved to show target data when possible.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read from"
+          },
+          "address": {
+            "type": "number",
+            "description": "Starting guest address"
+          },
+          "count": {
+            "type": "number",
+            "description": "Number of words to read (default: 64)",
+            "default": 64
+          },
+          "wordSize": {
+            "type": "string",
+            "enum": [
+              "u32",
+              "u64"
+            ],
+            "description": "Word size (default: u64)",
+            "default": "u64"
+          },
+          "columns": {
+            "type": "number",
+            "description": "Words per output row (default: 4)",
+            "default": 4
+          }
+        },
+        "required": [
+          "sessionId",
+          "address"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
@@ -15673,7 +16019,7 @@ export const GENERATED_TOOL_CATALOG = [
   {
     "tool": {
       "name": "nemu_disassemble",
-      "description": "Disassemble a single instruction without creating an emulator session. Supports arm64/aarch64, x86, x64, riscv32/riscv64, mips/mips32, and mipsel. This is a local lightweight decoder for trace readability, including common SSE/AVX/AVX2/AVX-512 EVEX, RISC-V, and MIPS instructions.",
+      "description": "Disassemble instructions. Two modes: (1) single-instruction — pass `opcode` (a number, 0x hex string, or hex bytes) and optional `pc`; no session needed. (2) batch — pass `sessionId`, `vaddr`, and `count`; reads `count` 4-byte words from guest memory starting at `vaddr` and returns a `{pc, opcode, asm}[]` list. Batch supports fixed-width ISAs only (arm64/aarch64, riscv32/riscv64, mips/mips32/mipsel); x86/x64 are rejected. A local lightweight decoder for trace readability, including common SSE/AVX/AVX2/AVX-512 EVEX, RISC-V, and MIPS instructions.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -15702,17 +16048,118 @@ export const GENERATED_TOOL_CATALOG = [
                 "type": "number"
               }
             ],
-            "description": "Instruction opcode as a number, a 0x-prefixed hex string, or hex bytes separated by spaces (e.g. \"62 f1 74 48 58 c2\")."
+            "description": "Single-instruction mode: opcode as a number, a 0x-prefixed hex string, or hex bytes separated by spaces (e.g. \"62 f1 74 48 58 c2\"). Required unless using batch mode (sessionId+vaddr+count)."
           },
           "pc": {
             "type": "string",
-            "description": "Program counter used for relative target formatting, as decimal or 0x hex",
+            "description": "Program counter used for relative target formatting, as decimal or 0x hex. In batch mode defaults to `vaddr`.",
             "default": "0x0"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "Batch mode: session id with a library already loaded. When provided with vaddr+count, enables batch disassembly."
+          },
+          "vaddr": {
+            "type": "number",
+            "description": "Batch mode: guest address of the first instruction to disassemble."
+          },
+          "count": {
+            "type": "number",
+            "description": "Batch mode: number of instructions (4 bytes each) to disassemble."
           }
         },
         "required": [
-          "architecture",
-          "opcode"
+          "architecture"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_dlsym_diag",
+      "description": "Read the dlsym resolution log from the current session. Tracks every symbol lookup the emulated code requested via dlsym() — essential for discovering which VM handler names an obfuscated dispatch engine tries to resolve. Actions: read (default, reads+clears), snapshot (read-only), clear.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to inspect"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "snapshot",
+              "clear"
+            ],
+            "description": "read=read+clear log, snapshot=read-only, clear=discard",
+            "default": "read"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_dump_frame",
+      "description": "Read and decode a CreateLitevm frame structure from guest memory. Parses the 256-byte frame fields: chain pointer, bytecode count, frame data, and sub-function flags. Essential for understanding the VM dispatch state at any point during execution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read from"
+          },
+          "address": {
+            "type": "number",
+            "description": "Guest address of the frame (256 bytes)"
+          }
+        },
+        "required": [
+          "sessionId",
+          "address"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_dump_got",
+      "description": "Dump the PLT trampoline → GOT → symbol mapping for an AArch64 ELF shared object. Scans .text for the 4-instruction trampoline pattern (adrp x16 → ldr x17 → add x17,x16,x17 → br x17) used by obfuscated SO files and cross-references each slot against dynamic relocations to resolve the callee name. Use this when you need to know what \"bl 0xACD0\" actually calls without manual readelf + Python scripting.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "soPath": {
+            "type": "string",
+            "description": "Filesystem path to the .so library"
+          }
+        },
+        "required": [
+          "soPath"
         ]
       },
       "annotations": {
@@ -15763,6 +16210,74 @@ export const GENERATED_TOOL_CATALOG = [
         },
         "required": [
           "soPath"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_jni_diag",
+      "description": "Read the JNI diagnostic log for a session. Tracks every JNI function call (FindClass, GetMethodID, CallIntMethod, etc.) and unimplemented stub invocations. Use after nemu_call_symbol or nemu_trace to see what Java methods the native code tried to call. Actions: \"read\" (default) reads and clears the log; \"snapshot\" reads without clearing; \"clear\" clears without returning.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read diagnostics from"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "snapshot",
+              "clear"
+            ],
+            "description": "read=read+clear log, snapshot=read-only, clear=discard log",
+            "default": "read"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_jni_handles",
+      "description": "List all JNI object handles allocated in a session, with their kind and summary. Handles are opaque IDs (jclass, jstring, jbyteArray, jobject) that native code passes around. Use to verify mock setups and debug handle leaks. Optionally filter by kind (e.g. \"class\", \"string\", \"bytes\", \"method\", \"field\", \"auto-object\", \"mock-int\", \"mock-string\", \"mock-boolean\", \"objarray\") or by specific handle number.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to inspect"
+          },
+          "kindFilter": {
+            "type": "string",
+            "description": "Optional: only show handles of this kind (e.g. \"mock-string\", \"auto-object\", \"bytes\")"
+          },
+          "handleFilter": {
+            "type": "number",
+            "description": "Optional: only show this specific handle number"
+          }
+        },
+        "required": [
+          "sessionId"
         ]
       },
       "annotations": {
@@ -15921,6 +16436,81 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_mem_map",
+      "description": "Map a memory region in guest address space. Use to extend the mapped area for output buffers or scratch data that would otherwise cause unmapped-memory faults. Idempotent — safe to call on already-mapped regions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "address": {
+            "type": "number",
+            "description": "Guest virtual address to map (page-aligned internally)"
+          },
+          "size": {
+            "type": "number",
+            "description": "Size in bytes to map (rounded up to page size)"
+          }
+        },
+        "required": [
+          "sessionId",
+          "address",
+          "size"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_mem_shadow",
+      "description": "Add a shadow memory overlay at a specific address. Reads from shadow take priority over underlying memory — use to provide mock data at addresses that would otherwise crash (e.g. address 0 where SO ELF header resides). Does NOT modify the underlying SO mapping.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "address": {
+            "type": "integer",
+            "description": "Guest address to shadow"
+          },
+          "size": {
+            "type": "integer",
+            "description": "Shadow region size in bytes (default 8)",
+            "default": 8
+          },
+          "dataBase64": {
+            "type": "string",
+            "description": "Base64-encoded bytes to serve on reads"
+          }
+        },
+        "required": [
+          "sessionId",
+          "address",
+          "dataBase64"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_new_byte_array",
       "description": "Wrap base64 bytes as a JNI jbyteArray handle to pass as an argument into call_jni_export (e.g. the plaintext a signing routine consumes). Returns the handle.",
       "inputSchema": {
@@ -15944,6 +16534,125 @@ export const GENERATED_TOOL_CATALOG = [
         "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_patch_apply",
+      "description": "Apply multiple memory patches in a single call. Each patch is {address, dataBase64, writeProtect?}. Faster than repeated nemu_write_memory calls — essential for atomic code patches that must be applied together to avoid intermediate corrupt states.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "patches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "number"
+                },
+                "dataBase64": {
+                  "type": "string"
+                },
+                "writeProtect": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "Array of {address, dataBase64, writeProtect?} objects"
+          },
+          "codeProtect": {
+            "type": "boolean",
+            "description": "Also write-protect the SO text segment after applying patches",
+            "default": false
+          }
+        },
+        "required": [
+          "sessionId",
+          "patches"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_pointer_chain",
+      "description": "Walk a chain of pointers in guest memory. Starting from `base`, reads a u64 pointer, then follows it to the next address, repeating up to `maxDepth` times. At each hop, shows the address, the pointer value, and the first 32 bytes of data there. Essential for understanding CreateLitevm's x24 table indirection structure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read from"
+          },
+          "base": {
+            "type": "number",
+            "description": "Starting guest address for the pointer chain"
+          },
+          "maxDepth": {
+            "type": "number",
+            "description": "Maximum number of hops (default: 5)",
+            "default": 5
+          },
+          "offset": {
+            "type": "number",
+            "description": "Byte offset to add at each hop before reading the next pointer (default: 0 = read the pointer at the target address directly)",
+            "default": 0
+          },
+          "dataLen": {
+            "type": "number",
+            "description": "Bytes of data to show at each hop (default: 32)",
+            "default": 32
+          }
+        },
+        "required": [
+          "sessionId",
+          "base"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_prepare_tls",
+      "description": "Map the TPIDR_EL0 (thread-pointer) TLS block so its memory is accessible for pre-population via nemu_write_regions. Returns the TLS base address. Use this before writing data to TLS offsets (e.g. frame-table pointer at +0x1768) that native code reads via mrs xN, tpidr_el0; ldr xM, [xN, #large_offset].",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id with a library loaded"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
@@ -16029,6 +16738,118 @@ export const GENERATED_TOOL_CATALOG = [
   },
   {
     "tool": {
+      "name": "nemu_regs_restore",
+      "description": "Restore GPR registers from a previously-saved snapshot (created by nemu_regs_save). Partially restores: only registers that were saved are written back. Use after an obfuscated function call to recover decode/context registers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "snapshotId": {
+            "type": "string",
+            "description": "Snapshot id returned by nemu_regs_save"
+          },
+          "regs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific register names to restore (e.g. [\"x8\",\"x10\"]). If omitted, restores all saved registers."
+          }
+        },
+        "required": [
+          "sessionId",
+          "snapshotId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_regs_save",
+      "description": "Save a named snapshot of current GPR registers (x0-x30, sp). Returns a snapshot id usable with nemu_regs_restore. The snapshot persists until the session is destroyed or the name is overwritten. Use to preserve registers before calling an obfuscated function that corrupts callee-saved state.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "name": {
+            "type": "string",
+            "description": "Snapshot name for later reference"
+          }
+        },
+        "required": [
+          "sessionId",
+          "name"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_scan_memory",
+      "description": "Scan emulated memory for a byte pattern (like Volatility). Searches a guest address range for an exact byte match using Boyer-Moore-Horspool. Returns a list of matched addresses. Skips unmapped regions silently — use nemu_mem_map to extend the scan range if needed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to scan"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Byte pattern to search for, as a base64 string"
+          },
+          "startAddr": {
+            "type": "number",
+            "description": "Starting guest address of the scan range"
+          },
+          "endAddr": {
+            "type": "number",
+            "description": "Ending guest address of the scan range (exclusive)"
+          },
+          "maxResults": {
+            "type": "number",
+            "description": "Maximum number of results to return (default: 100, max: 1000)",
+            "default": 100
+          }
+        },
+        "required": [
+          "sessionId",
+          "pattern",
+          "startAddr",
+          "endAddr"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
       "name": "nemu_session_info",
       "description": "Inspect one emulator session without executing native code. Returns timestamps, exported symbols, unresolved imports, constructor faults, and active session count.",
       "inputSchema": {
@@ -16047,6 +16868,147 @@ export const GENERATED_TOOL_CATALOG = [
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_session_load",
+      "description": "Load a JSON-serialised array of tool calls and execute them sequentially to set up a session. Each entry is {tool, args}. Supported tools: alloc_memory, write_regions, call_address, call_symbol, prepare_tls, setup_java_mocks, map_memory, bind_host_fn. Use this to replay a debug session from a saved JSON plan without repeating ~20 manual MCP calls.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "planPath": {
+            "type": "string",
+            "description": "Filesystem path to the JSON plan file"
+          }
+        },
+        "required": [
+          "sessionId",
+          "planPath"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_set_pac_key",
+      "description": "Configure the ARMv8.3 Pointer Authentication key set used by PACIA/PACIB/AUTIA/AUTIB instructions in this emulator session. Set a 128-bit key (32 hex chars) by key slot (ia/ib/da/db) to match keys dumped from a real device via Frida, so AUTIA can verify and strip real-hardware PAC signatures.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to configure"
+          },
+          "key": {
+            "type": "string",
+            "description": "128-bit key as a 32-hex-char string (w0[0..15]||k0[0..15])"
+          },
+          "slot": {
+            "type": "string",
+            "enum": [
+              "ia",
+              "ib",
+              "da",
+              "db"
+            ],
+            "description": "Key slot to update",
+            "default": "ia"
+          }
+        },
+        "required": [
+          "sessionId",
+          "key"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_set_registers",
+      "description": "Set arbitrary CPU registers by index. Pass an object mapping register number to value (e.g. {0: 0x60000000, 10: 0, 11: 0x55150}). Supports x0-x30 and floating-point d0-d31. Use to fix up loop variables or inject context pointers before/after host function calls.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "registers": {
+            "type": "object",
+            "properties": "Map of register index → value. Integer for GPR, float for SIMD."
+          }
+        },
+        "required": [
+          "sessionId",
+          "registers"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_set_vtable_slot",
+      "description": "Override a specific vtable slot with a custom host function. The slot at vtableAddr + slotIndex*8 is rewritten to point to a stub executing `fnBody` (JS, with ctx.x/ctx.writeU64/ctx.persistReg etc.). Use to mock specific C++ virtual methods after creating a vtable with nemu_create_vtable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "vtableAddr": {
+            "type": "integer",
+            "description": "Address of the vtable (from nemu_create_vtable)"
+          },
+          "slotIndex": {
+            "type": "integer",
+            "description": "Zero-based slot index to override (e.g. 6 for offset 0x30)"
+          },
+          "fn": {
+            "type": "string",
+            "description": "JS function body for the stub. Receives ctx. Must return a BigInt or number."
+          }
+        },
+        "required": [
+          "sessionId",
+          "vtableAddr",
+          "slotIndex",
+          "fn"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
         "openWorldHint": false
       }
     },
@@ -16107,7 +17069,7 @@ export const GENERATED_TOOL_CATALOG = [
   {
     "tool": {
       "name": "nemu_setup_java_mock",
-      "description": "Register a mock Java method the emulated native code can call back into via JNI (GetMethodID/GetStaticMethodID + `Call*Method`). Declaratively specify the return value with returnInt, returnString, or returnBytes (base64) — emulating the 'Java world' a native routine reads from before computing its result. No code is executed; only the configured constant is returned.",
+      "description": "Register a mock Java method for JNI callbacks. returnInt/returnString/returnBytes for single constant; returnMap (JSON) for per-key dispatch: first Java arg matched as key→{type,value}. Single-constant is fallback for unmatched keys.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -16117,15 +17079,15 @@ export const GENERATED_TOOL_CATALOG = [
           },
           "className": {
             "type": "string",
-            "description": "Java class name, e.g. \"com/app/Config\""
+            "description": "Java class name, e.g. \"java/util/HashMap\""
           },
           "methodName": {
             "type": "string",
-            "description": "Method name the native code looks up"
+            "description": "Method name the native code looks up, e.g. \"get\""
           },
           "signature": {
             "type": "string",
-            "description": "JNI method signature, e.g. \"()I\" or \"(I)[B\""
+            "description": "JNI method signature, e.g. \"(Ljava/lang/Object;)Ljava/lang/Object;\""
           },
           "returnInt": {
             "type": "number",
@@ -16138,6 +17100,18 @@ export const GENERATED_TOOL_CATALOG = [
           "returnBytes": {
             "type": "string",
             "description": "Constant base64 bytes to return as a jbyteArray handle (exclusive)"
+          },
+          "returnObject": {
+            "type": "string",
+            "description": "Return a generic object of the given class name, e.g. \"java/util/Set\" or \"java/util/ArrayList\" (mutually exclusive)"
+          },
+          "returnArray": {
+            "type": "string",
+            "description": "Return an Object array populated with the given handle IDs, as JSON array like \"[1879048736]\" (mutually exclusive)"
+          },
+          "returnMap": {
+            "type": "string",
+            "description": "Conditional return map as JSON: {\"key\":{\"type\":\"string|int|bytes\",\"value\":\"...\"}}. First Java argument is matched as key; single-value return acts as fallback. (exclusive)"
           }
         },
         "required": [
@@ -16145,6 +17119,73 @@ export const GENERATED_TOOL_CATALOG = [
           "className",
           "methodName",
           "signature"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_setup_java_mocks",
+      "description": "Batch-register multiple Java method mocks in one call. Each entry in the array has the same fields as nemu_setup_java_mock: className, methodName, signature, plus one return value (returnInt, returnString, returnBytes, returnObject, returnArray, or returnMap). Use this to define the full mock chain without rebuilding jshook.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id for the mock registration"
+          },
+          "mocks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "className": {
+                  "type": "string"
+                },
+                "methodName": {
+                  "type": "string"
+                },
+                "signature": {
+                  "type": "string"
+                },
+                "returnInt": {
+                  "type": "number"
+                },
+                "returnString": {
+                  "type": "string"
+                },
+                "returnBytes": {
+                  "type": "string"
+                },
+                "returnObject": {
+                  "type": "string"
+                },
+                "returnArray": {
+                  "type": "string"
+                },
+                "returnMap": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "className",
+                "methodName",
+                "signature"
+              ]
+            },
+            "description": "Array of mock method definitions"
+          }
+        },
+        "required": [
+          "sessionId",
+          "mocks"
         ]
       },
       "annotations": {
@@ -16171,6 +17212,10 @@ export const GENERATED_TOOL_CATALOG = [
             "type": "string",
             "description": "Exported symbol name to execute under trace"
           },
+          "address": {
+            "type": "number",
+            "description": "Guest address to execute under trace (alternative to symbol)"
+          },
           "args": {
             "type": "array",
             "items": {
@@ -16185,6 +17230,21 @@ export const GENERATED_TOOL_CATALOG = [
             },
             "description": "Register names to snapshot each step. GPR aliases: x0..x30, sp, pc. SIMD/FP vector aliases: v0..v31 (full 128-bit), or qN/dN/sN/hN/bN for the narrower width. Default: none."
           },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "full",
+              "calls",
+              "branches",
+              "memory"
+            ],
+            "description": "Trace filter mode. full=all instructions (default). calls=BLR/BR only. branches=all conditional + unconditional branches (B, B.cond, CBZ, CBNZ, TBZ, TBNZ, RET, BR, BLR). memory=LDR/STR only.",
+            "default": "full"
+          },
+          "injectJni": {
+            "type": "boolean",
+            "description": "Auto-detect JNI signature and inject the guest JNIEnv* as x0 + synthetic thiz=0 as x1 (default: auto, matching nemu_call_symbol). Set false to force raw args; set true to force JNI injection for a symbol that the auto-detector would miss."
+          },
           "maxSteps": {
             "type": "number",
             "description": "Maximum trace events to return (default: 1000)",
@@ -16197,12 +17257,225 @@ export const GENERATED_TOOL_CATALOG = [
           },
           "traceInlineLimit": {
             "type": "number",
-            "description": "Maximum number of trace rows to include inline in the MCP response; the artifact still contains the full captured trace"
+            "description": "Maximum number of trace rows to include inline in the MCP response (default: all rows, up to maxSteps). The artifact (if persistArtifact is true) and the `.steps` count both reflect the full captured trace regardless of this limit."
+          },
+          "tableReg": {
+            "type": "number",
+            "description": "When set to a GPR index (e.g. 24 for x24), load/store instructions using that register as base are included in the trace regardless of mode, with register-offset details (tableIdx, indexValue) decoded. Use to trace data-table accesses (x24) during bytecode execution."
+          },
+          "captureBlArgs": {
+            "type": "boolean",
+            "description": "When true, capture x0-x7 (function call arguments) on every BL/BLR instruction.",
+            "default": false
+          },
+          "debug": {
+            "type": "boolean",
+            "description": "Enable auto-NOP on NULL indirect calls + auto TLS prep + verbose diag during trace (default: false)"
+          },
+          "codeProtect": {
+            "type": "boolean",
+            "description": "Write-protect the SO text segment before trace. Self-modifying stores are silently dropped.",
+            "default": false
+          },
+          "initRegisters": {
+            "type": "object",
+            "properties": {
+              "additionalProperties": {
+                "type": "number"
+              }
+            },
+            "description": "Map of register index → value to set BEFORE invocation (e.g. {\"11\":348496}). Same behavior as call_symbol."
+          },
+          "registerDiff": {
+            "type": "boolean",
+            "description": "When true and captureRegisters is set, only emit trace rows where at least one captured register changed value. Dramatically reduces trace size when hunting for the instruction that modifies a specific register.",
+            "default": false
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_vm_state_compare",
+      "description": "Compare native VM state (read from guest memory) against an expected state (e.g. Python LiteVM dump). For each of ctx, table, and output, reports whether they match and lists the first mismatches. Use to cross-validate native VM execution against the known-good Python implementation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read native state from"
+          },
+          "ctxBase": {
+            "type": "number",
+            "description": "Guest address of native ctx array (32×8 bytes)"
+          },
+          "tableBase": {
+            "type": "number",
+            "description": "Guest address of native table array (32×8 bytes)"
+          },
+          "outputBase": {
+            "type": "number",
+            "description": "Guest address of native output buffer"
+          },
+          "expectedCtx": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Expected ctx values as hex strings (from Python LiteVM dump)"
+          },
+          "expectedTable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Expected table values as hex strings (from Python LiteVM dump)"
+          },
+          "expectedOutputHex": {
+            "type": "string",
+            "description": "Expected output as a hex string"
           }
         },
         "required": [
           "sessionId",
-          "symbol"
+          "ctxBase",
+          "tableBase",
+          "expectedCtx",
+          "expectedTable"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_vm_state_dump",
+      "description": "Dump LiteVM state from guest memory at specified base addresses. Reads ctx (32×64-bit), table (32×64-bit), and optional output buffer. Returns structured hex values suitable for comparison with Python LiteVM dumps. Use after nemu_call_symbol to inspect native VM execution results.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to read from"
+          },
+          "ctxBase": {
+            "type": "number",
+            "description": "Guest address of the VM context array (x27, 32×8 bytes)"
+          },
+          "tableBase": {
+            "type": "number",
+            "description": "Guest address of the data table array (x24, 32×8 bytes)"
+          },
+          "outputBase": {
+            "type": "number",
+            "description": "Guest address of the output buffer (256 bytes)"
+          },
+          "ctxCount": {
+            "type": "number",
+            "description": "Number of ctx slots to read (default: 32)",
+            "default": 32
+          },
+          "tableCount": {
+            "type": "number",
+            "description": "Number of table slots to read (default: 32)",
+            "default": 32
+          },
+          "outputSize": {
+            "type": "number",
+            "description": "Size of output buffer in bytes (default: 256)",
+            "default": 256
+          }
+        },
+        "required": [
+          "sessionId",
+          "ctxBase",
+          "tableBase"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_vm_state_load",
+      "description": "Load VM state into guest memory. Takes ctx values and table values as hex strings and writes them at the specified base addresses. Use to bridge Python LiteVM state into native VM: run Python vm.run(), dump ctx/table as hex, then load into nemu guest memory before calling bb2i34u32clsb.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to write to"
+          },
+          "ctxBase": {
+            "type": "number",
+            "description": "Guest address to write ctx array (32×8 bytes)"
+          },
+          "tableBase": {
+            "type": "number",
+            "description": "Guest address to write table array (32×8 bytes)"
+          },
+          "outputBase": {
+            "type": "number",
+            "description": "Guest address to write output buffer"
+          },
+          "ctx": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Array of ctx values as hex strings (e.g. \"0x0\") or decimal numbers. Must have ctxCount entries."
+          },
+          "table": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Array of table values as hex strings or decimal numbers. Must have tableCount entries."
+          },
+          "outputHex": {
+            "type": "string",
+            "description": "Output buffer as a hex string (e.g. \"AE001626...\"). Written at outputBase."
+          },
+          "ctxCount": {
+            "type": "number",
+            "description": "Number of ctx entries (default: 32)",
+            "default": 32
+          },
+          "tableCount": {
+            "type": "number",
+            "description": "Number of table entries (default: 32)",
+            "default": 32
+          }
+        },
+        "required": [
+          "sessionId",
+          "ctxBase",
+          "tableBase",
+          "ctx",
+          "table"
         ]
       },
       "annotations": {
@@ -16242,6 +17515,98 @@ export const GENERATED_TOOL_CATALOG = [
           "sessionId",
           "address",
           "dataBase64"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_write_regions",
+      "description": "Write multiple memory regions in a single call. Accepts an array of {address, dataBase64} objects. Essential for atomic code patching: apply all patches in one call to avoid intermediate corrupt states.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id to write to"
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "number",
+                  "description": "Guest virtual address to write to"
+                },
+                "dataBase64": {
+                  "type": "string",
+                  "description": "Base64-encoded bytes to write"
+                },
+                "writeProtect": {
+                  "type": "boolean",
+                  "description": "If true, runtime STR/SIMD-store to this region are silently dropped (prevents self-modifying code from corrupting patches)"
+                }
+              }
+            },
+            "description": "Array of {address, dataBase64, writeProtect?} objects to write"
+          }
+        },
+        "required": [
+          "sessionId",
+          "regions"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    "domain": "native-emulator"
+  },
+  {
+    "tool": {
+      "name": "nemu_xor_region",
+      "description": "XOR a region of emulated memory with a single-byte key. Returns the XOR result as base64. Use for quick decryption testing — XOR a buffer with a candidate key byte and inspect the preview without modifying guest state. Set dryRun=false to write the XOR result back into guest memory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "address": {
+            "type": "number",
+            "description": "Starting guest address to XOR"
+          },
+          "key": {
+            "type": "number",
+            "description": "Single-byte XOR key (0-255)"
+          },
+          "length": {
+            "type": "number",
+            "description": "Number of bytes to XOR"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "If true (default), return XOR result without modifying memory. Set false to write back.",
+            "default": true
+          }
+        },
+        "required": [
+          "sessionId",
+          "address",
+          "key",
+          "length"
         ]
       },
       "annotations": {

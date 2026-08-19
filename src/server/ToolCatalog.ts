@@ -26,9 +26,20 @@ function getToolGroups(): Record<string, Tool[]> {
   return toolGroups;
 }
 
-/** Invalidate the toolGroups cache when new domains are registered at runtime. */
+/**
+ * Invalidate all catalog caches when new domains are registered at runtime.
+ *
+ * Must reset every lazily-built view (toolGroups, toolDomainByName,
+ * profileDomains, allToolsCache) — ensureDomainLoaded() in the registry adds
+ * registrations and then calls this, so any view cached before the load would
+ * otherwise keep returning pre-load data (e.g. getToolDomain() → null for a
+ * freshly registered tool).
+ */
 export function clearToolGroupsCache(): void {
   toolGroups = null;
+  toolDomainByName = null;
+  profileDomains = null;
+  allToolsCache = null;
 }
 
 function getToolDomainByName(): ReadonlyMap<string, string> {

@@ -18,6 +18,7 @@
 import type { ExecutionContext } from '../cpu/ExecutionContext';
 import { reverseBits, reverseBytes, countLeadingZeros } from '../utils/BitOperations';
 import { computeArmCrc32 } from '../crc32';
+import { execPointerAuth3Source } from './PointerAuth';
 
 const MASK64 = (1n << 64n) - 1n;
 const MASK32 = (1n << 32n) - 1n;
@@ -208,6 +209,11 @@ export function execDataProcessingRegister(ctx: ExecutionContext, insn: number):
     }
     return true;
   }
+
+  // Pointer Authentication (3 source): sf | 1101 0101 000 | op31 | Rm | o0 | Ra | Rn | Rd
+  //   Prefix 0xDAC00000 — PACIA/PACIB/AUTIA/AUTIB. Must be checked BEFORE the
+  //   generic 3-source MADD block (0b11011) so the narrower mask wins.
+  if (execPointerAuth3Source(ctx, insn)) return true;
 
   // Data-processing (3 source): sf | 00 | 11011 | op31(3) | Rm | o0 | Ra | Rn | Rd
   //   MADD/MSUB (Rd = Ra ± Rn*Rm), SMULH/UMULH (high 64 bits of 64×64).

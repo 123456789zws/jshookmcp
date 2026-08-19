@@ -241,20 +241,20 @@ describe('CodeAnalyzerDataFlow additional branch coverage', () => {
     });
     it('tracks tainted args into document.write via checkTaintedArguments', async () => {
       const r = await analyzeDataFlowWithTaint('const s = location.href;\ndocument.write(s);');
-      // checkTaintedArguments produces taint path with sink type eval
-      expect(r.taintPaths.some((p) => p.sink.type === 'eval')).toBe(true);
+      // checkTaintedArguments derives the sink type from the call site
+      expect(r.taintPaths.some((p) => p.sink.type === 'xss')).toBe(true);
     });
     it('tracks tainted args into SQL sinks', async () => {
       const r = await analyzeDataFlowWithTaint('const s = location.href;\ndb.query(s);');
-      expect(r.taintPaths.some((p) => p.sink.type === 'eval')).toBe(true);
+      expect(r.taintPaths.some((p) => p.sink.type === 'sql-injection')).toBe(true);
     });
     it('tracks tainted args into command sinks', async () => {
       const r = await analyzeDataFlowWithTaint('const s = location.href;\nchild.exec(s);');
-      expect(r.taintPaths.some((p) => p.sink.type === 'eval')).toBe(true);
+      expect(r.taintPaths.some((p) => p.sink.type === 'other')).toBe(true);
     });
     it('tracks tainted args into file sinks', async () => {
       const r = await analyzeDataFlowWithTaint('const s = location.href;\nfs.readFile(s);');
-      expect(r.taintPaths.some((p) => p.sink.type === 'eval')).toBe(true);
+      expect(r.taintPaths.some((p) => p.sink.type === 'other')).toBe(true);
     });
   });
 

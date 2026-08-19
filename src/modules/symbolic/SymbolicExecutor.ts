@@ -1,14 +1,22 @@
 import * as parser from '@babel/parser';
-import traverse, { type NodePath } from '@babel/traverse';
+import traverse from '@babel/traverse';
 import * as t from '@babel/types';
 import { logger } from '@utils/logger';
 import {
   SYMBOLIC_EXEC_MAX_PATHS,
   SYMBOLIC_EXEC_MAX_DEPTH,
   SYMBOLIC_EXEC_TIMEOUT_MS,
+  SYMBOLIC_EXEC_Z3_TIMEOUT_MS,
 } from '@src/constants';
 import { withZ3, isZ3Failed } from '@modules/z3/Z3Solver';
 import { jsExprToZ3, AstBridgeError } from '@modules/z3/ast-bridge';
+
+/** Safety cap on pc — a runaway program counter terminates the path. */
+const MAX_PC_TERMINATION = 1000;
+/** Safety cap on path constraints — a path with too many branches terminates. */
+const MAX_PATH_CONSTRAINTS = 50;
+/** Normalizes a path's pc into a 0..1 coverage estimate. */
+const PATH_COVERAGE_NORMALIZER = 100;
 
 export type SymbolicValueType =
   | 'number'
@@ -109,6 +117,7 @@ export class SymbolicExecutor {
         pathConstraints: [],
       };
 
+      const statementTable = this.buildStatementTable(ast);
       const worklist: { state: SymbolicState; depth: number }[] = [
         { state: initialState, depth: 0 },
       ];
@@ -126,10 +135,10 @@ export class SymbolicExecutor {
           continue;
         }
 
-        const nextStates = this.executeStep(state, ast);
+        const nextStates = this.executeStep(state, ast, statementTable);
 
         for (const nextState of nextStates) {
-          if (this.isTerminalState(nextState)) {
+          if (this.isTerminalState(nextState, statementTable.entries.length)) {
             const path = this.createPath(nextState);
             paths.push(path);
 
@@ -172,23 +181,140 @@ export class SymbolicExecutor {
     }
   }
 
-  private executeStep(state: SymbolicState, ast: t.File): SymbolicState[] {
-    const nextStates: SymbolicState[] = [];
-    let currentNode: t.Node | null = null;
+  /**
+   * Flatten the program into a statement table. `pc` addresses this table:
+   * each entry's `next` is the index to continue at after the statement runs,
+   * so structured control flow (if branches, loop bodies) jumps correctly
+   * instead of drifting through raw traverse node indexes.
+   */
+  private buildStatementTable(ast: t.File): {
+    entries: Array<{ node: t.Statement; next: number }>;
+    branchTargets: Map<t.Statement, number>;
+  } {
+    const entries: Array<{ node: t.Statement; next: number }> = [];
+    const indexOf = new Map<t.Statement, number>();
+    const branchTargets = new Map<t.Statement, number>();
 
-    let nodeIndex = 0;
-    traverse(ast, {
-      enter(path: NodePath<t.Node>) {
-        if (nodeIndex === state.pc) {
-          currentNode = path.node;
-          path.stop();
+    // Pass 1: register every statement in DFS pre-order (source order).
+    const registerChildren = (stmt: t.Statement): void => {
+      if (t.isBlockStatement(stmt)) {
+        stmt.body.forEach((s) => register(s));
+      } else if (t.isIfStatement(stmt)) {
+        if (stmt.consequent) register(stmt.consequent);
+        if (stmt.alternate) register(stmt.alternate);
+      } else if (
+        t.isWhileStatement(stmt) ||
+        t.isDoWhileStatement(stmt) ||
+        t.isForStatement(stmt) ||
+        t.isForInStatement(stmt) ||
+        t.isForOfStatement(stmt)
+      ) {
+        if (stmt.body) register(stmt.body);
+      } else if (t.isTryStatement(stmt)) {
+        stmt.block.body.forEach((s) => register(s));
+        stmt.handler?.body.body.forEach((s) => register(s));
+        stmt.finalizer?.body.forEach((s) => register(s));
+      } else if (t.isSwitchStatement(stmt)) {
+        stmt.cases.forEach((c) => c.consequent.forEach((s) => register(s)));
+      }
+    };
+
+    const register = (stmt: t.Statement): void => {
+      // Block statements are containers, not executable steps — their body
+      // statements register individually so pc stays a statement counter.
+      if (t.isBlockStatement(stmt)) {
+        stmt.body.forEach((s) => register(s));
+        return;
+      }
+      indexOf.set(stmt, entries.length);
+      entries.push({ node: stmt, next: 0 });
+      registerChildren(stmt);
+    };
+
+    ast.program.body.forEach((s) => register(s));
+
+    // Pass 2: fill `next` top-down (child blocks exit into their parent
+    // statement's continuation).
+    const processBlock = (block: t.Statement[], exitIndex: number): void => {
+      for (let i = 0; i < block.length; i += 1) {
+        const stmt = block[i]!;
+        const idx = indexOf.get(stmt)!;
+        const nextStmt = block[i + 1];
+        entries[idx]!.next = nextStmt ? indexOf.get(nextStmt)! : exitIndex;
+      }
+      block.forEach((stmt) => processChildren(stmt));
+    };
+
+    const processChildren = (stmt: t.Statement): void => {
+      const exitIndex = indexOf.get(stmt)!;
+      if (t.isBlockStatement(stmt)) {
+        processBlock(stmt.body, exitIndex);
+      } else if (t.isIfStatement(stmt)) {
+        const consequentBlock = stmt.consequent
+          ? t.isBlockStatement(stmt.consequent)
+            ? stmt.consequent.body
+            : [stmt.consequent]
+          : [];
+        const alternateBlock = stmt.alternate
+          ? t.isBlockStatement(stmt.alternate)
+            ? stmt.alternate.body
+            : [stmt.alternate]
+          : [];
+        if (consequentBlock[0]) {
+          branchTargets.set(stmt, indexOf.get(consequentBlock[0])!);
         }
-        nodeIndex++;
-      },
-    });
+        processBlock(consequentBlock, exitIndex);
+        processBlock(alternateBlock, exitIndex);
+      } else if (
+        t.isWhileStatement(stmt) ||
+        t.isDoWhileStatement(stmt) ||
+        t.isForStatement(stmt) ||
+        t.isForInStatement(stmt) ||
+        t.isForOfStatement(stmt)
+      ) {
+        const body = stmt.body
+          ? t.isBlockStatement(stmt.body)
+            ? stmt.body.body
+            : [stmt.body]
+          : [];
+        if (body[0]) {
+          branchTargets.set(stmt, indexOf.get(body[0])!);
+        }
+        processBlock(body, exitIndex);
+      } else if (t.isTryStatement(stmt)) {
+        processBlock(stmt.block.body, exitIndex);
+        if (stmt.handler?.body) processBlock(stmt.handler.body.body, exitIndex);
+        if (stmt.finalizer) processBlock(stmt.finalizer.body, exitIndex);
+      } else if (t.isSwitchStatement(stmt)) {
+        // Conservative approximation: case bodies run in source order, then
+        // execution continues past the switch.
+        stmt.cases.forEach((c) => processBlock(c.consequent, exitIndex));
+      }
+    };
 
-    if (!currentNode) {
+    processBlock(ast.program.body, entries.length);
+
+    return { entries, branchTargets };
+  }
+
+  private executeStep(
+    state: SymbolicState,
+    ast: t.File,
+    table?: {
+      entries: Array<{ node: t.Statement; next: number }>;
+      branchTargets: Map<t.Statement, number>;
+    },
+  ): SymbolicState[] {
+    const resolvedTable = table ?? this.buildStatementTable(ast);
+    const entry = resolvedTable.entries[state.pc];
+    if (!entry) {
       return [];
+    }
+    // Assignments are wrapped in ExpressionStatements — unwrap so the
+    // assignment branch below handles them structurally.
+    let currentNode: t.Node = entry.node;
+    if (t.isExpressionStatement(currentNode) && t.isAssignmentExpression(currentNode.expression)) {
+      currentNode = currentNode.expression;
     }
 
     if (t.isVariableDeclaration(currentNode)) {
@@ -201,16 +327,18 @@ export class SymbolicExecutor {
           newState.memory.set(varName, symbolicValue);
         }
       });
-      newState.pc++;
-      nextStates.push(newState);
-    } else if (t.isIfStatement(currentNode)) {
+      newState.pc = entry.next;
+      return [newState];
+    }
+
+    if (t.isIfStatement(currentNode)) {
       const trueState = this.cloneState(state);
       const falseState = this.cloneState(state);
 
       const ifStmt = currentNode as t.IfStatement;
       const conditionExpr = this.nodeToString(ifStmt.test);
       trueState.pathConstraints.push({
-        type: 'custom',
+        type: this.constraintTypeFromTest(ifStmt.test),
         expression: conditionExpr,
         description: '',
       });
@@ -220,34 +348,90 @@ export class SymbolicExecutor {
         description: '',
       });
 
-      trueState.pc++;
-      falseState.pc++;
-      nextStates.push(trueState, falseState);
-    } else if (t.isWhileStatement(currentNode) || t.isForStatement(currentNode)) {
+      const consequentStart = resolvedTable.branchTargets.get(currentNode);
+      trueState.pc = consequentStart ?? entry.next;
+      falseState.pc = entry.next;
+      return [trueState, falseState];
+    }
+
+    if (
+      t.isWhileStatement(currentNode) ||
+      t.isDoWhileStatement(currentNode) ||
+      t.isForStatement(currentNode) ||
+      t.isForInStatement(currentNode) ||
+      t.isForOfStatement(currentNode)
+    ) {
       const enterState = this.cloneState(state);
       const skipState = this.cloneState(state);
 
-      enterState.pc++;
-      skipState.pc += 2;
-      nextStates.push(enterState, skipState);
-    } else if (t.isAssignmentExpression(currentNode)) {
+      const bodyStart = resolvedTable.branchTargets.get(currentNode);
+      enterState.pc = bodyStart ?? entry.next;
+      skipState.pc = entry.next;
+      return [enterState, skipState];
+    }
+
+    if (t.isAssignmentExpression(currentNode)) {
       const newState = this.cloneState(state);
       const assignExpr = currentNode as t.AssignmentExpression;
       if (t.isIdentifier(assignExpr.left)) {
         const varName = assignExpr.left.name;
         const rightExpr = this.nodeToString(assignExpr.right);
         const symbolicValue = this.createSymbolicValue('unknown', rightExpr, rightExpr);
+        // Resolve the RHS into a constraint so the solver can reason about
+        // the assignment (aliases, binary expressions, literals).
+        if (t.isIdentifier(assignExpr.right)) {
+          symbolicValue.constraints.push({
+            type: 'custom',
+            expression: `${varName} == ${rightExpr}`,
+            description: `Alias: ${varName} = ${rightExpr}`,
+          });
+        } else if (t.isBinaryExpression(assignExpr.right)) {
+          symbolicValue.constraints.push({
+            type: 'custom',
+            expression: `${varName} == ${rightExpr}`,
+            description: `Assignment: ${varName} = ${rightExpr}`,
+          });
+        } else if (
+          t.isNumericLiteral(assignExpr.right) ||
+          t.isStringLiteral(assignExpr.right) ||
+          t.isBooleanLiteral(assignExpr.right)
+        ) {
+          symbolicValue.constraints.push({
+            type: 'equality',
+            expression: `${varName} == ${rightExpr}`,
+            description: `Assignment: ${varName} = ${rightExpr}`,
+          });
+        }
         newState.memory.set(varName, symbolicValue);
       }
-      newState.pc++;
-      nextStates.push(newState);
-    } else {
-      const newState = this.cloneState(state);
-      newState.pc++;
-      nextStates.push(newState);
+      newState.pc = entry.next;
+      return [newState];
     }
 
-    return nextStates;
+    const newState = this.cloneState(state);
+    newState.pc = entry.next;
+    return [newState];
+  }
+
+  /** Classify a branch condition into a solver-friendly constraint type. */
+  private constraintTypeFromTest(test: t.Expression): Constraint['type'] {
+    if (t.isBinaryExpression(test)) {
+      switch (test.operator) {
+        case '==':
+        case '===':
+          return 'equality';
+        case '!=':
+        case '!==':
+        case '<':
+        case '>':
+        case '<=':
+        case '>=':
+          return 'inequality';
+        default:
+          return 'custom';
+      }
+    }
+    return 'custom';
   }
 
   private nodeToString(node: t.Node): string {
@@ -266,16 +450,15 @@ export class SymbolicExecutor {
     }
   }
 
-  private isTerminalState(state: SymbolicState): boolean {
-    if (state.pc > 1000) {
+  private isTerminalState(state: SymbolicState, statementCount: number): boolean {
+    // Execution finished when pc leaves the statement table. An empty
+    // stack/memory is NOT terminal on its own — a program with no variables
+    // must still execute its statements.
+    if (state.pc >= statementCount || state.pc > MAX_PC_TERMINATION) {
       return true;
     }
 
-    if (state.pathConstraints.length > 50) {
-      return true;
-    }
-
-    if (state.stack.length === 0 && state.memory.size === 0) {
+    if (state.pathConstraints.length > MAX_PATH_CONSTRAINTS) {
       return true;
     }
 
@@ -297,7 +480,7 @@ export class SymbolicExecutor {
   }
 
   private calculatePathCoverage(state: SymbolicState): number {
-    return Math.min(state.pc / 100, 1.0);
+    return Math.min(state.pc / PATH_COVERAGE_NORMALIZER, 1.0);
   }
 
   private checkPathFeasibility(constraints: Constraint[]): boolean {
@@ -403,7 +586,7 @@ export class SymbolicExecutor {
 
         try {
           const solver = new Solver();
-          solver.set('timeout', 5000);
+          solver.set('timeout', SYMBOLIC_EXEC_Z3_TIMEOUT_MS);
 
           // Build `And(c1, c2, ...)` from all path constraints (they are
           // conjunctive — all must hold for the path to be traversed).
@@ -507,14 +690,13 @@ export class SymbolicExecutor {
   }
 
   private simpleSMTSolver(constraints: Constraint[]): { satisfiable: boolean; reason?: string } {
-    const numericConstraints = constraints.filter(
-      (c) => c.type === 'range' || c.type === 'inequality',
-    );
-
-    for (let i = 0; i < numericConstraints.length; i++) {
-      for (let j = i + 1; j < numericConstraints.length; j++) {
-        const c1 = numericConstraints[i];
-        const c2 = numericConstraints[j];
+    // Work on every parseable numeric relation regardless of its declared
+    // type — the executor mostly emits 'custom' constraints and the old
+    // filter (range|inequality only) made the solver trivially satisfiable.
+    for (let i = 0; i < constraints.length; i++) {
+      for (let j = i + 1; j < constraints.length; j++) {
+        const c1 = constraints[i];
+        const c2 = constraints[j];
 
         if (!c1 || !c2) continue;
 
@@ -531,19 +713,113 @@ export class SymbolicExecutor {
   }
 
   private areContradictory(expr1: string, expr2: string): boolean {
-    const pattern1 = /(\w+)\s*>\s*(\d+)/;
-    const pattern2 = /(\w+)\s*<\s*(\d+)/;
-
-    const match1 = expr1.match(pattern1);
-    const match2 = expr2.match(pattern2);
-
-    if (match1 && match2 && match1[1] === match2[1] && match1[2] && match2[2]) {
-      const val1 = parseInt(match1[2], 10);
-      const val2 = parseInt(match2[2], 10);
-      return val1 >= val2;
+    const parsed1 = this.parseNumericRelation(expr1);
+    const parsed2 = this.parseNumericRelation(expr2);
+    if (!parsed1 || !parsed2 || parsed1.variable !== parsed2.variable) {
+      return false;
     }
 
+    // Equality vs anything: `x == v` contradicts any bound that excludes v.
+    if (parsed1.operator === '==') {
+      return !this.valueSatisfiesBound(parsed1.value, parsed2);
+    }
+    if (parsed2.operator === '==') {
+      return !this.valueSatisfiesBound(parsed2.value, parsed1);
+    }
+
+    // Two inequalities: intersecting the ranges reveals contradictions.
+    const lo = Math.max(parsed1.lower ?? -Infinity, parsed2.lower ?? -Infinity);
+    const hi = Math.min(parsed1.upper ?? Infinity, parsed2.upper ?? Infinity);
+    if (lo > hi) {
+      return true;
+    }
+    if (lo === hi) {
+      const loStrict =
+        (parsed1.lower !== null && parsed1.lowerStrict) ||
+        (parsed2.lower !== null && parsed2.lowerStrict);
+      const hiStrict =
+        (parsed1.upper !== null && parsed1.upperStrict) ||
+        (parsed2.upper !== null && parsed2.upperStrict);
+      return loStrict || hiStrict;
+    }
     return false;
+  }
+
+  /** Does `value` satisfy a parsed relation (e.g. x > 5, x <= 3)? */
+  private valueSatisfiesBound(value: number, relation: NumericRelation): boolean {
+    if (relation.operator === '==') {
+      return value === relation.value;
+    }
+    if (relation.lower !== null) {
+      if (value < relation.lower) return false;
+      if (value === relation.lower && relation.lowerStrict) return false;
+    }
+    if (relation.upper !== null) {
+      if (value > relation.upper) return false;
+      if (value === relation.upper && relation.upperStrict) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Parse a numeric relation like `x > 5`, `!(x > 5)`, `x == 3` into
+   * normalized bounds. Returns null when the expression is not a simple
+   * single-variable numeric relation.
+   */
+  private parseNumericRelation(expr: string): NumericRelation | null {
+    const match = expr
+      .trim()
+      .match(/^!?\(?([a-zA-Z_][a-zA-Z0-9_]*)\s*(===|==|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)\)?$/);
+    if (!match?.[1] || !match[2] || match[3] === undefined) {
+      return null;
+    }
+
+    const variable = match[1];
+    let operator = match[2];
+    const value = Number(match[3]);
+    const negated = expr.trim().startsWith('!');
+    if (negated) {
+      // !(x > 5) ⟺ x <= 5
+      operator =
+        { '>': '<=', '<': '>=', '>=': '<', '<=': '>', '==': '!=', '===': '!==' }[operator] ??
+        operator;
+      // A negated equality is not a simple bound — treat as unsupported.
+      if (operator === '!=' || operator === '!==') {
+        return null;
+      }
+    }
+
+    const relation: NumericRelation = {
+      variable,
+      operator,
+      value,
+      lower: null,
+      lowerStrict: false,
+      upper: null,
+      upperStrict: false,
+    };
+    switch (operator) {
+      case '>':
+        relation.lower = value;
+        relation.lowerStrict = true;
+        break;
+      case '>=':
+        relation.lower = value;
+        break;
+      case '<':
+        relation.upper = value;
+        relation.upperStrict = true;
+        break;
+      case '<=':
+        relation.upper = value;
+        break;
+      case '==':
+      case '===':
+        break; // equality handled via `value`
+      default:
+        return null;
+    }
+    return relation;
   }
 
   private calculateCoverage(paths: ExecutionPath[], ast: t.File): number {
@@ -600,6 +876,17 @@ export class SymbolicExecutor {
       description,
     });
   }
+}
+
+/** Normalized single-variable numeric relation from {@link SymbolicExecutor.parseNumericRelation}. */
+interface NumericRelation {
+  variable: string;
+  operator: '==' | '>=' | '<=' | '>' | '<' | string;
+  value: number;
+  lower: number | null;
+  lowerStrict: boolean;
+  upper: number | null;
+  upperStrict: boolean;
 }
 
 /** Simple regex to extract identifiers from a constraint expression. */

@@ -41,7 +41,9 @@ function parseThin(data: Buffer, offset: number): MachoSection[] {
     if (cmd === LC_SEGMENT_64 && cursor + 72 <= data.length) {
       // Segment name at offset 8 (16 bytes)
       const segName = readCString(data, cursor + 8, 16);
-      const maxprot = data.readUInt32LE(cursor + 74);
+      // segment_command_64 layout: cmd(4) cmdsize(4) segname(16) vmaddr(8)
+      // vmsize(8) fileoff(8) filesize(8) maxprot(4) initprot(4) nsects(4) flags(4)
+      const maxprot = data.readUInt32LE(cursor + 56);
       const nsects = data.readUInt32LE(cursor + 64);
 
       for (let s = 0; s < Math.min(nsects, 256); s++) {
@@ -51,7 +53,10 @@ function parseThin(data: Buffer, offset: number): MachoSection[] {
         const secName = readCString(data, secoff, 16);
         const secAddr = data.readBigUInt64LE(secoff + 32);
         const secSize = data.readBigUInt64LE(secoff + 40);
-        const secOffset = secoff; // approximate — section file offset at secoff
+        // section_64.offset (secoff + 48) is the real file offset of the section
+        // data — the section struct's own address (secoff) is only valid for
+        // zerofill sections and is meaningless as a file position.
+        const secOffset = data.readUInt32LE(secoff + 48);
         const secFlags = data.readUInt32LE(secoff + 64);
 
         sections.push({
@@ -78,6 +83,28 @@ function readCString(buf: Buffer, off: number, max: number): string {
 }
 
 /**
+ * Walk a FAT arch table and return the file offset of the first x86-64 or
+ * arm64 thin slice that starts with a Mach-O 64 magic, or -1 when no
+ * suitable slice exists. Shared by {@link parseMachoSections} and
+ * {@link findThinOffset}.
+ */
+function findThinOffsetInFAT(data: Buffer): number {
+  const narch = data.readUInt32BE(4); // FAT header is big-endian
+  for (let i = 0; i < narch; i++) {
+    const archOff = 8 + i * 20;
+    if (archOff + 20 > data.length) break;
+    const cputype = data.readUInt32BE(archOff);
+    const offset = data.readUInt32BE(archOff + 8);
+    const size = data.readUInt32BE(archOff + 12);
+    // CPU_TYPE_X86_64 = 0x01000007, CPU_TYPE_ARM64 = 0x0100000C
+    if ((cputype === 0x01000007 || cputype === 0x0100000c) && offset + size <= data.length) {
+      if (data.readUInt32LE(offset) === MH_MAGIC_64) return offset;
+    }
+  }
+  return -1;
+}
+
+/**
  * Parse a Mach-O (or FAT) on-disk binary and return its loadable segments.
  * Returns [] when the file is not a recognised Mach-O.
  */
@@ -94,23 +121,9 @@ export function parseMachoSections(filePath: string): MachoSection[] {
   const magic = data.readUInt32LE(0);
 
   if (magic === FAT_MAGIC || magic === FAT_CIGAM) {
-    // FAT binary — try the first slice (x86-64 or arm64)
-    const narch = data.readUInt32BE(4); // FAT header is big-endian
-    for (let i = 0; i < narch; i++) {
-      const archOff = 8 + i * 20;
-      if (archOff + 20 > data.length) break;
-      const cputype = data.readUInt32BE(archOff);
-      const offset = data.readUInt32BE(archOff + 8);
-      const size = data.readUInt32BE(archOff + 12);
-      // CPU_TYPE_X86_64 = 0x01000007, CPU_TYPE_ARM64 = 0x0100000C
-      if ((cputype === 0x01000007 || cputype === 0x0100000c) && offset + size <= data.length) {
-        const innerMagic = data.readUInt32LE(offset);
-        if (innerMagic === MH_MAGIC_64) {
-          return parseThin(data, offset);
-        }
-      }
-    }
-    return [];
+    // FAT binary — parse the first x86-64/arm64 slice found
+    const offset = findThinOffsetInFAT(data);
+    return offset >= 0 ? parseThin(data, offset) : [];
   }
 
   if (magic === MH_MAGIC_64) {
@@ -159,18 +172,7 @@ function findThinOffset(data: Buffer): number {
   if (data.length < 4) return -1;
   const magic = data.readUInt32LE(0);
   if (magic === FAT_MAGIC || magic === FAT_CIGAM) {
-    const narch = data.readUInt32BE(4);
-    for (let i = 0; i < narch; i++) {
-      const archOff = 8 + i * 20;
-      if (archOff + 20 > data.length) break;
-      const cputype = data.readUInt32BE(archOff);
-      const offset = data.readUInt32BE(archOff + 8);
-      const size = data.readUInt32BE(archOff + 12);
-      if ((cputype === 0x01000007 || cputype === 0x0100000c) && offset + size <= data.length) {
-        if (data.readUInt32LE(offset) === MH_MAGIC_64) return offset;
-      }
-    }
-    return -1;
+    return findThinOffsetInFAT(data);
   }
   return magic === MH_MAGIC_64 ? 0 : -1;
 }

@@ -10,9 +10,38 @@ import type {
 import { logger } from '@utils/logger';
 import { CryptoRulesManager } from '@modules/crypto/CryptoRules';
 
+/** Score penalty applied per security issue, keyed by severity. */
+const SEVERITY_WEIGHTS: Record<SecurityIssue['severity'], number> = {
+  critical: 40,
+  high: 25,
+  medium: 15,
+  low: 5,
+};
+
+/** Minimum total score for each overall strength label (inclusive). */
+const STRENGTH_THRESHOLDS = {
+  strong: 80,
+  moderate: 60,
+  weak: 40,
+} as const;
+
+/** An array literal of this many elements is treated as an S-box (AES: 256). */
+const SBOX_ARRAY_SIZE = 256;
+/** Big-number operations that imply asymmetric crypto. */
+const BIGINT_OPERATION_METHODS = ['modPow', 'modInverse', 'gcd', 'isProbablePrime'];
+/** Function-name hints for custom hash detection. */
+const HASH_FUNCTION_NAME_HINTS = ['hash', 'digest', 'checksum'];
+/** Confidence assigned to heuristic AST detections. */
+const SBOX_DETECT_CONFIDENCE = 0.8;
+const BIGINT_OP_CONFIDENCE = 0.75;
+const HASH_FUNCTION_CONFIDENCE = 0.7;
+
 export interface SecurityIssue {
   severity: 'critical' | 'high' | 'medium' | 'low';
   algorithm?: string;
+  /** Structured rule identifier (e.g. "weak-rc4", "ecb-mode") — the reliable
+   *  classification key; message text is user-visible only. */
+  ruleName?: string;
   issue: string;
   recommendation: string;
   location?: { file: string; line: number };
@@ -165,7 +194,7 @@ export class CryptoDetector {
           const node = path.node;
           if (
             node.init?.type === 'ArrayExpression' &&
-            node.init.elements.length === 256 &&
+            node.init.elements.length === SBOX_ARRAY_SIZE &&
             node.id.type === 'Identifier' &&
             (node.id.name.toLowerCase().includes('sbox') ||
               node.id.name.toLowerCase().includes('box') ||
@@ -174,7 +203,7 @@ export class CryptoDetector {
             algorithms.push({
               name: 'Custom Symmetric Cipher',
               type: 'symmetric',
-              confidence: 0.8,
+              confidence: SBOX_DETECT_CONFIDENCE,
               location: { file: 'current', line: node.loc?.start.line || 0 },
               usage: `S-box array detected (${node.id.name})`,
             });
@@ -186,11 +215,11 @@ export class CryptoDetector {
           if (t.isMemberExpression(node.callee) && t.isIdentifier(node.callee.property)) {
             const methodName = node.callee.property.name;
 
-            if (['modPow', 'modInverse', 'gcd', 'isProbablePrime'].includes(methodName)) {
+            if (BIGINT_OPERATION_METHODS.includes(methodName)) {
               algorithms.push({
                 name: 'Asymmetric Encryption',
                 type: 'asymmetric',
-                confidence: 0.75,
+                confidence: BIGINT_OP_CONFIDENCE,
                 location: { file: 'current', line: node.loc?.start.line || 0 },
                 usage: `Big number operation detected: ${methodName}`,
               });
@@ -204,11 +233,7 @@ export class CryptoDetector {
           const node = path.node;
           const funcName = node.id?.name.toLowerCase() || '';
 
-          if (
-            funcName.includes('hash') ||
-            funcName.includes('digest') ||
-            funcName.includes('checksum')
-          ) {
+          if (HASH_FUNCTION_NAME_HINTS.some((hint) => funcName.includes(hint))) {
             const bodyCode = code.substring(node.start || 0, node.end || 0);
             const hasLoop = bodyCode.includes('for') || bodyCode.includes('while');
             const hasBitOps = />>>|<<|&|\||\^/.test(bodyCode);
@@ -217,7 +242,7 @@ export class CryptoDetector {
               algorithms.push({
                 name: 'Custom Hash Function',
                 type: 'hash',
-                confidence: 0.7,
+                confidence: HASH_FUNCTION_CONFIDENCE,
                 location: { file: 'current', line: node.loc?.start.line || 0 },
                 usage: `Hash function detected: ${funcName}`,
               });
@@ -285,6 +310,7 @@ export class CryptoDetector {
           issues.push({
             severity: rule.severity,
             algorithm: algo.name,
+            ruleName: rule.name,
             issue: rule.message,
             recommendation: rule.recommendation || '',
             location: algo.location,
@@ -306,16 +332,21 @@ export class CryptoDetector {
     let implementationScore = 100;
 
     securityIssues.forEach((issue) => {
-      const penalty = { critical: 40, high: 25, medium: 15, low: 5 }[issue.severity];
+      const penalty = SEVERITY_WEIGHTS[issue.severity];
 
-      if (issue.issue.includes('algorithm') || issue.issue.includes('broken')) {
-        algorithmScore -= penalty;
-      } else if (issue.issue.includes('key')) {
-        keySizeScore -= penalty;
-      } else if (issue.issue.includes('mode')) {
-        modeScore -= penalty;
-      } else {
-        implementationScore -= penalty;
+      switch (this.classifyIssue(issue)) {
+        case 'algorithm':
+          algorithmScore -= penalty;
+          break;
+        case 'keySize':
+          keySizeScore -= penalty;
+          break;
+        case 'mode':
+          modeScore -= penalty;
+          break;
+        default:
+          implementationScore -= penalty;
+          break;
       }
     });
 
@@ -327,9 +358,9 @@ export class CryptoDetector {
     const totalScore = (algorithmScore + keySizeScore + modeScore + implementationScore) / 4;
 
     let overall: CryptoStrength['overall'];
-    if (totalScore >= 80) overall = 'strong';
-    else if (totalScore >= 60) overall = 'moderate';
-    else if (totalScore >= 40) overall = 'weak';
+    if (totalScore >= STRENGTH_THRESHOLDS.strong) overall = 'strong';
+    else if (totalScore >= STRENGTH_THRESHOLDS.moderate) overall = 'moderate';
+    else if (totalScore >= STRENGTH_THRESHOLDS.weak) overall = 'weak';
     else overall = 'broken';
 
     return {
@@ -342,6 +373,37 @@ export class CryptoDetector {
         implementation: Math.round(implementationScore),
       },
     };
+  }
+
+  /**
+   * Classify a security issue into a strength bucket. Prefers the structured
+   * rule name (which custom JSON rules carry too); falls back to message text
+   * so legacy callers that construct issues manually still behave sensibly.
+   */
+  private classifyIssue(issue: SecurityIssue): 'algorithm' | 'keySize' | 'mode' | 'implementation' {
+    const name = (issue.ruleName ?? '').toLowerCase();
+    const text = name + ' ' + issue.issue.toLowerCase();
+
+    // Padding first: its message often mentions modes ("non-streaming modes"),
+    // which would misroute it into the mode bucket.
+    if (name.includes('padding') || text.includes('padding')) {
+      return 'implementation';
+    }
+    if (name.includes('key') || text.includes('key size')) {
+      return 'keySize';
+    }
+    if (name.includes('mode') || text.includes('mode')) {
+      return 'mode';
+    }
+    if (
+      name.includes('weak') ||
+      name.includes('broken') ||
+      text.includes('broken') ||
+      text.includes('algorithm')
+    ) {
+      return 'algorithm';
+    }
+    return 'implementation';
   }
 
   private mergeResults(algorithms: CryptoAlgorithm[]): CryptoAlgorithm[] {

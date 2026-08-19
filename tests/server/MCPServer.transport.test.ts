@@ -121,6 +121,15 @@ vi.mock('@src/constants', () => ({
   MCP_HTTP_HEADERS_TIMEOUT_MS: 2_000,
   MCP_HTTP_KEEPALIVE_TIMEOUT_MS: 3_000,
   MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS: 4_000,
+  HTTP_CAPACITY_RETRY_AFTER_MS: 1_000,
+  // Defaults mirror the real @src/constants; tests override individual
+  // properties on the mocked module object (shared reference) when needed.
+  MCP_HTTP_HOST: '127.0.0.1',
+  MCP_HTTP_PORT: 3000,
+  MCP_HEALTH_VERBOSE: false,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES: 4096,
+  MCP_BROWSER_FLEET_LEASE_TTL_MS: 600_000,
+  STDIO_SEND_TIMEOUT_MS: 500,
 }));
 
 import { closeServer, startHttpTransport, startStdioTransport } from '@server/MCPServer.transport';
@@ -261,8 +270,12 @@ describe('MCPServer.transport', () => {
   });
 
   it('starts HTTP transport, configures timeouts, and tracks sockets', async () => {
-    process.env.MCP_PORT = '4321';
-    process.env.MCP_HOST = '0.0.0.0';
+    // MCP_PORT/MCP_HOST resolve into constants at module load time — the mocked
+    // constants module object is a shared reference, so override the resolved
+    // values directly to emulate a configured environment.
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HTTP_PORT = 4321;
+    (constantsMod as any).MCP_HTTP_HOST = '0.0.0.0';
     const ctx = createCtx();
 
     await startHttpTransport(ctx);
@@ -334,7 +347,8 @@ describe('MCPServer.transport', () => {
   });
 
   it('serves /health without invoking auth middleware and includes verbose details when enabled', async () => {
-    process.env.MCP_HEALTH_VERBOSE = 'true';
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = true;
     const ctx = createCtx();
     await startHttpTransport(ctx);
 
@@ -365,7 +379,8 @@ describe('MCPServer.transport', () => {
   });
 
   it('serves /health correctly when baseTier is search', async () => {
-    process.env.MCP_HEALTH_VERBOSE = 'true';
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = true;
     const ctx = createCtx({ baseTier: 'search' });
     await startHttpTransport(ctx);
 

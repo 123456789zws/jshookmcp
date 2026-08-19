@@ -1,6 +1,7 @@
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import type { CDPSessionLike } from '@modules/browser/CDPSessionLike';
 import { logger } from '@utils/logger';
+import { CDP_SESSION_TIMEOUT_MS } from '@src/constants';
 import { NetworkMonitor } from '@modules/monitor/NetworkMonitor';
 import { PlaywrightNetworkMonitor } from '@modules/monitor/PlaywrightNetworkMonitor';
 import type { NetworkMonitorLike } from '@modules/monitor/NetworkMonitor.types';
@@ -140,7 +141,7 @@ export class ConsoleMonitor {
     const session = await Promise.race([
       page.createCDPSession() as Promise<CDPSessionLike>,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('cdp_session_timeout')), 500),
+        setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
       ),
     ]);
     return {

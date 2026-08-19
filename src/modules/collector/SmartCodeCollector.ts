@@ -1,6 +1,24 @@
 import type { Page } from 'rebrowser-puppeteer-core';
 import { logger } from '@utils/logger';
 import type { CodeFile } from '@internal-types/index';
+import { truncateUtf16Safe } from '@modules/collector/collector-utils';
+
+/** Priority score weights by file characteristic. */
+const PRIORITY_INLINE_SCORE = 10;
+const PRIORITY_EXTERNAL_SCORE = 5;
+const PRIORITY_MATCH_WEIGHT = 20;
+const PRIORITY_ENCRYPTION_SCORE = 50;
+const PRIORITY_API_SCORE = 30;
+const PRIORITY_OBFUSCATION_SCORE = 20;
+const PRIORITY_SMALL_FILE_SCORE = 10;
+const PRIORITY_HUGE_FILE_PENALTY = 20;
+/** File size tiers for priority scoring (bytes). */
+const SMALL_FILE_BYTES = 10 * 1024;
+const HUGE_FILE_BYTES = 500 * 1024;
+/** avgLineLength above this marks a file as obfuscated. */
+const OBFUSCATION_AVG_LINE_LENGTH = 200;
+/** Cap on extracted function names per file. */
+const MAX_EXTRACTED_FUNCTIONS = 20;
 
 export interface SmartCollectOptions {
   mode: 'summary' | 'priority' | 'incremental' | 'full';
@@ -35,19 +53,26 @@ export class SmartCodeCollector {
   ): Promise<CodeFile[] | CodeSummary[]> {
     logger.info(`Smart code collection mode: ${options.mode}`);
 
+    // Normalize once: null/undefined content (unreliable page captures) must
+    // not crash split()/substring() further down the pipeline.
+    const normalized: CodeFile[] = files.map((file) => ({
+      ...file,
+      content: file.content ?? '',
+    }));
+
     switch (options.mode) {
       case 'summary':
-        return this.collectSummaries(files);
+        return this.collectSummaries(normalized);
 
       case 'priority':
-        return this.collectByPriority(files, options);
+        return this.collectByPriority(normalized, options);
 
       case 'incremental':
-        return this.collectIncremental(files, options);
+        return this.collectIncremental(normalized, options);
 
       case 'full':
       default:
-        return this.collectWithLimit(files, options);
+        return this.collectWithLimit(normalized, options);
     }
   }
 
@@ -86,12 +111,12 @@ export class SmartCodeCollector {
     const result: CodeFile[] = [];
     let currentSize = 0;
 
-    for (const { file } of scoredFiles) {
+    for (const { file, score } of scoredFiles) {
       let content = file.content;
       let truncated = false;
 
       if (file.size > maxFileSize) {
-        content = content.substring(0, maxFileSize);
+        content = truncateUtf16Safe(content, maxFileSize);
         truncated = true;
       }
 
@@ -108,7 +133,9 @@ export class SmartCodeCollector {
           ...file.metadata,
           truncated,
           originalSize: file.size,
-          priorityScore: this.calculatePriority(file, options.priorities || []),
+          // Reuse the pre-computed score — re-running calculatePriority here
+          // would duplicate the identical computation for every file.
+          priorityScore: score,
         },
       });
 
@@ -153,7 +180,7 @@ export class SmartCodeCollector {
       let truncated = false;
 
       if (file.size > maxFileSize) {
-        content = content.substring(0, maxFileSize);
+        content = truncateUtf16Safe(content, maxFileSize);
         truncated = true;
       }
 
@@ -184,22 +211,22 @@ export class SmartCodeCollector {
   private calculatePriority(file: CodeFile, priorities: string[]): number {
     let score = 0;
 
-    if (file.type === 'inline') score += 10;
-    if (file.type === 'external') score += 5;
+    if (file.type === 'inline') score += PRIORITY_INLINE_SCORE;
+    if (file.type === 'external') score += PRIORITY_EXTERNAL_SCORE;
 
     for (let i = 0; i < priorities.length; i++) {
       const pattern = priorities[i];
       if (pattern && new RegExp(pattern).test(file.url)) {
-        score += (priorities.length - i) * 20;
+        score += (priorities.length - i) * PRIORITY_MATCH_WEIGHT;
       }
     }
 
-    if (this.detectEncryption(file.content)) score += 50;
-    if (this.detectAPI(file.content)) score += 30;
-    if (this.detectObfuscation(file.content)) score += 20;
+    if (this.detectEncryption(file.content)) score += PRIORITY_ENCRYPTION_SCORE;
+    if (this.detectAPI(file.content)) score += PRIORITY_API_SCORE;
+    if (this.detectObfuscation(file.content)) score += PRIORITY_OBFUSCATION_SCORE;
 
-    if (file.size < 10 * 1024) score += 10;
-    else if (file.size > 500 * 1024) score -= 20;
+    if (file.size < SMALL_FILE_BYTES) score += PRIORITY_SMALL_FILE_SCORE;
+    else if (file.size > HUGE_FILE_BYTES) score -= PRIORITY_HUGE_FILE_PENALTY;
 
     return score;
   }
@@ -224,7 +251,7 @@ export class SmartCodeCollector {
     const lines = content.split('\n');
     const avgLineLength = content.length / lines.length;
 
-    if (avgLineLength > 200) return true;
+    if (avgLineLength > OBFUSCATION_AVG_LINE_LENGTH) return true;
 
     if (/\\x[0-9a-f]{2}/i.test(content)) return true;
     if (/\\u[0-9a-f]{4}/i.test(content)) return true;
@@ -250,7 +277,7 @@ export class SmartCodeCollector {
       }
     }
 
-    return functions.slice(0, 20);
+    return functions.slice(0, MAX_EXTRACTED_FUNCTIONS);
   }
 
   private extractImports(content: string): string[] {

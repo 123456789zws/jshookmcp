@@ -555,7 +555,7 @@ describe('NativeEmulatorHandlers — isolation & errors', () => {
     expect(res.success).toBe(false);
   });
 
-  it('returns structured native runtime fault details for NULL indirect calls', async () => {
+  it('auto-NOPs NULL indirect calls (BLR x0 → RET with result 0)', async () => {
     handlers = new NativeEmulatorHandlers(
       new SessionManager({ emulatorOptions: { syscalls: false } }),
     );
@@ -564,21 +564,19 @@ describe('NativeEmulatorHandlers — isolation & errors', () => {
     await handlers.handleLoadLibrary({ sessionId, soPath: nullCallSoPath });
 
     const res = payload(await handlers.handleCallSymbol({ sessionId, symbol: 'call_null' }));
-    expect(res.success).toBe(false);
+    expect(res.success).toBe(true);
     expect(res.symbol).toBe('call_null');
-    expect(res.fault).toEqual(
-      expect.objectContaining({
-        kind: 'null-indirect-call',
-        phase: 'call_symbol',
-      }),
-    );
-    expect(String((res.fault as Record<string, unknown>).message)).toMatch(/NULL indirect call/i);
+    // BLR through x8=0 is auto-patched to RET; x0=0 cleanly returned.
+    expect(res.result).toBe(0);
     expect(res.diagnostics).toEqual(
       expect.objectContaining({
         unresolvedImports: [],
         constructorFaults: [],
       }),
     );
+    // The auto-NOP patch is recorded for diagnostics.
+    const diag = res.diagnostics as Record<string, unknown>;
+    expect(diag.autoNopPatches).toBeInstanceOf(Array);
   });
 
   it('reports destroyed:false when destroying an unknown session', async () => {

@@ -13,6 +13,11 @@
 
 import { argNumber, argStringArray } from '@server/domains/shared/parse-args';
 import type { SyscallEvent } from '@modules/syscall-hook';
+import {
+  SYSCALL_TRACE_DURATION_DEFAULT_SEC,
+  SYSCALL_TRACE_DURATION_MAX_SEC,
+  SYSCALL_TRACE_DURATION_MIN_SEC,
+} from '@src/constants';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -38,10 +43,8 @@ export interface EbpfAttachResult {
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
+// SYSCALL_TRACE_DURATION_* imported from @src/constants (env-overridable).
 
-const TRACE_DURATION_MIN_SEC = 1;
-const TRACE_DURATION_MAX_SEC = 300;
-const DEFAULT_TRACE_DURATION_SEC = 10;
 const DEFAULT_SYSCALLS = [
   'read',
   'write',
@@ -527,12 +530,15 @@ export async function handleSyscallEbpfAttach(
   }
 
   // Parse durationSec
-  let durationSec = argNumber(args, 'durationSec') ?? DEFAULT_TRACE_DURATION_SEC;
-  if (!Number.isFinite(durationSec)) durationSec = DEFAULT_TRACE_DURATION_SEC;
-  if (durationSec < TRACE_DURATION_MIN_SEC || durationSec > TRACE_DURATION_MAX_SEC) {
+  let durationSec = argNumber(args, 'durationSec') ?? SYSCALL_TRACE_DURATION_DEFAULT_SEC;
+  if (!Number.isFinite(durationSec)) durationSec = SYSCALL_TRACE_DURATION_DEFAULT_SEC;
+  if (
+    durationSec < SYSCALL_TRACE_DURATION_MIN_SEC ||
+    durationSec > SYSCALL_TRACE_DURATION_MAX_SEC
+  ) {
     return {
       success: false,
-      error: `durationSec must be between ${TRACE_DURATION_MIN_SEC} and ${TRACE_DURATION_MAX_SEC}`,
+      error: `durationSec must be between ${SYSCALL_TRACE_DURATION_MIN_SEC} and ${SYSCALL_TRACE_DURATION_MAX_SEC}`,
       pid: effectivePid,
       durationSec,
       syscallsTraced: effectiveSyscalls,

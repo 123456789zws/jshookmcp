@@ -173,6 +173,9 @@ describe('NativeEmulator.dispose — resource cleanup', () => {
     emu.dispose();
 
     expect(() => emu.loadLibrary(createMinimalElf())).toThrow('disposed');
+    expect(() => emu.loadLibraryChain([createMinimalElf()], createMinimalElf())).toThrow(
+      'disposed',
+    );
     expect(() => emu.call('test')).toThrow('disposed');
     expect(() => emu.allocGuestMemory(4096)).toThrow('disposed');
   });

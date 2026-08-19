@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, exec } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize, resolve as resolvePath } from 'node:path';
@@ -507,17 +507,17 @@ export class GhidraAnalyzer {
 
   protected execFileUtf8(file: string, args: string[], timeoutMs: number): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
-      execFile(
+      const child = execFile(
         file,
         args,
         {
-          timeout: timeoutMs,
           windowsHide: true,
           maxBuffer: GHIDRA_MAX_BUFFER_BYTES,
           encoding: 'utf8',
           shell: shouldUseShellForCommand(file),
         },
         (error, stdout, stderr) => {
+          clearTimeout(timer);
           if (error) {
             const output = [
               typeof stdout === 'string' && stdout.trim() ? `stdout:\n${stdout.trim()}` : '',
@@ -538,6 +538,16 @@ export class GhidraAnalyzer {
           });
         },
       );
+
+      // Manual timeout with force-kill. Node's built-in execFile timeout sends
+      // SIGTERM which Java-based tools (Ghidra, apktool, JADX) ignore on Windows.
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        if (child.pid) {
+          exec(`taskkill /F /T /PID ${child.pid}`, () => {});
+        }
+        reject(new Error(`${file} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
     });
   }
 }

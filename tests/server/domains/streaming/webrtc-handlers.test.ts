@@ -50,6 +50,11 @@ function mockRTC() {
     addEventListener = vi.fn((type: string, l: (e: unknown) => void) => {
       if (type === 'datachannel') this.dcListeners.push(l);
     });
+    removeEventListener = vi.fn((type: string, l: (e: unknown) => void) => {
+      if (type === 'datachannel') {
+        this.dcListeners = this.dcListeners.filter((x) => x !== l);
+      }
+    });
     // fire a remote datachannel event to all listeners
     fireDataChannel(ch: ReturnType<typeof mockChannel>) {
       for (const l of this.dcListeners) l({ channel: ch });

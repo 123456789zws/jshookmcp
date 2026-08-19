@@ -27,6 +27,11 @@ function mockExecFile(
         cb(new Error('unexpected execFile call'));
         return;
       }
+      if (resp.error) {
+        // A failed pull/timeout never delivers the file.
+        cb(resp.error);
+        return;
+      }
       if (_args.includes('pull')) {
         const dest = _args[_args.length - 1];
         if (typeof dest === 'string' && dest.endsWith('.apk')) {
@@ -40,8 +45,7 @@ function mockExecFile(
           writeFileSync(dest, '<hierarchy><node/><node/></hierarchy>');
         }
       }
-      if (resp.error) cb(resp.error);
-      else cb(null, resp.stdout ?? '', resp.stderr ?? '');
+      cb(null, resp.stdout ?? '', resp.stderr ?? '');
     },
   );
 }
@@ -286,6 +290,35 @@ describe('ADBBridgeHandlers', () => {
     } finally {
       rmSync(outputPath, { force: true });
     }
+  });
+
+  it('cleans up the remote recording even when the pull fails', async () => {
+    const outputPath = join(tmpdir(), `jshook-adb-test-${Date.now()}-fail.mp4`);
+    // Pull "fails" with a timeout-style error: the file never lands locally,
+    // so the subsequent stat() throws — the rm -f cleanup must still run.
+    mockExecFile([{ stdout: '' }, { error: new Error('pull timeout') }, { stdout: '' }]);
+
+    try {
+      const result = await handlers.handleScreenrecordTool({
+        serial: 'emulator-5554',
+        localPath: outputPath,
+        remotePath: '/sdcard/Download/test-record.mp4',
+        durationSec: 2,
+      });
+      const parsed = parseResult(result);
+      expect(parsed.success).toBe(false);
+    } finally {
+      rmSync(outputPath, { force: true });
+    }
+
+    const calls = (execFile as any).mock.calls as Array<Array<unknown>>;
+    const rmCall = calls.find((call) => {
+      const args = call[1] as string[];
+      return args.includes('rm') && args.includes('-f');
+    });
+    // The remote temp file must be removed even on the failure path.
+    expect(rmCall).toBeDefined();
+    expect((rmCall![1] as string[]).at(-1)).toBe('/sdcard/Download/test-record.mp4');
   });
 
   it('reuses the generated UI dump path for pull, read, and response', async () => {

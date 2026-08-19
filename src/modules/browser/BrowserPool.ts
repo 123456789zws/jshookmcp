@@ -96,6 +96,8 @@ const DEFAULT_MAX_TABS = BROWSER_POOL_MAX_TABS;
 
 export class BrowserPool {
   private entries = new Map<string, PoolEntry>();
+  /** In-flight acquire() promises per profile, coalescing concurrent acquires. */
+  private pendingAcquires = new Map<string, Promise<UnifiedBrowserManager>>();
   private defaultIdleTimeout: number;
   private defaultMaxTabs: number;
   private isDisposed = false;
@@ -137,45 +139,83 @@ export class BrowserPool {
       return existing.manager;
     }
 
-    // Clean up old entry if it exists but is disposed
-    if (existing) {
-      this.entries.delete(profile.name);
+    // Concurrent acquires of the same profile share one launch. Without this,
+    // two browsers would be launched and the second entry would silently
+    // replace (and leak) the first.
+    const pending = this.pendingAcquires.get(profile.name);
+    if (pending) {
+      return pending;
     }
 
-    logger.info(`[BrowserPool] Creating new browser for profile "${profile.name}"`);
+    const run = (async () => {
+      const recheck = this.entries.get(profile.name);
+      if (recheck && !recheck.disposed) {
+        recheck.inUse = true;
+        recheck.lastAccess = Date.now();
+        this.clearIdleTimer(recheck);
+        return recheck.manager;
+      }
 
-    const config: UnifiedBrowserConfig = {
-      // Preserve profile-specific settings
-      driver: profile.config?.driver ?? 'chrome',
-      headless: profile.config?.headless,
-      args: profile.config?.args,
-      executablePath: profile.config?.executablePath,
-      debugPort: profile.config?.debugPort,
-      proxy: profile.config?.proxy,
-      os: profile.config?.os,
-      geoip: profile.config?.geoip,
-    };
+      // Clean up old entry if it exists but is disposed
+      if (recheck) {
+        this.entries.delete(profile.name);
+      }
 
-    const manager = new UnifiedBrowserManager(config);
-    await manager.launch();
+      logger.info(`[BrowserPool] Creating new browser for profile "${profile.name}"`);
 
-    const browser = manager.getBrowser() as PuppeteerBrowser | null;
+      const config: UnifiedBrowserConfig = {
+        // Preserve profile-specific settings
+        driver: profile.config?.driver ?? 'chrome',
+        headless: profile.config?.headless,
+        args: profile.config?.args,
+        executablePath: profile.config?.executablePath,
+        debugPort: profile.config?.debugPort,
+        proxy: profile.config?.proxy,
+        os: profile.config?.os,
+        geoip: profile.config?.geoip,
+      };
 
-    const entry: PoolEntry = {
-      profile: profile.name,
-      manager,
-      browser,
-      pages: [],
-      lastAccess: Date.now(),
-      inUse: true,
-      disposed: false,
-      profileConfig: profile,
-    };
+      const manager = new UnifiedBrowserManager(config);
+      await manager.launch();
 
-    this.entries.set(profile.name, entry);
-    logger.debug(`[BrowserPool] Browser acquired for profile "${profile.name}"`);
+      const browser = manager.getBrowser() as PuppeteerBrowser | null;
+      if (!browser) {
+        // Do not store a browser-less entry in the pool — every later
+        // createTab/closeTab would fail on it.
+        await manager.close().catch((error) => {
+          logger.warn(
+            `[BrowserPool] Failed to clean up failed launch for profile "${profile.name}": ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+        throw new Error(
+          `Failed to launch browser for profile "${profile.name}": no browser instance`,
+        );
+      }
 
-    return manager;
+      const entry: PoolEntry = {
+        profile: profile.name,
+        manager,
+        browser,
+        pages: [],
+        lastAccess: Date.now(),
+        inUse: true,
+        disposed: false,
+        profileConfig: profile,
+      };
+
+      this.entries.set(profile.name, entry);
+      logger.debug(`[BrowserPool] Browser acquired for profile "${profile.name}"`);
+
+      return manager;
+    })();
+
+    this.pendingAcquires.set(profile.name, run);
+    try {
+      return await run;
+    } finally {
+      this.pendingAcquires.delete(profile.name);
+    }
   }
 
   /**

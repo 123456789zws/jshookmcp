@@ -6,8 +6,7 @@
  * to the representable range and set the FPSR QC flag (bit 27) on overflow.
  */
 
-/** Number of bytes per lane for an element-size field (0=1,1=2,2=4,3=8). */
-const laneBytes = (size: number): number => 1 << size;
+import { laneBytes, readLaneSigned } from './simd-utils';
 
 /** Mask for the low `bytes*8` bits. */
 const widthMask = (bytes: number): bigint => (1n << BigInt(bytes * 8)) - 1n;
@@ -16,30 +15,6 @@ const widthMask = (bytes: number): bigint => (1n << BigInt(bytes * 8)) - 1n;
 export interface SaturatingContext {
   /** Set FPSR QC flag (bit 27) to indicate saturation occurred. */
   setQC(): void;
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ── Helper Functions ──
-// ══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Read a lane from a V register at the given size, sign-extended.
- */
-function readLaneSigned(v: Uint8Array, index: number, size: number): bigint {
-  const bytes = laneBytes(size);
-  const offset = index * bytes;
-  const dv = new DataView(v.buffer, v.byteOffset, 16);
-
-  switch (bytes) {
-    case 1:
-      return BigInt(dv.getInt8(offset));
-    case 2:
-      return BigInt(dv.getInt16(offset, true));
-    case 4:
-      return BigInt(dv.getInt32(offset, true));
-    default:
-      return dv.getBigInt64(offset, true);
-  }
 }
 
 /**

@@ -20,6 +20,8 @@ export interface BionicStubAddresses {
 }
 
 export interface BionicOptions {
+  /** Override the heap base for malloc/calloc/realloc (default 0x100000). */
+  heapBase?: number;
   files?: Map<string, Uint8Array>;
   onLog?: (priority: number, tag: string, message: string) => void;
   onStdout?: (text: string) => void;
@@ -35,6 +37,8 @@ export interface BionicOptions {
     arg4: bigint,
     arg5: bigint,
   ) => bigint | undefined;
+  /** Extra symbol→address mappings for dlsym resolution (e.g. VM handler addresses not in .dynsym). */
+  extraSymbols?: Map<string, number>;
 }
 
 export type BionicAllocator = (size: number) => number;

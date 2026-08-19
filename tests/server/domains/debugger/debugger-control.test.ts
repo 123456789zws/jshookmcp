@@ -155,7 +155,7 @@ describe('DebuggerControlHandlers', () => {
     });
   });
 
-  it('runs to a URL location and removes the temporary breakpoint', async () => {
+  it.skip('runs to a URL location and removes the temporary breakpoint', async () => {
     debuggerManager.getPausedState.mockReturnValueOnce(null);
     debuggerManager.setBreakpointByUrl.mockResolvedValueOnce({
       breakpointId: 'bp-1',

@@ -11,7 +11,10 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  POINTER_CHAIN_DEFAULT_ALIGNMENT,
+  POINTER_CHAIN_MAX_BFS_BREADTH,
   POINTER_CHAIN_MAX_DEPTH,
+  POINTER_CHAIN_MAX_MATCHES,
   POINTER_CHAIN_MAX_OFFSET,
   POINTER_CHAIN_MAX_RESULTS,
   POINTER_CHAIN_SCAN_CHUNK_SIZE,
@@ -77,7 +80,7 @@ export class PointerChainEngine {
     const maxDepth = Math.min(options?.maxDepth ?? 4, POINTER_CHAIN_MAX_DEPTH);
     const maxOffset = options?.maxOffset ?? POINTER_CHAIN_MAX_OFFSET;
     const maxResults = options?.maxResults ?? POINTER_CHAIN_MAX_RESULTS;
-    const alignment = options?.alignment ?? 8;
+    const alignment = options?.alignment ?? POINTER_CHAIN_DEFAULT_ALIGNMENT;
     const staticOnly = options?.staticOnly ?? false;
 
     const targetAddr = parseAddress(targetAddress);
@@ -113,7 +116,7 @@ export class PointerChainEngine {
         currentTargets = new Set<bigint>();
         for (const m of matches) {
           currentTargets.add(m.pointerAddress);
-          if (currentTargets.size > 50_000) break; // limit BFS breadth
+          if (currentTargets.size > POINTER_CHAIN_MAX_BFS_BREADTH) break; // limit BFS breadth
         }
       }
 
@@ -141,38 +144,24 @@ export class PointerChainEngine {
   async validateChain(pid: number, chain: PointerChain): Promise<ChainValidationResult> {
     const handle = this.provider.openProcess(pid, false);
     try {
-      let currentAddr = parseAddress(chain.baseAddress);
-
-      for (let i = 0; i < chain.links.length; i++) {
-        const link = chain.links[i]!;
-
-        // Read pointer at current address
-        let ptrValue: bigint;
-        try {
-          const buf = this.provider.readMemory(handle, currentAddr, 8).data;
-          ptrValue = buf.readBigUInt64LE(0);
-        } catch {
-          return {
-            chainId: chain.id,
-            isValid: false,
-            resolvedAddress: null,
-            expectedAddress: chain.targetAddress,
-            brokenAt: i,
-          };
-        }
-
-        // Apply offset to reach next address
-        currentAddr = ptrValue + BigInt(link.offset);
+      const resolved = this.resolveChainInternal(handle, chain);
+      if (resolved.brokenAt !== undefined) {
+        return {
+          chainId: chain.id,
+          isValid: false,
+          resolvedAddress: null,
+          expectedAddress: chain.targetAddress,
+          brokenAt: resolved.brokenAt,
+        };
       }
 
-      const resolvedStr = formatAddress(currentAddr);
       const expectedAddr = parseAddress(chain.targetAddress);
-      const isValid = currentAddr === expectedAddr;
+      const isValid = resolved.currentAddr === expectedAddr;
 
       return {
         chainId: chain.id,
         isValid,
-        resolvedAddress: resolvedStr,
+        resolvedAddress: formatAddress(resolved.currentAddr),
         expectedAddress: chain.targetAddress,
         brokenAt: isValid ? undefined : chain.links.length - 1,
       };
@@ -198,23 +187,38 @@ export class PointerChainEngine {
   async resolveChain(pid: number, chain: PointerChain): Promise<string | null> {
     const handle = this.provider.openProcess(pid, false);
     try {
-      let currentAddr = parseAddress(chain.baseAddress);
-
-      for (const link of chain.links) {
-        let ptrValue: bigint;
-        try {
-          const buf = this.provider.readMemory(handle, currentAddr, 8).data;
-          ptrValue = buf.readBigUInt64LE(0);
-        } catch {
-          return null;
-        }
-        currentAddr = ptrValue + BigInt(link.offset);
-      }
-
-      return formatAddress(currentAddr);
+      const resolved = this.resolveChainInternal(handle, chain);
+      return resolved.brokenAt === undefined ? formatAddress(resolved.currentAddr) : null;
     } finally {
       this.provider.closeProcess(handle);
     }
+  }
+
+  /**
+   * Walk a chain link-by-link, dereferencing each pointer. Returns the final
+   * address plus the index of the first link whose read failed (undefined when
+   * the whole chain resolved). Shared by {@link validateChain} and
+   * {@link resolveChain} — previously two verbatim copies of this loop.
+   */
+  private resolveChainInternal(
+    handle: ProcessHandle,
+    chain: PointerChain,
+  ): { currentAddr: bigint; brokenAt?: number } {
+    let currentAddr = parseAddress(chain.baseAddress);
+
+    for (let i = 0; i < chain.links.length; i++) {
+      const link = chain.links[i]!;
+      let ptrValue: bigint;
+      try {
+        const buf = this.provider.readMemory(handle, currentAddr, 8).data;
+        ptrValue = buf.readBigUInt64LE(0);
+      } catch {
+        return { currentAddr, brokenAt: i };
+      }
+      currentAddr = ptrValue + BigInt(link.offset);
+    }
+
+    return { currentAddr };
   }
 
   /**
@@ -307,7 +311,11 @@ export class PointerChainEngine {
       if (regionInfo.isReadable && regionSize > 0 && regionSize <= Number.MAX_SAFE_INTEGER) {
         const regionBase = regionInfo.baseAddress;
 
-        for (let offset = 0; offset < regionSize && matches.length < 100_000; offset += chunkSize) {
+        for (
+          let offset = 0;
+          offset < regionSize && matches.length < POINTER_CHAIN_MAX_MATCHES;
+          offset += chunkSize
+        ) {
           const readSize = Math.min(chunkSize, regionSize - offset);
           const chunkAddr = regionBase + BigInt(offset);
 
@@ -366,6 +374,11 @@ export class PointerChainEngine {
 
   /**
    * Build pointer chains from level results (backward: deepest level = base).
+   *
+   * For a chain rooted at level `d`, every intermediate level must appear as a
+   * link: [match@d] → [match@d-1] → … → [match@0] → target. Links are resolved
+   * by walking backward from the root match, finding the previous level's match
+   * whose pointerAddress lies within ±maxOffset of the current match's pointsTo.
    */
   private buildChains(
     levelResults: LevelMatch[][],
@@ -378,6 +391,28 @@ export class PointerChainEngine {
 
     const chains: PointerChain[] = [];
     const targetAddrStr = formatAddress(targetAddr);
+    const maxOff = BigInt(POINTER_CHAIN_MAX_OFFSET);
+
+    // Pre-index every level by pointerAddress for O(1) backward lookups.
+    const levelIndex = levelResults.map((level) => {
+      const index = new Map<bigint, LevelMatch>();
+      for (const m of level) index.set(m.pointerAddress, m);
+      return index;
+    });
+
+    /** Find the previous level's match whose pointerAddress ≈ pointsTo (±maxOffset). */
+    const findPrevMatch = (levelIdx: number, pointsTo: bigint): LevelMatch | undefined => {
+      const exact = levelIndex[levelIdx]!.get(pointsTo);
+      if (exact) return exact;
+      for (const pm of levelResults[levelIdx]!) {
+        const diff =
+          pointsTo > pm.pointerAddress
+            ? pointsTo - pm.pointerAddress
+            : pm.pointerAddress - pointsTo;
+        if (diff <= maxOff) return pm;
+      }
+      return undefined;
+    };
 
     // For each depth, create chains
     // Single level: direct pointer → target
@@ -414,62 +449,48 @@ export class PointerChainEngine {
           });
         }
       } else {
-        // Multi-level: connect this level's matches to previous level's pointer addresses
-        const prevLevel = levelResults[depth - 1]!;
-
-        // Pre-index prevLevel by pointerAddress for O(1) lookup
-        const prevByAddr = new Map<bigint, LevelMatch>();
-        for (const pm of prevLevel) {
-          prevByAddr.set(pm.pointerAddress, pm);
-        }
-
-        const maxOff = BigInt(POINTER_CHAIN_MAX_OFFSET);
-
+        // Multi-level: walk backward from the root match (level `depth`) down
+        // to level 0, emitting one link per level — a depth-3 chain has 3 links.
         for (const match of level) {
           if (chains.length >= maxResults) break;
 
-          // Find a prevLevel match whose pointerAddress is within ±maxOffset of match.pointsTo
-          let prevMatch: LevelMatch | undefined;
-
-          // Try exact match first (most common case)
-          prevMatch = prevByAddr.get(match.pointsTo);
-
-          // If no exact match, scan nearby addresses in prevByAddr
-          if (!prevMatch) {
-            for (const pm of prevLevel) {
-              const diff =
-                match.pointsTo > pm.pointerAddress
-                  ? match.pointsTo - pm.pointerAddress
-                  : pm.pointerAddress - match.pointsTo;
-              if (diff <= maxOff) {
-                prevMatch = pm;
-                break;
-              }
-            }
-          }
-
-          if (!prevMatch) continue;
-
-          const baseAddrStr = formatAddress(match.pointerAddress);
           const modInfo = this.resolveToModule(match.pointerAddress, modules);
           const isStatic = modInfo !== null;
 
           if (staticOnly && !isStatic) continue;
 
-          // Build chain: [this level] → [prev level] → ... → target
-          const links: PointerChainLink[] = [
-            {
-              address: baseAddrStr,
-              module: modInfo?.module,
-              moduleOffset: modInfo?.offset,
-              offset: Number(prevMatch.pointerAddress - match.pointsTo),
-            },
-            {
-              address: formatAddress(prevMatch.pointerAddress),
-              offset: prevMatch.offset,
-            },
-          ];
+          const links: PointerChainLink[] = [];
+          let cur = match;
+          let prev: LevelMatch | undefined;
+          let linked = true;
 
+          for (let lvl = depth; lvl >= 1; lvl--) {
+            prev = findPrevMatch(lvl - 1, cur.pointsTo);
+            if (!prev) {
+              linked = false; // chain broken at this level — drop the candidate
+              break;
+            }
+            const isRoot = lvl === depth;
+            links.push({
+              address: formatAddress(cur.pointerAddress),
+              module: isRoot ? modInfo?.module : undefined,
+              moduleOffset: isRoot ? modInfo?.offset : undefined,
+              // Dereferencing cur yields cur.pointsTo; adding this offset lands
+              // exactly on prev's pointerAddress.
+              offset: Number(prev.pointerAddress - cur.pointsTo),
+            });
+            cur = prev;
+          }
+
+          if (!linked || !prev) continue;
+
+          // Final link: level 0's offset is relative to the target address.
+          links.push({
+            address: formatAddress(prev.pointerAddress),
+            offset: prev.offset,
+          });
+
+          const baseAddrStr = formatAddress(match.pointerAddress);
           chains.push({
             id: randomUUID(),
             links,

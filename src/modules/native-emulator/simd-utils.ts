@@ -28,6 +28,93 @@ export interface SimdContext {
   gprReadSp(index: number): bigint;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  Shared NEON lane helpers — single source of truth for readLanes, packLanes,
+//  and readLaneSigned.  Previously copy-pasted across simd-neon.ts,
+//  simd-neon-widening.ts, and simd-neon-saturating.ts.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Number of bytes per lane for an element-size field (0=1,1=2,2=4,3=8). */
+export const laneBytes = (size: number): number => 1 << size;
+
+/** Read a V register as an array of unsigned BigInt lanes at the given size/width. */
+export function readLanes(v: Uint8Array, size: number, q: number): bigint[] {
+  const bytes = laneBytes(size);
+  const active = q === 1 ? 16 : 8;
+  const count = active / bytes;
+  const dv = new DataView(v.buffer, v.byteOffset, 16);
+  const out: bigint[] = [];
+  for (let i = 0; i < count; i++) {
+    const off = i * bytes;
+    switch (bytes) {
+      case 1:
+        out.push(BigInt(dv.getUint8(off)));
+        break;
+      case 2:
+        out.push(BigInt(dv.getUint16(off, true)));
+        break;
+      case 4:
+        out.push(BigInt(dv.getUint32(off, true)));
+        break;
+      default:
+        out.push(dv.getBigUint64(off, true));
+        break;
+    }
+  }
+  return out;
+}
+
+/** Pack unsigned BigInt lanes back into a fresh 16-byte V register. */
+export function packLanes(lanes: bigint[], size: number): Uint8Array<ArrayBuffer> {
+  const bytes = laneBytes(size);
+  const out = new Uint8Array(16);
+  const dv = new DataView(out.buffer);
+  for (let i = 0; i < lanes.length; i++) {
+    const off = i * bytes;
+    if (off + bytes > 16) break;
+    const v = lanes[i] ?? 0n;
+    switch (bytes) {
+      case 1:
+        dv.setUint8(off, Number(v & 0xffn));
+        break;
+      case 2:
+        dv.setUint16(off, Number(v & 0xffffn), true);
+        break;
+      case 4:
+        dv.setUint32(off, Number(v & 0xffff_ffffn), true);
+        break;
+      default:
+        dv.setBigUint64(off, v & 0xffff_ffff_ffff_ffffn, true);
+        break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Read a single lane from a V register at the given size, sign-extended.
+ */
+export function readLaneSigned(v: Uint8Array, index: number, size: number): bigint {
+  const bytes = laneBytes(size);
+  const offset = index * bytes;
+  const dv = new DataView(v.buffer, v.byteOffset, 16);
+
+  switch (bytes) {
+    case 1:
+      return BigInt(dv.getInt8(offset));
+    case 2:
+      return BigInt(dv.getInt16(offset, true));
+    case 4:
+      return BigInt(dv.getInt32(offset, true));
+    default:
+      return dv.getBigInt64(offset, true);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Sign-extension helpers
+// ══════════════════════════════════════════════════════════════════════════════
+
 /** Sign-extend a 9-bit immediate (load/store unscaled/pre/post-index offset). */
 export const signExtend9 = (v: number): number => (v & 0x100 ? v - 0x200 : v);
 

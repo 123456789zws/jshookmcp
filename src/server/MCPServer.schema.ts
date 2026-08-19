@@ -39,9 +39,18 @@ function jsonSchemaToZod(prop: Record<string, unknown>): z.ZodTypeAny {
 
   // Handle anyOf / oneOf for union types (e.g., string | array fallback)
   if (prop.anyOf !== undefined || prop.oneOf !== undefined) {
-    const variants = ((prop.anyOf ?? prop.oneOf) as Array<Record<string, unknown>>).map((v) =>
-      jsonSchemaToZod(v),
-    );
+    const rawVariants = (prop.anyOf ?? prop.oneOf) as unknown;
+    const variantList = Array.isArray(rawVariants) ? rawVariants : [];
+    if (variantList.length === 0) {
+      // z.union([]) crashes with an unhelpful internal error — fail loudly with
+      // a schema-level message instead so misconfigured tool definitions are
+      // diagnosable at registration time.
+      const kind = prop.anyOf !== undefined ? 'anyOf' : 'oneOf';
+      throw new Error(
+        `Invalid JSON schema: "${kind}" must contain at least one variant, got an empty array`,
+      );
+    }
+    const variants = (variantList as Array<Record<string, unknown>>).map((v) => jsonSchemaToZod(v));
     const zodType = z.union([variants[0], ...variants.slice(1)] as [
       z.ZodTypeAny,
       ...z.ZodTypeAny[],

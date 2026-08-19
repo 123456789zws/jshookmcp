@@ -8,6 +8,7 @@ import type {
   MissingAPI,
 } from '@internal-types/index';
 import { logger } from '@utils/logger';
+import { getConfig } from '@utils/config';
 import { chromeEnvironmentTemplate } from '@modules/emulator/templates/chrome-env';
 import type { Browser } from 'rebrowser-puppeteer-core';
 import { generateEmulationCode, generateRecommendations } from '@modules/emulator/EmulatorCodeGen';
@@ -32,6 +33,20 @@ interface MemberExpressionNodeLike {
   property: unknown;
 }
 
+/** Browser globals whose bare use is recorded as an environment access. */
+const BROWSER_GLOBAL_NAMES = [
+  'window',
+  'document',
+  'navigator',
+  'location',
+  'screen',
+  'console',
+  'localStorage',
+  'sessionStorage',
+];
+/** Top-level globals treated as environment roots when building paths. */
+const ENV_ROOT_NAMES = ['window', 'document', 'navigator', 'location', 'screen'];
+
 export class EnvironmentEmulator {
   private browser?: Browser;
 
@@ -55,7 +70,7 @@ export class EnvironmentEmulator {
 
     try {
       logger.info(' ...');
-      const detectedVariables = this.detectEnvironmentVariables(code);
+      const { detected: detectedVariables, functionPaths } = this.detectEnvironmentVariables(code);
 
       let variableManifest: UnknownRecord = {};
       if (autoFetch && browserUrl) {
@@ -69,7 +84,11 @@ export class EnvironmentEmulator {
         variableManifest = this.buildManifestFromTemplate(detectedVariables, browserType);
       }
 
-      const missingAPIs = this.identifyMissingAPIs(detectedVariables, variableManifest);
+      const missingAPIs = this.identifyMissingAPIs(
+        detectedVariables,
+        variableManifest,
+        functionPaths,
+      );
 
       logger.info(' ...');
       const emulationCode = generateEmulationCode(variableManifest, targetRuntime, includeComments);
@@ -107,7 +126,10 @@ export class EnvironmentEmulator {
     }
   }
 
-  private detectEnvironmentVariables(code: string): DetectedEnvironmentVariables {
+  private detectEnvironmentVariables(code: string): {
+    detected: DetectedEnvironmentVariables;
+    functionPaths: Set<string>;
+  } {
     const detected: DetectedEnvironmentVariables = {
       window: [],
       document: [],
@@ -118,6 +140,10 @@ export class EnvironmentEmulator {
     };
 
     const accessedPaths = new Set<string>();
+    // Paths that are actually invoked (window.fetch()) — detected paths are
+    // bare `window.fetch` strings, so the old `path.includes('()')` check in
+    // identifyMissingAPIs could never match.
+    const functionPaths = new Set<string>();
 
     try {
       const ast = parser.parse(code, {
@@ -130,23 +156,15 @@ export class EnvironmentEmulator {
           const fullPath = this.getMemberExpressionPath(path.node);
           if (fullPath) {
             accessedPaths.add(fullPath);
+            if (path.parentPath?.isCallExpression() && path.parentPath.node.callee === path.node) {
+              functionPaths.add(fullPath);
+            }
           }
         },
 
         Identifier: (path) => {
           const name = path.node.name;
-          if (
-            [
-              'window',
-              'document',
-              'navigator',
-              'location',
-              'screen',
-              'console',
-              'localStorage',
-              'sessionStorage',
-            ].includes(name)
-          ) {
+          if (BROWSER_GLOBAL_NAMES.includes(name)) {
             if (path.scope.hasBinding(name)) {
               return;
             }
@@ -179,7 +197,7 @@ export class EnvironmentEmulator {
       this.detectWithRegex(code, detected);
     }
 
-    return detected;
+    return { detected, functionPaths };
   }
 
   private getMemberExpressionPath(node: unknown): string | null {
@@ -202,11 +220,7 @@ export class EnvironmentEmulator {
       }
     }
 
-    if (
-      parts.length > 0 &&
-      parts[0] &&
-      ['window', 'document', 'navigator', 'location', 'screen'].includes(parts[0])
-    ) {
+    if (parts.length > 0 && parts[0] && ENV_ROOT_NAMES.includes(parts[0])) {
       return parts.join('.');
     }
 
@@ -310,10 +324,9 @@ export class EnvironmentEmulator {
   }
 
   private async resolveExecutablePath(): Promise<string | undefined> {
-    const configuredPath =
-      process.env.PUPPETEER_EXECUTABLE_PATH?.trim() ||
-      process.env.CHROME_PATH?.trim() ||
-      process.env.BROWSER_EXECUTABLE_PATH?.trim();
+    // Reuse the config-level env merge (PUPPETEER_EXECUTABLE_PATH /
+    // CHROME_PATH / BROWSER_EXECUTABLE_PATH) instead of re-implementing it.
+    const configuredPath = getConfig().puppeteer.executablePath;
 
     if (configuredPath) {
       if (existsSync(configuredPath)) {
@@ -339,6 +352,7 @@ export class EnvironmentEmulator {
   private identifyMissingAPIs(
     detected: DetectedEnvironmentVariables,
     manifest: UnknownRecord,
+    functionPaths: ReadonlySet<string> = new Set(),
   ): MissingAPI[] {
     const missing: MissingAPI[] = [];
 
@@ -353,8 +367,11 @@ export class EnvironmentEmulator {
 
     for (const path of allPaths) {
       if (!(path in manifest) || manifest[path] === undefined) {
+        // Detected paths are bare `window.fetch` strings (no parens) — the
+        // old `path.includes('()')` could never match. Use the invocation
+        // set collected during AST analysis instead.
         let type: 'function' | 'object' | 'property' = 'property';
-        if (path.includes('()')) {
+        if (functionPaths.has(path)) {
           type = 'function';
         } else if (path.endsWith('Element') || path.endsWith('List')) {
           type = 'object';

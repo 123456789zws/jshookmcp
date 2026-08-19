@@ -9,6 +9,7 @@ import { INSTALLED_EXTENSION_METADATA_FILENAME } from '@server/extensions/types'
 import {
   EXTENSION_GIT_CHECKOUT_TIMEOUT_MS,
   EXTENSION_GIT_CLONE_TIMEOUT_MS,
+  EXTENSION_INSTALL_TIMEOUT_MS,
   type RegistryEntry,
   RegistryFetchError,
   execFileAsync,
@@ -200,7 +201,7 @@ export class ExtensionManagementHandlers {
             : ['install', '--ignore-scripts'];
         await execPackageManager(packageManager, installArgs, {
           cwd: projectDir,
-          timeout: Math.max(EXTENSION_GIT_CLONE_TIMEOUT_MS, 120_000),
+          timeout: Math.max(EXTENSION_GIT_CLONE_TIMEOUT_MS, EXTENSION_INSTALL_TIMEOUT_MS),
         });
 
         const buildArgs =
@@ -209,7 +210,7 @@ export class ExtensionManagementHandlers {
             : ['run', 'build', '--if-present'];
         await execPackageManager(packageManager, buildArgs, {
           cwd: projectDir,
-          timeout: Math.max(EXTENSION_GIT_CLONE_TIMEOUT_MS, 120_000),
+          timeout: Math.max(EXTENSION_GIT_CLONE_TIMEOUT_MS, EXTENSION_INSTALL_TIMEOUT_MS),
         });
       }
 

@@ -168,4 +168,48 @@ describe('constants env parsing', () => {
       (await loadConstants({ CACHE_LOW_HIT_RATE_THRESHOLD: 'abc' })).CACHE_LOW_HIT_RATE_THRESHOLD,
     ).toBe(0.3);
   });
+
+  it('parses PageController operation/evaluate timeout envs with 30s fallback', async () => {
+    expect(
+      (
+        await loadConstants({
+          PAGE_OPERATION_TIMEOUT_MS: undefined,
+          PAGE_EVALUATE_TIMEOUT_MS: undefined,
+        })
+      ).PAGE_OPERATION_TIMEOUT_MS,
+    ).toBe(30_000);
+    expect(
+      (
+        await loadConstants({
+          PAGE_OPERATION_TIMEOUT_MS: undefined,
+          PAGE_EVALUATE_TIMEOUT_MS: undefined,
+        })
+      ).PAGE_EVALUATE_TIMEOUT_MS,
+    ).toBe(30_000);
+    expect(
+      (await loadConstants({ PAGE_OPERATION_TIMEOUT_MS: '15000', PAGE_EVALUATE_TIMEOUT_MS: 'abc' }))
+        .PAGE_OPERATION_TIMEOUT_MS,
+    ).toBe(15_000);
+    // Invalid values fall back to the 30s default
+    expect(
+      (await loadConstants({ PAGE_OPERATION_TIMEOUT_MS: 'abc', PAGE_EVALUATE_TIMEOUT_MS: '45000' }))
+        .PAGE_EVALUATE_TIMEOUT_MS,
+    ).toBe(45_000);
+  });
+
+  it('parses MEMORY_SCAN_REGION_GUARD_BYTES env with 1 GiB fallback', async () => {
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: undefined }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(1024 * 1024 * 1024);
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: '536870912' }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(536870912);
+    // Invalid values fall back to the 1 GiB default
+    expect(
+      (await loadConstants({ MEMORY_SCAN_REGION_GUARD_BYTES: 'abc' }))
+        .MEMORY_SCAN_REGION_GUARD_BYTES,
+    ).toBe(1024 * 1024 * 1024);
+  });
 });

@@ -26,6 +26,7 @@ import {
 import { GRAPHQL_MAX_SCHEMA_CHARS } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
 import type { BrowserFetchResult } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
 import { argString, argObject, argBool, argArray } from '@server/domains/shared/parse-args';
+import { GRAPHQL_REPLAY_FETCH_TIMEOUT_MS } from '@src/constants/analysis';
 import { evaluateWithTimeout } from '@modules/collector/PageController';
 
 interface PersistedQuery {
@@ -43,6 +44,85 @@ interface ReplayMeta {
   mode: 'single' | 'batch';
   operationName: string | null;
   batchSize: number;
+}
+
+interface ReplayFetchInput {
+  endpoint: string;
+  body: string;
+  headers: Record<string, string>;
+  timeoutMs: number;
+}
+
+/**
+ * Self-contained GraphQL replay fetch pipeline: fetch POST with abort
+ * timeout, JSON parse, raw-text retention for non-JSON replies, and header
+ * collection. Kept as a function-body string so it survives Playwright's
+ * evaluate serialization — the same source runs in-page (browser path) and
+ * in-process with the global fetch (Node path), so both paths share one
+ * implementation.
+ */
+const REPLAY_FETCH_PIPELINE = `async (input) => {
+  const requestHeaders = { 'content-type': 'application/json', ...input.headers };
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), input.timeoutMs);
+    let responseText;
+    let response;
+    try {
+      response = await fetch(input.endpoint, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: input.body,
+        signal: ac.signal,
+      });
+      responseText = await response.text();
+    } finally {
+      clearTimeout(t);
+    }
+
+    let responseJson = null;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {
+      responseJson = null;
+    }
+
+    // Keep the raw text when the body was not JSON — it is the only
+    // diagnostic for non-JSON replies (HTML error pages, plain-text errors).
+    const rawText = responseJson === null ? responseText : '';
+    responseText = '';
+
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      responseText: rawText,
+      responseJson,
+      responseHeaders,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      statusText: 'FETCH_ERROR',
+      responseText: '',
+      responseJson: null,
+      responseHeaders: {},
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}`;
+
+/** Instantiate the replay fetch pipeline as a callable. */
+function createReplayFetchFn(): (input: ReplayFetchInput) => Promise<BrowserFetchResult> {
+  return new Function(`return ${REPLAY_FETCH_PIPELINE}`)() as (
+    input: ReplayFetchInput,
+  ) => Promise<BrowserFetchResult>;
 }
 
 function normalizePersistedQuery(raw: Record<string, unknown> | undefined): PersistedQuery | null {
@@ -208,64 +288,29 @@ export class ReplayHandlers {
     headers: Record<string, string>,
     meta: ReplayMeta,
   ) {
-    const requestHeaders: Record<string, string> = {
-      'content-type': 'application/json',
-      ...headers,
-    };
-
-    let response: Response;
-    let responseText: string;
-    try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 10_000);
-      try {
-        response = await fetch(endpoint, {
-          method: 'POST',
-          headers: requestHeaders,
-          body,
-          signal: ac.signal,
-        });
-        responseText = await response.text();
-      } finally {
-        clearTimeout(t);
-      }
-    } catch (error) {
-      return toResponse({
-        success: false,
-        endpoint,
-        status: 0,
-        statusText: 'FETCH_ERROR',
-        mode: meta.mode,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
+    const result = await createReplayFetchFn()({
+      endpoint,
+      body,
+      headers,
+      timeoutMs: GRAPHQL_REPLAY_FETCH_TIMEOUT_MS,
     });
 
-    let responseJson: unknown = null;
-    try {
-      responseJson = JSON.parse(responseText);
-    } catch {
-      responseJson = null;
-    }
-
-    // Release raw text after parsing
-    responseText = '';
-
-    return toResponse(
-      buildReplayPayloadFromJson(
-        responseJson,
+    const payload: Record<string, unknown> = {
+      ...buildReplayPayloadFromJson(
+        result.responseJson ?? null,
         endpoint,
-        response.ok,
-        response.status,
-        response.statusText,
-        responseHeaders,
+        result.ok,
+        result.status,
+        result.statusText,
+        result.responseHeaders ?? {},
         meta,
+        result.responseText ?? '',
       ),
-    );
+    };
+    if (result.error) {
+      payload.error = result.error;
+    }
+    return toResponse(payload);
   }
 
   private async replayViaBrowser(
@@ -275,71 +320,12 @@ export class ReplayHandlers {
     headers: Record<string, string>,
     meta: ReplayMeta,
   ) {
-    const browserResult = (await evaluateWithTimeout(
-      page,
-      async (input: {
-        endpoint: string;
-        body: string;
-        headers: Record<string, string>;
-      }): Promise<BrowserFetchResult> => {
-        const requestHeaders: Record<string, string> = {
-          'content-type': 'application/json',
-          ...input.headers,
-        };
-
-        try {
-          const ac = new AbortController();
-          const t = setTimeout(() => ac.abort(), 10000);
-          let responseText: string;
-          let response: Response;
-          try {
-            response = await fetch(input.endpoint, {
-              method: 'POST',
-              headers: requestHeaders,
-              body: input.body,
-              signal: ac.signal,
-            });
-            responseText = await response.text();
-          } finally {
-            clearTimeout(t);
-          }
-
-          let responseJson: unknown = null;
-          try {
-            responseJson = JSON.parse(responseText);
-          } catch {
-            responseJson = null;
-          }
-
-          const rawText = responseJson === null ? responseText : '';
-          responseText = '';
-
-          const responseHeaders: Record<string, string> = {};
-          response.headers.forEach((value, key) => {
-            responseHeaders[key] = value;
-          });
-
-          return {
-            ok: response.ok,
-            status: response.status,
-            statusText: response.statusText,
-            responseText: rawText,
-            responseJson,
-            responseHeaders,
-          };
-        } catch (error) {
-          return {
-            ok: false,
-            status: 0,
-            statusText: 'FETCH_ERROR',
-            responseText: '',
-            responseJson: null,
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
-      },
-      { endpoint, body, headers },
-    )) as BrowserFetchResult;
+    const browserResult = (await evaluateWithTimeout(page, createReplayFetchFn(), {
+      endpoint,
+      body,
+      headers,
+      timeoutMs: GRAPHQL_REPLAY_FETCH_TIMEOUT_MS,
+    })) as BrowserFetchResult;
 
     const payload: Record<string, unknown> = {
       success: browserResult.ok,
@@ -406,6 +392,7 @@ function buildReplayPayloadFromJson(
   statusText: string,
   responseHeaders: Record<string, string>,
   meta: ReplayMeta,
+  rawText?: string,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     success: ok,
@@ -440,6 +427,17 @@ function buildReplayPayloadFromJson(
         payload.hasGraphqlErrors = hasGraphqlErrors;
       }
     }
+  } else if (rawText) {
+    // Non-JSON body: surface the raw text instead of dropping it (regression:
+    // the Node path cleared responseText after a failed parse, losing the only
+    // diagnostic content for non-JSON replies).
+    payload.responseFormat = 'text';
+    payload.responseLength = rawText.length;
+    payload.responsePreview =
+      rawText.length > GRAPHQL_MAX_SCHEMA_CHARS
+        ? rawText.slice(0, GRAPHQL_MAX_SCHEMA_CHARS)
+        : rawText;
+    payload.responseTruncated = rawText.length > GRAPHQL_MAX_SCHEMA_CHARS;
   }
 
   return payload;

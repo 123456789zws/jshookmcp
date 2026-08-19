@@ -9,8 +9,10 @@ import {
   MEMORY_SCAN_MAX_BUFFER_BYTES,
   MEMORY_SCAN_MAX_REGIONS,
   MEMORY_SCAN_MAX_RESULTS,
+  MEMORY_SCAN_REGION_GUARD_BYTES,
   MEMORY_SCAN_REGION_MAX_BYTES,
   MEMORY_SCAN_TIMEOUT_MS,
+  USERSPACE_MAX_ADDRESS,
 } from '@src/constants';
 import type { PatternType } from '@modules/process/memory/types';
 import { buildPatternBytesAndMask } from './scanner.patterns';
@@ -84,7 +86,7 @@ public class MemoryScanner {
                      (info.Protect & PAGE_EXECUTE_READ) != 0 ||
                      (info.Protect & PAGE_EXECUTE_READWRITE) != 0);
 
-                if (isReadable && info.RegionSize.ToInt64() > 0 && info.RegionSize.ToInt64() < 1073741824) {
+                if (isReadable && info.RegionSize.ToInt64() > 0 && info.RegionSize.ToInt64() < ${MEMORY_SCAN_REGION_GUARD_BYTES}) {
                     long regionSize = info.RegionSize.ToInt64();
                     if (regionSize > ${MEMORY_SCAN_REGION_MAX_BYTES}) regionSize = ${MEMORY_SCAN_REGION_MAX_BYTES};
                     byte[] buffer = new byte[(int)regionSize];
@@ -109,7 +111,7 @@ public class MemoryScanner {
                 long nextAddr = baseAddr + regionSizeRaw;
                 if (nextAddr <= baseAddr) break;
                 addr = new IntPtr(nextAddr);
-                if (addr.ToInt64() >= 0x7FFFFFFF0000) break;
+                if (addr.ToInt64() >= 0x${USERSPACE_MAX_ADDRESS.toString(16)}) break;
             }
 
             return results;

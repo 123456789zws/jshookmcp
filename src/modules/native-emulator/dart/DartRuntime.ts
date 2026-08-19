@@ -159,14 +159,14 @@ export class DartRuntime {
 
   /**
    * Read a Dart-specific register.
-   * Returns the runtime-managed value for THR/PP/NULL/HEAP_BASE.
+   * Returns the live CPU register value for THR/PP/NULL/HEAP_BASE. The
+   * JS-side mirrors (this.dartThread & co.) are initialisation state only —
+   * once guest code executes, the CPU register file is the source of truth
+   * and the mirrors would go stale.
    */
   readDartRegister(reg: number): bigint | undefined {
-    if (reg === DART_THR) return this.dartThread;
-    if (reg === DART_PP) return this.dartObjectPool;
-    if (reg === DART_NULL) return this.dartNullObject;
-    if (reg === DART_HEAP_BASE) return this.dartHeapBase;
-    return undefined;
+    if (!this.isDartRegister(reg)) return undefined;
+    return this.cpu.readGpr(reg);
   }
 
   /**

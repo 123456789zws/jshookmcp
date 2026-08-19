@@ -6,8 +6,17 @@ import { config as dotenvConfig } from 'dotenv';
 import { z } from 'zod';
 import { DEFAULT_SEARCH_CONFIG } from '@src/config/search-defaults';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '@src/constants/search-model';
+import {
+  MCP_BROWSER_FLEET_LEASE_TTL_MS,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+  MCP_BROWSER_FLEET_VIRTUAL_NODES,
+  MCP_TRANSPORT,
+  OFFLOADER_DETAIL_THRESHOLD_BYTES,
+  OFFLOADER_FILE_THRESHOLD_BYTES,
+} from '@src/constants/server';
 import { logger } from './logger';
 import { getPackageVersion } from './packageVersion';
+import { isRecord } from './type-guards';
 import type {
   BrowserFleetWorkerConfig,
   Config,
@@ -79,9 +88,9 @@ const CONFIG_DEFAULTS = {
     browserSessionReservedPendingPerSession: 1,
     browserSessionCostEwmaAlpha: 0.2,
     browserFleetWorkerId: 'local',
-    browserFleetVirtualNodes: 128,
-    browserFleetLeaseTtlMs: 600_000,
-    browserFleetMaxLocalLeases: 4096,
+    browserFleetVirtualNodes: MCP_BROWSER_FLEET_VIRTUAL_NODES,
+    browserFleetLeaseTtlMs: MCP_BROWSER_FLEET_LEASE_TTL_MS,
+    browserFleetMaxLocalLeases: MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
   },
   cache: {
     enabled: false,
@@ -100,6 +109,12 @@ const CONFIG_DEFAULTS = {
     maxConcurrentAnalysis: 3,
     maxCodeSizeMB: 10,
   },
+  offloader: {
+    detailThreshold: OFFLOADER_DETAIL_THRESHOLD_BYTES,
+    fileThreshold: OFFLOADER_FILE_THRESHOLD_BYTES,
+    outputDir: 'artifacts/offloaded',
+    excludeTools: [],
+  },
   reverseEngineering: {
     transformWorkbench: {
       defaultPreviewBytes: 128,
@@ -108,6 +123,10 @@ const CONFIG_DEFAULTS = {
       maxInputBytes: 16 * 1024 * 1024,
       maxOutputBytes: 32 * 1024 * 1024,
       maxSteps: 32,
+    },
+    collector: {
+      defaultTimeoutMs: 30_000,
+      dynamicScriptWaitMs: 3_000,
     },
     reverseSession: {
       maxInlineTransformInputBytes: 16 * 1024 * 1024,
@@ -158,6 +177,12 @@ const CONFIG_DEFAULTS = {
       dexDumpTimeoutMs: 180_000,
       dexDumpMaxBufferBytes: 16 * 1024 * 1024,
       dexDumpFileLimit: 500,
+    },
+    jadx: {
+      decompileTimeoutMs: 1_800_000,
+      searchTimeoutMs: 600_000,
+      singleClassTimeoutMs: 120_000,
+      threadsCount: 4,
     },
     androidRuntime: {
       mapsMaxBytes: 4 * 1024 * 1024,
@@ -291,7 +316,21 @@ const ConfigSchema = z.object({
     z.number().min(1).max(500),
   ),
 
+  // Response offloading
+  OFFLOADER_DETAIL_THRESHOLD: envInt(CONFIG_DEFAULTS.offloader.detailThreshold).pipe(
+    z.number().min(1),
+  ),
+  OFFLOADER_FILE_THRESHOLD: envInt(CONFIG_DEFAULTS.offloader.fileThreshold).pipe(z.number().min(1)),
+  OFFLOADER_OUTPUT_DIR: z.string().optional().default(CONFIG_DEFAULTS.offloader.outputDir),
+  OFFLOADER_EXCLUDE_TOOLS: z.string().optional().default(''),
+
   // Reverse engineering runtime limits
+  COLLECTOR_DEFAULT_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.defaultTimeoutMs,
+  ).pipe(z.number().min(1)),
+  COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.dynamicScriptWaitMs,
+  ).pipe(z.number().min(1)),
   TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES: envInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.defaultPreviewBytes,
   ).pipe(z.number().min(1)),
@@ -426,6 +465,18 @@ const ConfigSchema = z.object({
   FRIDA_DEX_DUMP_FILE_LIMIT: envInt(CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpFileLimit).pipe(
     z.number().min(1),
   ),
+  JADX_DECOMPILE_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.jadx.decompileTimeoutMs,
+  ).pipe(z.number().min(1000)),
+  JADX_SEARCH_TIMEOUT_MS: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.searchTimeoutMs).pipe(
+    z.number().min(1000),
+  ),
+  JADX_SINGLE_CLASS_TIMEOUT_MS: envInt(
+    CONFIG_DEFAULTS.reverseEngineering.jadx.singleClassTimeoutMs,
+  ).pipe(z.number().min(1000)),
+  JADX_THREADS_COUNT: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.threadsCount).pipe(
+    z.number().min(1).max(64),
+  ),
   ANDROID_RUNTIME_MAPS_MAX_BYTES: envInt(
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsMaxBytes,
   ).pipe(z.number().min(1)),
@@ -433,10 +484,6 @@ const ConfigSchema = z.object({
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsModuleLimit,
   ).pipe(z.number().min(1)),
 });
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function parseJsonArrayEnv(key: string): unknown[] | undefined {
   const raw = process.env[key];
@@ -570,7 +617,7 @@ function cloneSearchConfig(search: SearchConfig): SearchConfig {
 
 function buildSearchConfig(): SearchConfig {
   const defaults = cloneSearchConfig(DEFAULT_SEARCH_CONFIG);
-  const httpTransport = process.env.MCP_TRANSPORT?.trim().toLowerCase() === 'http';
+  const httpTransport = MCP_TRANSPORT.trim().toLowerCase() === 'http';
 
   return {
     queryCategoryProfiles: parseSearchQueryCategoryProfiles() ?? defaults.queryCategoryProfiles,
@@ -602,6 +649,16 @@ function ratioEnv(value: unknown, fallback: number): number {
 
 function stringEnv(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
+}
+
+function parseCsvList(value: unknown): string[] {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return [];
+  }
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function coerceBooleanEnv(value: unknown, fallback: boolean): boolean {
@@ -887,6 +944,21 @@ function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEng
         defaults.frida.dexDumpFileLimit,
       ),
     },
+    jadx: {
+      decompileTimeoutMs: positiveIntegerEnv(
+        env.JADX_DECOMPILE_TIMEOUT_MS,
+        defaults.jadx.decompileTimeoutMs,
+      ),
+      searchTimeoutMs: positiveIntegerEnv(
+        env.JADX_SEARCH_TIMEOUT_MS,
+        defaults.jadx.searchTimeoutMs,
+      ),
+      singleClassTimeoutMs: positiveIntegerEnv(
+        env.JADX_SINGLE_CLASS_TIMEOUT_MS,
+        defaults.jadx.singleClassTimeoutMs,
+      ),
+      threadsCount: positiveIntegerEnv(env.JADX_THREADS_COUNT, defaults.jadx.threadsCount),
+    },
     androidRuntime: {
       mapsMaxBytes: positiveIntegerEnv(
         env.ANDROID_RUNTIME_MAPS_MAX_BYTES,
@@ -895,6 +967,16 @@ function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEng
       mapsModuleLimit: positiveIntegerEnv(
         env.ANDROID_RUNTIME_MAPS_MODULE_LIMIT,
         defaults.androidRuntime.mapsModuleLimit,
+      ),
+    },
+    collector: {
+      defaultTimeoutMs: positiveIntegerEnv(
+        env.COLLECTOR_DEFAULT_TIMEOUT_MS,
+        defaults.collector.defaultTimeoutMs,
+      ),
+      dynamicScriptWaitMs: positiveIntegerEnv(
+        env.COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS,
+        defaults.collector.dynamicScriptWaitMs,
       ),
     },
   };
@@ -1032,6 +1114,18 @@ export function getConfig(): Config {
         env.MAX_CODE_SIZE_MB,
         CONFIG_DEFAULTS.performance.maxCodeSizeMB,
       ),
+    },
+    offloader: {
+      detailThreshold: coerceIntegerEnv(
+        env.OFFLOADER_DETAIL_THRESHOLD,
+        CONFIG_DEFAULTS.offloader.detailThreshold,
+      ),
+      fileThreshold: coerceIntegerEnv(
+        env.OFFLOADER_FILE_THRESHOLD,
+        CONFIG_DEFAULTS.offloader.fileThreshold,
+      ),
+      outputDir: stringEnv(env.OFFLOADER_OUTPUT_DIR, CONFIG_DEFAULTS.offloader.outputDir),
+      excludeTools: parseCsvList(env.OFFLOADER_EXCLUDE_TOOLS),
     },
     reverseEngineering: buildReverseEngineeringConfig(env),
     search,

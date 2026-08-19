@@ -141,6 +141,19 @@ describe('workflows helpers coverage', () => {
       });
 
       expect(resolveInputValues(undefined, dataBus)).toEqual({});
+      // null/undefined sourceRefs from untyped config (e.g. parsed JSON) are
+      // skipped rather than coerced into the strings "null"/"undefined".
+      expect(
+        resolveInputFrom(
+          { good: 'step.token', nullRef: null as unknown as string, emptyRef: '' },
+          dataBus,
+        ),
+      ).toEqual({ good: 'abc' });
+      expect(resolveInputFrom({}, dataBus)).toEqual({});
+      expect(resolveInputValues({ nullKey: null, num: 5 } as never, dataBus)).toEqual({
+        nullKey: null,
+        num: 5,
+      });
       expect(
         resolveInputValues(
           {

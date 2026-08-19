@@ -34,7 +34,6 @@ export const CAPTCHA_SELECTORS = {
     '.verify-img',
     '.captcha-img',
     'img[src*="captcha"]',
-    'img[alt*=""]',
     'img[alt*="captcha"]',
   ],
   widget: [

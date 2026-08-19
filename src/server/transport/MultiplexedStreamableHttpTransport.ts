@@ -17,6 +17,7 @@ import {
   isJSONRPCResultResponse,
 } from '@modelcontextprotocol/sdk/types.js';
 import { logger } from '@utils/logger';
+import { HTTP_CAPACITY_RETRY_AFTER_MS } from '@src/constants';
 
 interface SessionRecord {
   sessionId: string;
@@ -179,7 +180,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     const maxSessions = this.options.maxSessions ?? Number.MAX_SAFE_INTEGER;
     if (this.getSessionAdmissionUsage() >= maxSessions) await this.evictExpiredSessions();
     if (this.getSessionAdmissionUsage() >= maxSessions) {
-      const retryAfterMs = this.options.capacityRetryAfterMs ?? 1_000;
+      const retryAfterMs = this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS;
       const admissionUsage = this.getSessionAdmissionUsage();
       res.writeHead(503, {
         'Content-Type': 'application/json',
@@ -229,14 +230,12 @@ export class MultiplexedStreamableHttpTransport implements Transport {
       try {
         await transport.handleRequest(req, res, parsedBody);
       } catch (error) {
-        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
         await transport.close().catch(() => undefined);
         throw error;
       }
 
       if (transport.sessionId) {
         if (transport.sessionId !== candidateSessionId) {
-          if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
           await transport.close().catch(() => undefined);
           throw new Error(
             `Inner HTTP transport changed its reserved session id from ` +
@@ -253,11 +252,16 @@ export class MultiplexedStreamableHttpTransport implements Transport {
           registered = true;
         }
       } else {
-        if (admissionClaimed) this.notifySessionClosed(candidateSessionId);
         await transport.close().catch(() => undefined);
       }
     } finally {
       this.pendingSessionAdmissions = Math.max(0, this.pendingSessionAdmissions - 1);
+      // Release the admission claim (fleet lease) on EVERY failure path —
+      // including createInnerTransport() throwing above, where the old code
+      // skipped the notification and leaked the lease.
+      if (!registered && admissionClaimed) {
+        this.notifySessionClosed(candidateSessionId);
+      }
       if (!registered && transport?.sessionId === candidateSessionId) {
         await transport.close().catch(() => undefined);
       }
@@ -440,7 +444,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
       Number.isFinite(details['retryAfterMs']) &&
       details['retryAfterMs'] >= 0
         ? details['retryAfterMs']
-        : (this.options.capacityRetryAfterMs ?? 1_000);
+        : (this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS);
     const errorCode =
       typeof details?.['code'] === 'string' ? details['code'] : 'MCP_SESSION_ADMISSION_FAILED';
     res.writeHead(503, {

@@ -142,4 +142,24 @@ describe('MCPServer.schema – buildZodShape', () => {
     expect(shape.weird!.safeParse('anything').success).toBe(true);
     expect(shape.weird!.safeParse(42).success).toBe(true);
   });
+
+  it('throws a descriptive error for empty anyOf instead of crashing inside zod', () => {
+    expect(() =>
+      buildZodShape({
+        properties: {
+          union: { anyOf: [] },
+        },
+      }),
+    ).toThrow(/anyOf.*at least one/i);
+  });
+
+  it('throws a descriptive error for empty oneOf instead of crashing inside zod', () => {
+    expect(() =>
+      buildZodShape({
+        properties: {
+          union: { oneOf: [] },
+        },
+      }),
+    ).toThrow(/oneOf.*at least one/i);
+  });
 });

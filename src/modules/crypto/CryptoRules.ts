@@ -370,7 +370,12 @@ export class CryptoRulesManager {
       }
 
       if (rules.libraries) {
-        rules.libraries.forEach((rule: CryptoLibraryRule) => this.addLibraryRule(rule));
+        rules.libraries.forEach((rule: CryptoLibraryRule) => {
+          this.addLibraryRule({
+            ...rule,
+            versionPattern: normalizeVersionPattern(rule.versionPattern),
+          });
+        });
       }
 
       if (rules.constants) {
@@ -385,7 +390,12 @@ export class CryptoRulesManager {
     return JSON.stringify(
       {
         keywords: this.getKeywordRules(),
-        libraries: this.getLibraryRules(),
+        libraries: this.getLibraryRules().map((rule) => ({
+          ...rule,
+          // RegExp does not survive JSON.stringify (it becomes {}); serialize
+          // it to its /source/flags form so the roundtrip keeps working.
+          versionPattern: rule.versionPattern ? rule.versionPattern.toString() : undefined,
+        })),
         constants: this.getConstantRules(),
         patterns: this.getPatternRules(),
         security: this.getSecurityRules(),
@@ -394,4 +404,23 @@ export class CryptoRulesManager {
       2,
     );
   }
+}
+
+/**
+ * Restore a RegExp from JSON: plain source strings ("a\\sb"), slash-delimited
+ * forms ("/a\\sb/gi"), or already-RegExp values pass through. Anything else
+ * (e.g. the {} that JSON.stringify(RegExp) produces) becomes undefined.
+ */
+function normalizeVersionPattern(pattern: RegExp | string | undefined): RegExp | undefined {
+  if (pattern === undefined || pattern instanceof RegExp) {
+    return pattern;
+  }
+  if (typeof pattern !== 'string') {
+    return undefined;
+  }
+  const slashForm = pattern.match(/^\/(.*)\/([a-z]*)$/);
+  if (slashForm?.[1]) {
+    return new RegExp(slashForm[1], slashForm[2]);
+  }
+  return new RegExp(pattern);
 }

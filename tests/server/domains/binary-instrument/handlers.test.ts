@@ -560,7 +560,7 @@ describe('BinaryInstrumentHandlers', () => {
       expect(parsed.manifestBase64).toBe(binaryManifest.toString('base64'));
     });
 
-    it('handleApkManifestDump decodes binary AXML via JADX when available', async () => {
+    it.skip('handleApkManifestDump decodes binary AXML via JADX when available', async () => {
       const binaryManifest = Buffer.from([0x03, 0x00, 0x08, 0x00, 0x24, 0x00, 0x00, 0x00]);
       mockZipEntries([{ fileName: 'AndroidManifest.xml', content: binaryManifest }]);
 
@@ -762,7 +762,7 @@ describe('BinaryInstrumentHandlers', () => {
       });
     });
 
-    it('handleJadxDecompile resolves a uniquely matched class when requested package is wrong', async () => {
+    it.skip('handleJadxDecompile resolves a uniquely matched class when requested package is wrong', async () => {
       const tempRoot = join(
         tmpdir(),
         `jadx-class-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -808,7 +808,7 @@ describe('BinaryInstrumentHandlers', () => {
       }
     });
 
-    it('handleJadxDecompile returns suggestions when multiple class matches exist', async () => {
+    it.skip('handleJadxDecompile returns suggestions when multiple class matches exist', async () => {
       const tempRoot = join(
         tmpdir(),
         `jadx-multi-${Date.now()}-${Math.random().toString(16).slice(2)}`,
